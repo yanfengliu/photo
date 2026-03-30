@@ -7,7 +7,12 @@
 - CLI argument support: `photo.exe path/to/image.jpg`
 - Dark theme UI, release build compiles and runs
 - Large images auto-downscaled to GPU texture limit before upload
-- 24 unit tests across three modules (decode, nav, viewer math), all passing
+- Console window hidden on Windows via `#![windows_subsystem = "windows"]`
+- Tab-based UI: Library tab (scrollable thumbnail grid) and Detail tab (GPU shader viewer)
+- Folder picker and file picker buttons load images into library
+- Thumbnails loaded asynchronously at 200px max dimension
+- Clicking a thumbnail opens it in Detail view; arrow key navigation works from library
+- 31 unit tests across three modules (decode, nav, viewer math), all passing
 
 ## Actions log
 1. Built initial project scaffold: Cargo.toml, WGSL shader, four source modules (main, viewer, decode, nav) — SUCCESS
@@ -19,8 +24,12 @@
 7. Created `.gitignore` for `/target`, binaries, `Cargo.lock`, `*.jpg` — SUCCESS
 8. Fixed crash on images exceeding GPU texture limit: query `device.limits().max_texture_dimension_2d` in `prepare()`, downscale with `image::imageops::resize(Triangle)` before GPU upload — SUCCESS
 9. Extracted `compute_image_rect` and `zoom_at_cursor` from viewer.rs into public standalone functions — SUCCESS
-10. Added 24 unit tests covering decode (PNG, BMP, SVG, invalid file, nonexistent file, file size, RGBA format), nav (scanning, natural sort, next/prev cycling, empty dir, case-insensitive extensions, start position), viewer math (fit-to-window, zoom scaling, pan offset, zoom-at-center, zoom-at-corner, zoom-preserves-cursor-point, zoom clamping) — SUCCESS
+10. Added 24 unit tests covering decode, nav, and viewer math — SUCCESS
 11. Added `tempfile` dev-dependency for filesystem tests — SUCCESS
+12. Added `#![windows_subsystem = "windows"]` to hide console window on Windows — SUCCESS
+13. Added Library/Detail tab UI: scrollable thumbnail grid, folder/file pickers, async thumbnail loading, click-to-open detail, dual navigation modes — SUCCESS
+14. Added `decode_thumbnail` function in decode.rs, made `is_image_file` public in nav.rs — SUCCESS
+15. Added 7 new tests (31 total): thumbnail decode tests and library UI tests — SUCCESS
 
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate (avoids type mismatches in `shader::Primitive` trait)
@@ -28,3 +37,6 @@
 - Downscale clone + resize happens once per oversized image; original full-res pixels kept in memory for potential future tiling
 - Math functions extracted as public standalone functions for testability without GPU or iced runtime
 - Used `1e-3` tolerance for f32 zoom math tests due to floating-point error in chained operations
+- Thumbnails decode full image then resize; optimization for large files deferred
+- Grid uses fixed 6 columns; tab highlighting uses Unicode bullet character
+- Two navigation modes: library-based (entering from library) and directory-based (CLI/drag-drop/Ctrl+O)

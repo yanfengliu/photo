@@ -53,11 +53,6 @@ fn decode_raster(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((rgba.into_raw(), w, h))
 }
 
-/// Visible for testing.
-pub fn decode_raster_raw(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
-    decode_raster(path)
-}
-
 fn decode_svg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
     let data = std::fs::read(path).map_err(|e| format!("Failed to read SVG: {e}"))?;
     let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default())
@@ -89,6 +84,31 @@ fn decode_svg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
     );
 
     Ok((pixmap.take(), w, h))
+}
+
+pub fn decode_thumbnail(path: &Path, max_dim: u32) -> Result<Arc<ImageData>, String> {
+    let full = decode_image(path)?;
+
+    if full.width <= max_dim && full.height <= max_dim {
+        return Ok(full);
+    }
+
+    let scale = max_dim as f32 / full.width.max(full.height) as f32;
+    let nw = ((full.width as f32 * scale) as u32).max(1);
+    let nh = ((full.height as f32 * scale) as u32).max(1);
+
+    let src = image::RgbaImage::from_raw(full.width, full.height, full.pixels.clone())
+        .ok_or_else(|| "Failed to create image buffer for thumbnail".to_string())?;
+
+    let resized = image::imageops::resize(&src, nw, nh, image::imageops::FilterType::Triangle);
+    let (rw, rh) = resized.dimensions();
+
+    Ok(Arc::new(ImageData {
+        pixels: resized.into_raw(),
+        width: rw,
+        height: rh,
+        file_size: full.file_size,
+    }))
 }
 
 #[cfg(test)]
@@ -186,5 +206,38 @@ mod tests {
         let result = decode_image(&path).unwrap();
         assert_eq!(result.width, 10);
         assert_eq!(result.height, 10);
+    }
+
+    #[test]
+    fn thumbnail_respects_max_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_png(dir.path(), "big.png", 800, 600);
+
+        let result = decode_thumbnail(&path, 200).unwrap();
+        assert!(result.width <= 200);
+        assert!(result.height <= 200);
+        // Aspect ratio preserved: 800x600 -> 200x150
+        assert_eq!(result.width, 200);
+        assert_eq!(result.height, 150);
+    }
+
+    #[test]
+    fn thumbnail_preserves_small_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_png(dir.path(), "small.png", 50, 30);
+
+        let result = decode_thumbnail(&path, 200).unwrap();
+        assert_eq!(result.width, 50);
+        assert_eq!(result.height, 30);
+    }
+
+    #[test]
+    fn thumbnail_preserves_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_png(dir.path(), "test.png", 400, 300);
+
+        let result = decode_thumbnail(&path, 100).unwrap();
+        let actual_size = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(result.file_size, actual_size);
     }
 }

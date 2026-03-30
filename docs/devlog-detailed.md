@@ -48,3 +48,17 @@
 **Files changed:** `src/main.rs`
 **Reasoning:** Windows Rust binaries default to `console` subsystem, which spawns a visible terminal alongside the GUI window. The `windows` subsystem suppresses it.
 **Notes:** None.
+
+## [2026-03-29 21:00] — Add Library/Detail tab UI with thumbnail grid
+**Action:** Major UI redesign: added tab-based navigation with Library and Detail tabs. Library tab shows a scrollable grid of image thumbnails. Detail tab retains the existing GPU shader viewer. Added folder picker and file picker buttons to load images into the library. Thumbnails are loaded asynchronously at 200px max dimension. Clicking a thumbnail opens it in Detail view. Arrow key navigation works through library entries when viewing from library.
+**Result:** Success — 31 tests pass (7 new), release build compiles cleanly with no warnings.
+**Files changed:** `Cargo.toml` (added `"image"` feature to iced), `src/main.rs` (major rewrite: tab state, library entries, new messages, tab bar view, library grid view, thumbnail loading, dual navigation modes), `src/decode.rs` (added `decode_thumbnail` function, removed unused `decode_raster_raw`, added 3 thumbnail tests), `src/nav.rs` (made `is_image_file` public for reuse)
+**Reasoning:** User requested a library tab with grid view and a detail tab with full image view. Used iced's built-in `Image` widget (via `"image"` feature) for thumbnails with `Handle::from_rgba` for pre-decoded pixel data. Kept existing shader viewer as the Detail tab. Two navigation modes: library-based (when entering from library) and directory-based (when opening via CLI/drag-drop/Ctrl+O).
+**Notes:** Thumbnails decode the full image then resize — could be optimized for large files later. Grid uses fixed 6 columns. Tab highlighting uses Unicode bullet character as a simple indicator. The `image` crate version from iced's dependency coexists with the project's `image = "0.24"` without conflict.
+
+## [2026-03-29 21:30] — Populate ARCHITECTURE.md and fix CLAUDE.md directories
+**Action:** Replaced the template ARCHITECTURE.md with real project architecture: system overview, component map (4 modules + shader), data flows (image loading, thumbnail loading, navigation), boundaries/ownership rules, 9 key architectural decisions, technology map, ASCII diagram, and drift log. Updated CLAUDE.md key directories to remove nonexistent `/agents` and `/skills`, added `/assets`.
+**Result:** Success — docs now accurately reflect the codebase.
+**Files changed:** `docs/ARCHITECTURE.md` (full rewrite from template), `CLAUDE.md` (key directories section)
+**Reasoning:** CLAUDE.md requires reading and updating ARCHITECTURE.md for structural changes. The template was never populated. The Library/Detail tab addition was a structural change that warranted the initial population.
+**Notes:** None.

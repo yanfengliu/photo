@@ -1,4 +1,32 @@
+## Coding
+
+- Make sure all linter tests pass with every change.
+- Remove dead code and extract reusable util functions when you see fit.
+
+## Testing
+
 - Add / update tests and make all tests pass with every change. Tests should reflect user behavior.
+
+## Architecture
+
+Full architecture documentation lives in `docs/ARCHITECTURE.md`. Read it at session start alongside the devlog summary.
+
+Key directories:
+- `/src` — Application source code (main.rs, viewer.rs, decode.rs, nav.rs)
+- `/assets` — Static assets (WGSL shaders)
+- `/docs` — Project documentation, architecture, devlogs
+
+### Architecture Maintenance Rules
+- **Read `docs/ARCHITECTURE.md` before any structural change** — adding a module, creating a new service, changing data flow, or introducing a dependency.
+- **Respect the boundaries.** If ARCHITECTURE.md says only `PaymentService` calls Stripe, do not add Stripe calls elsewhere. If a boundary feels wrong, flag it — do not silently violate it.
+- **Update ARCHITECTURE.md when you change the architecture.** If your work adds a component, removes one, changes data flow, introduces a new external dependency, or alters a boundary rule:
+  1. Make the code change.
+  2. Update the relevant section in `docs/ARCHITECTURE.md` (Component Map, Data Flow, Boundaries, Technology Map, or Diagram).
+  3. Add a row to the Drift Log at the bottom with the date, what changed, and why.
+  4. Note the `ARCHITECTURE.md` update in your devlog entry.
+- **Do not update ARCHITECTURE.md for non-structural changes.** Bug fixes, UI tweaks, test additions, and refactors that stay within existing boundaries do not require an architecture update.
+- **When in doubt, check the Drift Log.** If a component or boundary seems stale, check the Drift Log for recent changes before proceeding.
+- **Never remove a Key Architectural Decision.** If a decision is reversed, add a new row that supersedes it rather than deleting the old one. The history matters.
 
 ## Devlog System
 

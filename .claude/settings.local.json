@@ -8,7 +8,8 @@
       "Bash(cargo build:*)",
       "Bash(RUST_BACKTRACE=1 /c/Users/38909/Documents/github/photo/target/release/photo.exe \"/c/Users/38909/Downloads/test.jpg\")",
       "Bash(RUST_BACKTRACE=1 timeout 6 /c/Users/38909/Documents/github/photo/target/release/photo.exe \"/c/Users/38909/Downloads/test.jpg\" 2>&1)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(ls -d */)"
     ]
   }
 }

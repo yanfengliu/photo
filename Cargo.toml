@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-iced = { version = "0.13", features = ["tokio", "advanced"] }
+iced = { version = "0.13", features = ["tokio", "advanced", "image"] }
 image = { version = "0.24", default-features = false, features = [
     "jpeg", "png", "gif", "bmp", "tiff", "webp", "ico", "tga", "qoi", "hdr", "exr",
 ] }
