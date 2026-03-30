@@ -41,3 +41,10 @@
 **Files changed:** `Cargo.toml` (added tempfile dev-dep), `src/viewer.rs` (extracted functions, added tests), `src/decode.rs` (added tests), `src/nav.rs` (added tests), `src/main.rs` (use extracted zoom_at_cursor)
 **Reasoning:** CLAUDE.md requires tests with every change. Extracting math into pure functions enables testing without GPU or iced runtime.
 **Notes:** Used `1e-3` tolerance for f32 zoom math tests due to accumulated floating-point error in chained operations.
+
+## [2026-03-30 04:00] — Hide console window on Windows
+**Action:** Added `#![windows_subsystem = "windows"]` to top of `src/main.rs`.
+**Result:** Success — app launches without a terminal window. 24 tests pass, release build succeeds.
+**Files changed:** `src/main.rs`
+**Reasoning:** Windows Rust binaries default to `console` subsystem, which spawns a visible terminal alongside the GUI window. The `windows` subsystem suppresses it.
+**Notes:** None.
