@@ -644,6 +644,7 @@ impl App {
             image_id: self.image_id,
             zoom: self.zoom,
             offset: self.offset,
+            adjustments: Default::default(),
         })
         .width(Length::Fill)
         .height(Length::Fill)
