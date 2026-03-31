@@ -103,6 +103,275 @@ impl UndoHistory {
     }
 }
 
+use std::path::{Path, PathBuf};
+
+// -- sRGB <-> linear conversion --
+
+pub fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn luminance(rgb: [f32; 3]) -> f32 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+}
+
+// -- Per-pixel adjustments (linear RGB) --
+
+pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
+    let m = 2.0_f32.powf(ev);
+    [px[0] * m, px[1] * m, px[2] * m]
+}
+
+pub fn apply_highlights(px: [f32; 3], amount: f32) -> [f32; 3] {
+    let lum = luminance(px);
+    let mask = smoothstep(0.5, 1.0, lum);
+    let d = amount * mask;
+    [px[0] + d, px[1] + d, px[2] + d]
+}
+
+pub fn apply_shadows(px: [f32; 3], amount: f32) -> [f32; 3] {
+    let lum = luminance(px);
+    let mask = 1.0 - smoothstep(0.0, 0.5, lum);
+    let d = amount * mask;
+    [px[0] + d, px[1] + d, px[2] + d]
+}
+
+pub fn apply_whites(px: [f32; 3], amount: f32) -> [f32; 3] {
+    let lum = luminance(px);
+    let mask = smoothstep(0.85, 1.0, lum);
+    let d = amount * mask;
+    [px[0] + d, px[1] + d, px[2] + d]
+}
+
+pub fn apply_blacks(px: [f32; 3], amount: f32) -> [f32; 3] {
+    let lum = luminance(px);
+    let mask = 1.0 - smoothstep(0.0, 0.15, lum);
+    let d = amount * mask;
+    [px[0] + d, px[1] + d, px[2] + d]
+}
+
+pub fn apply_contrast(px: [f32; 3], amount: f32) -> [f32; 3] {
+    let lum = luminance(px);
+    if lum <= 0.0 {
+        return px;
+    }
+    // Sigmoid contrast: blend between original lum and a steep sigmoid.
+    // At amount=0 the result is the original pixel (identity).
+    let k = 1.0 + amount.abs() * 4.0;
+    let sig = 1.0 / (1.0 + (-k * (lum - 0.5)).exp());
+    // sig at lum=0.5 is always 0.5; blending keeps midtones stable.
+    let lum_new = lum + amount * (sig - lum);
+    let ratio = lum_new / lum;
+    [px[0] * ratio, px[1] * ratio, px[2] * ratio]
+}
+
+pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
+    let lum = luminance(px);
+    let t = 1.0 + amount;
+    [
+        lum + (px[0] - lum) * t,
+        lum + (px[1] - lum) * t,
+        lum + (px[2] - lum) * t,
+    ]
+}
+
+pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
+    let max_c = px[0].max(px[1]).max(px[2]);
+    let min_c = px[0].min(px[1]).min(px[2]);
+    let sat = if max_c > 0.0 {
+        (max_c - min_c) / max_c
+    } else {
+        0.0
+    };
+    let weight = 1.0 + amount * (1.0 - sat);
+    let lum = luminance(px);
+    [
+        lum + (px[0] - lum) * weight,
+        lum + (px[1] - lum) * weight,
+        lum + (px[2] - lum) * weight,
+    ]
+}
+
+/// Bradford chromatic adaptation matrix for temperature/tint.
+/// Temperature: -100..+100 maps to ~3500K..~12000K shift from D65 (6500K).
+/// Tint: -100..+100 shifts green/magenta.
+/// Returns a 3x3 row-major matrix for linear RGB transform.
+pub fn temperature_tint_matrix(temperature: f32, tint: f32) -> [f32; 9] {
+    let kelvin = 6500.0 + temperature * 55.0;
+
+    let (xd, yd) = daylight_chromaticity(kelvin);
+
+    let x_ref = 0.3127;
+    let y_ref = 0.3290;
+
+    let tint_shift = tint * 0.0002;
+    let yd = yd + tint_shift;
+
+    bradford_cat(x_ref, y_ref, xd, yd)
+}
+
+fn daylight_chromaticity(kelvin: f32) -> (f32, f32) {
+    let t = kelvin;
+    let t2 = t * t;
+    let t3 = t2 * t;
+
+    let xd = if t <= 7000.0 {
+        -4.607_0e9 / t3 + 2.967_8e6 / t2 + 0.099_11e3 / t + 0.244_063
+    } else {
+        -2.006_4e9 / t3 + 1.901_8e6 / t2 + 0.247_48e3 / t + 0.237_040
+    };
+
+    let yd = -3.0 * xd * xd + 2.87 * xd - 0.275;
+    (xd, yd)
+}
+
+fn bradford_cat(x_src: f32, y_src: f32, x_dst: f32, y_dst: f32) -> [f32; 9] {
+    let src_xyz = [x_src / y_src, 1.0, (1.0 - x_src - y_src) / y_src];
+    let dst_xyz = [x_dst / y_dst, 1.0, (1.0 - x_dst - y_dst) / y_dst];
+
+    let m = [
+        0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296,
+    ];
+    let m_inv = [
+        0.9870, -0.1471, 0.1600, 0.4323, 0.5184, 0.0493, -0.0085, 0.0400, 0.9685,
+    ];
+
+    let src_lms = mat3_mul_vec3(&m, &src_xyz);
+    let dst_lms = mat3_mul_vec3(&m, &dst_xyz);
+
+    let scale = [
+        dst_lms[0] / src_lms[0],
+        dst_lms[1] / src_lms[1],
+        dst_lms[2] / src_lms[2],
+    ];
+
+    let d_m = [
+        m[0] * scale[0],
+        m[1] * scale[0],
+        m[2] * scale[0],
+        m[3] * scale[1],
+        m[4] * scale[1],
+        m[5] * scale[1],
+        m[6] * scale[2],
+        m[7] * scale[2],
+        m[8] * scale[2],
+    ];
+
+    mat3_mul_mat3(&m_inv, &d_m)
+}
+
+fn mat3_mul_vec3(m: &[f32; 9], v: &[f32; 3]) -> [f32; 3] {
+    [
+        m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+        m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+        m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+    ]
+}
+
+fn mat3_mul_mat3(a: &[f32; 9], b: &[f32; 9]) -> [f32; 9] {
+    let mut r = [0.0f32; 9];
+    for row in 0..3 {
+        for col in 0..3 {
+            r[row * 3 + col] =
+                a[row * 3] * b[col] + a[row * 3 + 1] * b[3 + col] + a[row * 3 + 2] * b[6 + col];
+        }
+    }
+    r
+}
+
+pub fn apply_temperature_tint(px: [f32; 3], matrix: &[f32; 9]) -> [f32; 3] {
+    mat3_mul_vec3(matrix, &px)
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Apply all adjustments to a single pixel (sRGB u8 input -> sRGB u8 output).
+/// `blurred` is the corresponding blurred pixel for clarity/dehaze (linear RGB).
+/// `temp_matrix` is the precomputed Bradford CAT matrix.
+pub fn apply_all(
+    srgb: [u8; 4],
+    state: &EditState,
+    temp_matrix: &[f32; 9],
+    blurred: [f32; 3],
+) -> [u8; 4] {
+    let mut px = [
+        srgb_to_linear(srgb[0] as f32 / 255.0),
+        srgb_to_linear(srgb[1] as f32 / 255.0),
+        srgb_to_linear(srgb[2] as f32 / 255.0),
+    ];
+
+    px = apply_exposure(px, state.exposure);
+
+    if state.temperature != 0.0 || state.tint != 0.0 {
+        px = apply_temperature_tint(px, temp_matrix);
+    }
+
+    let n = |v: f32| v / 100.0;
+    px = apply_highlights(px, n(state.highlights));
+    px = apply_shadows(px, n(state.shadows));
+    px = apply_whites(px, n(state.whites));
+    px = apply_blacks(px, n(state.blacks));
+
+    px = apply_contrast(px, n(state.contrast));
+
+    px = apply_vibrance(px, n(state.vibrance));
+    px = apply_saturation(px, n(state.saturation));
+
+    if state.clarity != 0.0 {
+        let a = n(state.clarity);
+        let lum = luminance(px);
+        let midtone = smoothstep(0.0, 0.5, lum) * (1.0 - smoothstep(0.5, 1.0, lum));
+        for i in 0..3 {
+            px[i] += a * (px[i] - blurred[i]) * midtone;
+        }
+    }
+
+    if state.dehaze != 0.0 {
+        let a = n(state.dehaze);
+        let atmos = blurred[0].max(blurred[1]).max(blurred[2]).max(0.01);
+        let dark = px[0].min(px[1]).min(px[2]);
+        let t = (1.0 - a * dark / atmos).max(0.1);
+        for px_c in &mut px {
+            *px_c = (*px_c - atmos) / t + atmos;
+        }
+    }
+
+    let r = (linear_to_srgb(px[0].clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    let g = (linear_to_srgb(px[1].clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    let b = (linear_to_srgb(px[2].clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    [r, g, b, srgb[3]]
+}
+
+// -- Save --
+
+pub fn edited_save_path(original: &Path) -> PathBuf {
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    let ext = original.extension().and_then(|e| e.to_str());
+    let new_name = match ext {
+        Some(e) => format!("{stem}_edited.{e}"),
+        None => format!("{stem}_edited"),
+    };
+    original.with_file_name(new_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +474,119 @@ mod tests {
         h.undo();
         assert_eq!(h.current.exposure, 2.5);
         assert_eq!(h.current.contrast, -30.0);
+    }
+
+    // -- CPU adjustment math tests --
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn apply_exposure_zero_is_identity() {
+        let px = [0.5, 0.3, 0.1];
+        let out = apply_exposure(px, 0.0);
+        assert!(approx(out[0], 0.5));
+        assert!(approx(out[1], 0.3));
+        assert!(approx(out[2], 0.1));
+    }
+
+    #[test]
+    fn apply_exposure_plus_one_doubles() {
+        let px = [0.25, 0.25, 0.25];
+        let out = apply_exposure(px, 1.0);
+        assert!(approx(out[0], 0.5));
+    }
+
+    #[test]
+    fn apply_exposure_minus_one_halves() {
+        let px = [0.5, 0.5, 0.5];
+        let out = apply_exposure(px, -1.0);
+        assert!(approx(out[0], 0.25));
+    }
+
+    #[test]
+    fn srgb_to_linear_zero() {
+        assert!(approx(srgb_to_linear(0.0), 0.0));
+    }
+
+    #[test]
+    fn srgb_to_linear_one() {
+        assert!(approx(srgb_to_linear(1.0), 1.0));
+    }
+
+    #[test]
+    fn linear_to_srgb_roundtrip() {
+        for i in 0..=10 {
+            let v = i as f32 / 10.0;
+            let rt = linear_to_srgb(srgb_to_linear(v));
+            assert!(approx(rt, v));
+        }
+    }
+
+    #[test]
+    fn apply_saturation_zero_is_identity() {
+        let px = [0.8, 0.2, 0.4];
+        let out = apply_saturation(px, 0.0);
+        assert!(approx(out[0], px[0]));
+        assert!(approx(out[1], px[1]));
+        assert!(approx(out[2], px[2]));
+    }
+
+    #[test]
+    fn apply_saturation_minus_one_is_grayscale() {
+        let px = [0.8, 0.2, 0.4];
+        let out = apply_saturation(px, -1.0);
+        let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+        assert!(approx(out[0], lum));
+        assert!(approx(out[1], lum));
+        assert!(approx(out[2], lum));
+    }
+
+    #[test]
+    fn apply_highlights_only_affects_bright() {
+        let dark = [0.1, 0.1, 0.1];
+        let out = apply_highlights(dark, 1.0);
+        assert!(approx(out[0], dark[0]));
+
+        let bright = [0.9, 0.9, 0.9];
+        let out2 = apply_highlights(bright, 1.0);
+        assert!(out2[0] > bright[0]);
+    }
+
+    #[test]
+    fn apply_shadows_only_affects_dark() {
+        let bright = [0.9, 0.9, 0.9];
+        let out = apply_shadows(bright, 1.0);
+        assert!(approx(out[0], bright[0]));
+
+        let dark = [0.1, 0.1, 0.1];
+        let out2 = apply_shadows(dark, 1.0);
+        assert!(out2[0] > dark[0]);
+    }
+
+    #[test]
+    fn apply_contrast_zero_is_identity() {
+        let px = [0.5, 0.3, 0.7];
+        let out = apply_contrast(px, 0.0);
+        assert!(approx(out[0], px[0]));
+        assert!(approx(out[1], px[1]));
+        assert!(approx(out[2], px[2]));
+    }
+
+    #[test]
+    fn save_path_appends_edited() {
+        use std::path::PathBuf;
+        let p = PathBuf::from("/photos/sunset.jpg");
+        let out = edited_save_path(&p);
+        assert_eq!(out, PathBuf::from("/photos/sunset_edited.jpg"));
+    }
+
+    #[test]
+    fn save_path_handles_no_extension() {
+        use std::path::PathBuf;
+        let p = PathBuf::from("/photos/image");
+        let out = edited_save_path(&p);
+        assert_eq!(out, PathBuf::from("/photos/image_edited"));
     }
 }

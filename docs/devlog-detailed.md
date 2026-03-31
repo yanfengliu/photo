@@ -111,3 +111,10 @@
 **Files changed:** `src/edit.rs` (created), `src/main.rs` (added `mod edit;`)
 **Reasoning:** Foundational data model needed before shader uniforms, UI sliders, or save logic can be added. Committed-baseline pattern ensures undo restores correct state when `current` is mutated directly before calling `commit()`.
 **Notes:** Dead_code warnings are expected — `EditState` and `UndoHistory` will be consumed in Tasks 4-8. The `committed` field is private; callers only interact with `current` for live preview updates and `commit()` at drag-end.
+
+## [2026-03-30 20:38] — Add CPU adjustment math and save path helper
+**Action:** Added all CPU-side image adjustment functions to `src/edit.rs`: `srgb_to_linear`, `linear_to_srgb`, `luminance`, `apply_exposure`, `apply_highlights`, `apply_shadows`, `apply_whites`, `apply_blacks`, `apply_contrast`, `apply_saturation`, `apply_vibrance`, `temperature_tint_matrix` (Bradford CAT), `apply_temperature_tint`, `apply_all` (pipeline combining all adjustments), and `edited_save_path`. Added 13 new tests (total: 20 in `edit::tests`). Fixed a math issue in `apply_contrast`: the spec used `k = 1 + amount * 4` which gives non-identity at amount=0 because the sigmoid at k=1 doesn't equal lum for all lum values. Fixed by blending: `lum_new = lum + amount * (sigmoid - lum)` so amount=0 gives identity.
+**Result:** Success — all 20 edit::tests pass; cargo clippy -D warnings clean after fixing needless_range_loop in dehaze loop; cargo fmt applied; cargo build --release succeeds.
+**Files changed:** `src/edit.rs`
+**Reasoning:** CPU implementations mirror the upcoming WGSL shader math (Task 4) and are used for full-resolution save (Task 9) where GPU compute is not appropriate. Bradford CAT provides perceptually-correct white balance shifts.
+**Notes:** The clarity and dehaze loops both indexed a single array (px) so clippy flagged one as needless_range_loop; rewrote to `for px_c in &mut px`. The contrast blend formula differs slightly from the original spec but produces identical output at non-zero amounts while satisfying the identity test at amount=0.
