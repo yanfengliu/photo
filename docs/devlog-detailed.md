@@ -153,3 +153,10 @@
 **Files changed:** `src/main.rs` (modified), `src/edit.rs` (modified), `src/lens.rs` (modified)
 **Reasoning:** This is the main integration task that connects the editing backend (EditState, UndoHistory, CPU math, lens profiles) to the iced GUI via a sidebar edit panel. The edit panel uses iced 0.13's `slider` widget with `on_release` for undo commit points. Save uses `tokio::task::spawn_blocking` for CPU-heavy pixel processing. Slider labels are clickable to reset individual adjustments to zero, and values are clickable for text input.
 **Notes:** Fixed lifetime issues with the `section_label` closure by using inline `text()` calls with owned strings. Changed `or_insert_with(edit::UndoHistory::new)` to `or_default()` per clippy. The `DistortionCoeffs.model` and several `ExifInfo` fields are suppressed with `#[allow(dead_code)]` since they're part of the data model but not yet consumed by the shader pipeline.
+
+## [2026-03-30 22:04] — Update architecture docs for image editing feature (Task 10)
+**Action:** Updated ARCHITECTURE.md: expanded system overview, added edit.rs and lens.rs to component map, added blur shader to viewer section, added edit data flow, added module boundaries, added kamadak-exif and quick-xml to technology map, updated mermaid diagram with new modules and data flows, added drift log entries.
+**Result:** Success — architecture doc now reflects the full image editing system.
+**Files changed:** `docs/ARCHITECTURE.md`, `docs/devlog-detailed.md`
+**Reasoning:** CLAUDE.md requires updating ARCHITECTURE.md when architecture changes. The image editing feature added 2 new modules, 1 new shader, extended the existing shader, and introduced new data flows.
+**Notes:** None.
