@@ -118,3 +118,10 @@
 **Files changed:** `src/edit.rs`
 **Reasoning:** CPU implementations mirror the upcoming WGSL shader math (Task 4) and are used for full-resolution save (Task 9) where GPU compute is not appropriate. Bradford CAT provides perceptually-correct white balance shifts.
 **Notes:** The clarity and dehaze loops both indexed a single array (px) so clippy flagged one as needless_range_loop; rewrote to `for px_c in &mut px`. The contrast blend formula differs slightly from the original spec but produces identical output at non-zero amounts while satisfying the identity test at amount=0.
+
+## [2026-03-30 21:00] — Rewrite WGSL shader with full adjustment pipeline (Task 4)
+**Action:** Replaced the entire contents of `assets/shaders/image.wgsl` with the full adjustment pipeline shader. The new shader adds the extended `Uniforms` struct (exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation, clarity, dehaze, Bradford CAT matrix rows, lens correction coefficients, padding). Fragment shader applies: sRGB linearization, exposure (2^EV), temperature/tint matrix multiply, zone-based tone adjustments (highlights, shadows, whites, blacks), contrast sigmoid S-curve, vibrance, saturation, clarity (blur texture local contrast), dehaze (blur texture atmospheric scatter model), lens distortion, TCA correction, vignette correction, gamma re-encode, and alpha checkerboard compositing. Binding 3 (`blur_tex`) is declared but used as a no-op until Task 6 provides a real blur pre-pass.
+**Result:** Success — `cargo check` passes cleanly in 0.57s.
+**Files changed:** `assets/shaders/image.wgsl`
+**Reasoning:** Full pipeline specified in task description; shader-only change (no Rust struct changes yet — those come in Task 5). WGSL is not validated at compile time, only at GPU pipeline creation.
+**Notes:** The Rust-side `Uniforms` struct in `viewer.rs` still uses the old two-field layout; it will be updated in Task 5 to match the new WGSL struct.
