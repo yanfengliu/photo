@@ -105,8 +105,13 @@ impl App {
             error: None,
         };
 
+        // Restore saved library entries
+        let saved_paths = load_library();
+        app.add_library_entries(&saved_paths);
+        let thumb_task = Self::load_thumbnails(&saved_paths);
+
         let args: Vec<String> = std::env::args().collect();
-        let task = if args.len() > 1 {
+        let cli_task = if args.len() > 1 {
             let path = PathBuf::from(&args[1]);
             if path.exists() {
                 app.tab = Tab::Detail;
@@ -129,7 +134,7 @@ impl App {
             Task::none()
         };
 
-        (app, task)
+        (app, Task::batch([thumb_task, cli_task]))
     }
 
     fn title(&self) -> String {
@@ -239,6 +244,7 @@ impl App {
             Message::FolderPicked(Some(folder)) => {
                 let new_paths = scan_folder_for_images(&folder);
                 self.add_library_entries(&new_paths);
+                save_library(&self.library);
                 Self::load_thumbnails(&new_paths)
             }
             Message::FolderPicked(None) => Task::none(),
@@ -249,6 +255,7 @@ impl App {
                     .filter(|p| !self.library.iter().any(|e| e.path == *p))
                     .collect();
                 self.add_library_entries(&new_paths);
+                save_library(&self.library);
                 Self::load_thumbnails(&new_paths)
             }
             Message::FilesPicked(None) => Task::none(),
@@ -692,6 +699,40 @@ impl App {
 // Free functions
 // ---------------------------------------------------------------------------
 
+fn library_file_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|dir| Path::new(&dir).join("photo").join("library.txt"))
+}
+
+fn save_library(library: &[LibraryEntry]) {
+    let Some(path) = library_file_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content: String = library
+        .iter()
+        .map(|e| e.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = std::fs::write(&path, content);
+}
+
+fn load_library() -> Vec<PathBuf> {
+    let Some(path) = library_file_path() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
+}
+
 pub fn scan_folder_for_images(folder: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(folder)
         .into_iter()
@@ -749,6 +790,76 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let results = scan_folder_for_images(dir.path());
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_library_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_path = dir.path().join("library.txt");
+
+        let p1 = dir.path().join("a.png");
+        let p2 = dir.path().join("b.jpg");
+        std::fs::write(&p1, b"").unwrap();
+        std::fs::write(&p2, b"").unwrap();
+
+        let entries = vec![
+            LibraryEntry {
+                path: p1.clone(),
+                filename: "a.png".to_string(),
+                thumbnail_handle: None,
+            },
+            LibraryEntry {
+                path: p2.clone(),
+                filename: "b.jpg".to_string(),
+                thumbnail_handle: None,
+            },
+        ];
+
+        // Write manually to the file
+        let content: String = entries
+            .iter()
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&lib_path, &content).unwrap();
+
+        // Read back
+        let loaded: Vec<PathBuf> = std::fs::read_to_string(&lib_path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .collect();
+
+        assert_eq!(loaded, vec![p1, p2]);
+    }
+
+    #[test]
+    fn load_library_filters_deleted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_path = dir.path().join("library.txt");
+
+        let exists = dir.path().join("exists.png");
+        std::fs::write(&exists, b"").unwrap();
+
+        let content = format!(
+            "{}\n{}",
+            exists.display(),
+            dir.path().join("gone.png").display()
+        );
+        std::fs::write(&lib_path, &content).unwrap();
+
+        let loaded: Vec<PathBuf> = std::fs::read_to_string(&lib_path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .collect();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], exists);
     }
 
     #[test]

@@ -63,16 +63,23 @@
 **Reasoning:** CLAUDE.md requires reading and updating ARCHITECTURE.md for structural changes. The template was never populated. The Library/Detail tab addition was a structural change that warranted the initial population.
 **Notes:** None.
 
-## [2026-03-30 12:00] — Add development and release instructions to README.md
+## [2026-03-30 18:00] — Add development and release instructions to README.md
 **Action:** Expanded README.md from a single title line to full documentation: project description, features, prerequisites, development instructions (build, run, test, lint, format), release workflow, and project structure. Also ran `cargo fmt` to fix pre-existing formatting issues across 4 source files.
 **Result:** Success — all 31 tests pass, clippy clean, formatting clean, release build succeeds.
 **Files changed:** `README.md` (expanded), `src/main.rs` (fmt), `src/decode.rs` (fmt), `src/nav.rs` (fmt), `src/viewer.rs` (fmt)
 **Reasoning:** User requested development and release instructions in README.md.
 **Notes:** Formatting issues were pre-existing from prior sessions. Fixed them to satisfy CLAUDE.md's "all linter tests pass" requirement.
 
-## [2026-03-30 12:30] — Replace Unicode symbols with ASCII in UI text
+## [2026-03-30 18:05] — Replace Unicode symbols with ASCII in UI text
 **Action:** Replaced all Unicode escape sequences in main.rs UI strings with ASCII equivalents: `│` (U+2502) → `|`, `×` (U+00D7) → `x`, `←→` (U+2190/2192) → "Arrow keys", `●` (U+25CF) → `*`, `…` (U+2026) → `...`, `⌛` (U+231B) → `...`, `—` (U+2014) → `-`.
 **Result:** Success — all symbols now render correctly with iced's default font. 31 tests pass, clippy clean.
 **Files changed:** `src/main.rs`
 **Reasoning:** iced's default font lacks glyphs for box-drawing, bullet, arrow, and hourglass characters, causing them to render as missing-glyph placeholders in the status bar and tab bar.
 **Notes:** If a broader Unicode font is added later, these could be reverted to the original symbols.
+
+## [2026-03-30 18:11] — Persist library entries across sessions
+**Action:** Added library persistence: file paths saved to `%LOCALAPPDATA%\photo\library.txt` (one path per line). On startup, saved paths are loaded, dead paths filtered out, and thumbnails reloaded. Save triggers on folder pick and file pick. Added `library_file_path()`, `save_library()`, `load_library()` free functions. Added 2 new tests (33 total).
+**Result:** Success — 33 tests pass, clippy clean, release build succeeds.
+**Files changed:** `src/main.rs`
+**Reasoning:** User reported library not remembering loaded files between sessions. The library was purely in-memory with no persistence.
+**Notes:** Uses plain text format (no serde dependency). Deleted files are silently filtered out on load.
