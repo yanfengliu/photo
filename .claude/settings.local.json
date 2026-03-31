@@ -13,7 +13,29 @@
       "Bash(cargo fmt:*)",
       "Bash(cargo clippy:*)",
       "Bash(cargo tree:*)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "Bash(bash \"C:\\\\Users\\\\38909\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.0.6\\\\skills\\\\brainstorming\\\\scripts\\\\start-server.sh\" --project-dir \"C:\\\\Users\\\\38909\\\\Documents\\\\github\\\\photo\")",
+      "Bash(curl -s http://localhost:64603)",
+      "Bash(bash \"C:\\\\Users\\\\38909\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.0.6\\\\skills\\\\brainstorming\\\\scripts\\\\stop-server.sh\" \"C:/Users/38909/Documents/github/photo/.superpowers/brainstorm/13256-1774924313\" 2>&1)",
+      "Bash(bash \"C:\\\\Users\\\\38909\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.0.6\\\\skills\\\\brainstorming\\\\scripts\\\\start-server.sh\" --project-dir \"C:\\\\Users\\\\38909\\\\Documents\\\\github\\\\photo\" --host 0.0.0.0 --url-host 127.0.0.1)",
+      "Bash(curl -s https://api.github.com/search/repositories?q=lensfun+database+xml)",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(f''''{r[full_name]}: {r[html_url]} - {r[description]}''''\\) for r in data.get\\(''''items'''',[]\\)]\")",
+      "Bash(curl -s https://api.github.com/repos/lensfun/lensfun)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f''''Name: {d[full_name]}''''\\); print\\(f''''URL: {d[html_url]}''''\\); print\\(f''''Description: {d[description]}''''\\)\")",
+      "Bash(curl -s https://api.github.com/repos/lensfun/lensfun/contents/data/db)",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(f''''{f[name]} \\({f[type]}\\)''''\\) for f in data]\")",
+      "Bash(curl -sL https://raw.githubusercontent.com/lensfun/lensfun/master/data/db/lensfun-database.dtd)",
+      "Bash(curl -sL https://api.github.com/repos/lensfun/lensfun/contents/data/db)",
+      "Bash(python3 -c \":*)",
+      "Bash(node -e \":*)",
+      "Bash(git:*)",
+      "Bash(date /t)",
+      "Bash(time /t)",
+      "Bash(powershell -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm'\")",
+      "Bash(powershell -Command \"\\(Get-Content ''C:\\\\Users\\\\38909\\\\Documents\\\\github\\\\photo\\\\docs\\\\devlog-detailed.md''\\).Count\")",
+      "Bash(powershell -Command \"Get-Date -Format ''yyyy-MM-dd HH:mm''\")",
+      "Bash(taskkill //F //IM cargo.exe)",
+      "Bash(taskkill //F //IM clippy-driver.exe)"
     ]
   }
 }
