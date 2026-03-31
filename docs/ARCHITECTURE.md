@@ -86,6 +86,7 @@ Photo is a GPU-accelerated image viewer for Windows built in Rust. It provides a
 | GPU | wgpu | 0.19 | Via iced re-export, not standalone |
 | Shader | WGSL | — | `assets/shaders/image.wgsl` |
 | Image decode | image crate | 0.24 | 13 format features enabled |
+| JPEG thumbnails | jpeg-decoder | 0.3 | DCT-level downscaling for fast thumbnail decode |
 | SVG | resvg | 0.44 | Includes usvg + tiny-skia |
 | File dialogs | rfd | 0.15 | Async file/folder pickers |
 | Async runtime | tokio | 1.x | Multi-thread, via iced feature |
@@ -157,3 +158,4 @@ flowchart TD
 | Date | What Changed | Why | Updated By |
 | --- | --- | --- | --- |
 | 2026-03-29 | Initial architecture doc created from template | Project reached stable multi-module state with Library/Detail tabs | agent |
+| 2026-03-30 | Added jpeg-decoder direct dependency | DCT-level downscaling for fast JPEG thumbnails; was already a transitive dep | agent |

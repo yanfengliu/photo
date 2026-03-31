@@ -83,3 +83,10 @@
 **Files changed:** `src/main.rs`
 **Reasoning:** User reported library not remembering loaded files between sessions. The library was purely in-memory with no persistence.
 **Notes:** Uses plain text format (no serde dependency). Deleted files are silently filtered out on load.
+
+## [2026-03-30 18:28] — Optimize thumbnail loading performance
+**Action:** Rewrote `decode_thumbnail` with format-specific fast paths. JPEG: uses `jpeg-decoder` crate's DCT-level `scale()` for 1/8-1/2 downscaling during decode (e.g., 4000x3000 decodes at ~500x375 instead of full res). SVG: renders directly at thumbnail dimensions instead of full size then resize. Other raster formats: uses `Nearest` filter instead of `Triangle` for final resize. Added `jpeg-decoder = "0.3"` dependency. Added 1 new test (34 total).
+**Result:** Success — 34 tests pass, clippy clean, release build succeeds.
+**Files changed:** `Cargo.toml` (added jpeg-decoder), `src/decode.rs` (rewrote thumbnail pipeline)
+**Reasoning:** User reported slow thumbnail loading. Root cause: `decode_thumbnail` fully decoded every image at original resolution then resized, which is extremely slow for large JPEGs.
+**Notes:** jpeg-decoder 0.3.2 was already a transitive dependency via the image crate, so no new binary size cost. Non-JPEG raster formats still decode at full resolution since the image crate doesn't support downscaled decoding for PNG/BMP/etc.

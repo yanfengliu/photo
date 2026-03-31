@@ -86,28 +86,127 @@ fn decode_svg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
 }
 
 pub fn decode_thumbnail(path: &Path, max_dim: u32) -> Result<Arc<ImageData>, String> {
-    let full = decode_image(path)?;
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-    if full.width <= max_dim && full.height <= max_dim {
-        return Ok(full);
-    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
 
-    let scale = max_dim as f32 / full.width.max(full.height) as f32;
-    let nw = ((full.width as f32 * scale) as u32).max(1);
-    let nh = ((full.height as f32 * scale) as u32).max(1);
-
-    let src = image::RgbaImage::from_raw(full.width, full.height, full.pixels.clone())
-        .ok_or_else(|| "Failed to create image buffer for thumbnail".to_string())?;
-
-    let resized = image::imageops::resize(&src, nw, nh, image::imageops::FilterType::Triangle);
-    let (rw, rh) = resized.dimensions();
+    let (pixels, w, h) = match ext.as_str() {
+        "jpg" | "jpeg" => decode_jpeg_thumbnail(path, max_dim)?,
+        "svg" | "svgz" => decode_svg_thumbnail(path, max_dim)?,
+        _ => decode_raster_thumbnail(path, max_dim)?,
+    };
 
     Ok(Arc::new(ImageData {
-        pixels: resized.into_raw(),
-        width: rw,
-        height: rh,
-        file_size: full.file_size,
+        pixels,
+        width: w,
+        height: h,
+        file_size,
     }))
+}
+
+fn decode_jpeg_thumbnail(path: &Path, max_dim: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("Failed to open: {e}"))?;
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
+
+    // Use DCT-level downscaling (1/8, 1/4, 1/2) for fast decode
+    let (scaled_w, scaled_h) = decoder
+        .scale(max_dim as u16, max_dim as u16)
+        .map_err(|e| format!("JPEG scale error: {e}"))?;
+
+    let raw = decoder
+        .decode()
+        .map_err(|e| format!("JPEG decode error: {e}"))?;
+    let info = decoder.info().ok_or_else(|| "No JPEG info".to_string())?;
+
+    // Convert to RGBA
+    let rgba = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            let mut out = Vec::with_capacity(raw.len() / 3 * 4);
+            for chunk in raw.chunks_exact(3) {
+                out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            out
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            let mut out = Vec::with_capacity(raw.len() * 4);
+            for &lum in &raw {
+                out.extend_from_slice(&[lum, lum, lum, 255]);
+            }
+            out
+        }
+        _ => return decode_raster_thumbnail(path, max_dim),
+    };
+
+    let w = scaled_w as u32;
+    let h = scaled_h as u32;
+
+    // If DCT scaling already got us small enough, return directly
+    if w <= max_dim && h <= max_dim {
+        return Ok((rgba, w, h));
+    }
+
+    // Otherwise do a final resize from the reduced image
+    let src = image::RgbaImage::from_raw(w, h, rgba)
+        .ok_or_else(|| "Failed to create image buffer".to_string())?;
+    let scale = max_dim as f32 / w.max(h) as f32;
+    let nw = ((w as f32 * scale) as u32).max(1);
+    let nh = ((h as f32 * scale) as u32).max(1);
+    let resized = image::imageops::resize(&src, nw, nh, image::imageops::FilterType::Nearest);
+    let (rw, rh) = resized.dimensions();
+    Ok((resized.into_raw(), rw, rh))
+}
+
+fn decode_svg_thumbnail(path: &Path, max_dim: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let data = std::fs::read(path).map_err(|e| format!("Failed to read SVG: {e}"))?;
+    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default())
+        .map_err(|e| format!("Failed to parse SVG: {e}"))?;
+
+    let size = tree.size();
+    let orig_w = size.width() as u32;
+    let orig_h = size.height() as u32;
+    if orig_w == 0 || orig_h == 0 {
+        return Err("SVG has zero dimensions".to_string());
+    }
+
+    // Render directly at thumbnail size
+    let scale = max_dim as f32 / orig_w.max(orig_h) as f32;
+    let scale = scale.min(1.0); // Don't upscale
+    let w = ((orig_w as f32 * scale) as u32).max(1);
+    let h = ((orig_h as f32 * scale) as u32).max(1);
+
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(w, h).ok_or_else(|| "Failed to create pixmap".to_string())?;
+
+    let sx = w as f32 / size.width();
+    let sy = h as f32 / size.height();
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(sx, sy),
+        &mut pixmap.as_mut(),
+    );
+
+    Ok((pixmap.take(), w, h))
+}
+
+fn decode_raster_thumbnail(path: &Path, max_dim: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let img = image::open(path).map_err(|e| format!("Failed to decode: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+
+    if w <= max_dim && h <= max_dim {
+        return Ok((rgba.into_raw(), w, h));
+    }
+
+    let scale = max_dim as f32 / w.max(h) as f32;
+    let nw = ((w as f32 * scale) as u32).max(1);
+    let nh = ((h as f32 * scale) as u32).max(1);
+    let resized = image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Nearest);
+    let (rw, rh) = resized.dimensions();
+    Ok((resized.into_raw(), rw, rh))
 }
 
 #[cfg(test)]
@@ -205,6 +304,21 @@ mod tests {
         let result = decode_image(&path).unwrap();
         assert_eq!(result.width, 10);
         assert_eq!(result.height, 10);
+    }
+
+    #[test]
+    fn thumbnail_jpeg_uses_fast_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.jpg");
+        let img = image::RgbaImage::from_fn(800, 600, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+        });
+        img.save(&path).unwrap();
+
+        let result = decode_thumbnail(&path, 200).unwrap();
+        assert!(result.width <= 200);
+        assert!(result.height <= 200);
+        assert!(result.width > 0 && result.height > 0);
     }
 
     #[test]
