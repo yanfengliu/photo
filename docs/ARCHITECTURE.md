@@ -1,11 +1,11 @@
 # Architecture
 
-> Last verified: 2026-03-29
+> Last verified: 2026-03-30
 > Last updated by: agent
 
 ## System Overview
 
-Photo is a GPU-accelerated image viewer for Windows built in Rust. It provides a Library tab for browsing collections of images as a thumbnail grid, and a Detail tab for viewing individual images with zoom/pan via a custom wgpu shader pipeline. Users interact via the native iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments.
+Photo is a GPU-accelerated image viewer and editor for Windows built in Rust. It provides a Library tab for browsing collections of images as a thumbnail grid, and a Detail tab for viewing individual images with zoom/pan and real-time editing via a custom wgpu shader pipeline. Users interact via the native iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments (exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, vibrance, saturation, clarity, dehaze) rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections. Edits are non-destructive with undo/redo and save-as-copy.
 
 ## Component Map
 
@@ -14,10 +14,17 @@ Photo is a GPU-accelerated image viewer for Windows built in Rust. It provides a
 
 ### Viewer (Detail Tab)
 - **ImageCanvas / shader pipeline** (`src/viewer.rs`) — Custom `iced::widget::shader::Program` implementation. Handles mouse interaction (zoom, pan, drag), computes image rect in UV space, and manages GPU resources (pipeline, textures, uniforms, bind groups). Owns: `ImageCanvas`, `ViewerEvent`, `ImagePrimitive`, `GpuResources`, `ViewerState`.
-- **WGSL shader** (`assets/shaders/image.wgsl`) — Vertex/fragment shader for textured quad rendering. Receives uniforms (image rect in viewport UV, background color). Draws full-screen quad, samples texture within rect, renders dark background outside.
+- **WGSL shader** (`assets/shaders/image.wgsl`) — Vertex/fragment shader for textured quad rendering with full adjustment pipeline. Receives extended uniforms (image rect, 12 adjustment floats, Bradford CAT matrix, lens correction coefficients). Applies sRGB linearization, exposure, temperature/tint, zone-based tone mapping, contrast S-curve, vibrance, saturation, clarity/dehaze (via blur texture), lens distortion/vignetting/TCA, and gamma encoding.
+- **Blur shader** (`assets/shaders/blur.wgsl`) — 9-tap separable Gaussian blur shader for clarity/dehaze pre-pass. Two-pass (horizontal then vertical) at 1/4 resolution.
 
 ### Image Decoding
 - **decode** (`src/decode.rs`) — Decodes raster images (via `image` crate) and SVG (via `resvg`). Handles GPU texture limit pre-downscale. Provides `decode_image()` for full-resolution loading and `decode_thumbnail()` for reduced-size thumbnails. Owns: `ImageData` struct (RGBA pixels + dimensions + file size).
+
+### Image Editing
+- **edit** (`src/edit.rs`) — Edit state management (`EditState`, `UndoHistory`), CPU-side adjustment math (sRGB conversion, exposure, contrast, tone zones, vibrance, saturation, clarity, dehaze, temperature/tint via Bradford CAT), and full-resolution save pipeline. Owns: `EditState`, `UndoHistory`, all `apply_*` functions, `save_edited_image()`.
+
+### Lens Corrections
+- **lens** (`src/lens.rs`) — Lensfun XML database parser, EXIF reader (via kamadak-exif), lens profile lookup. Provides distortion, vignetting, and TCA correction coefficients. Owns: `LensDatabase`, `LensProfile`, `ExifInfo`, `parse_lensfun_xml()`, `read_exif()`.
 
 ### Navigation
 - **nav** (`src/nav.rs`) — Directory scanning and file navigation. Sorts image files using natural ordering (`natord`). Provides next/prev cycling. Owns: `DirNav` struct, `IMAGE_EXTENSIONS` list, `is_image_file()`.
@@ -42,6 +49,16 @@ Photo is a GPU-accelerated image viewer for Windows built in Rust. It provides a
 5. `Message::ThumbnailLoaded(path, data)` maps to `ImageHandle::from_rgba()` stored on the entry.
 6. Library grid renders thumbnails via iced's built-in `Image` widget.
 
+### Edit Data Flow
+1. User drags slider in edit panel -> `Message::SliderChanged(kind, value)`.
+2. `App::update()` writes value to `edit_histories[current_path].current.<field>`.
+3. On `view()`, `App::build_adjustment_uniforms()` reads `EditState`, computes Bradford CAT matrix, assembles `AdjustmentUniforms`.
+4. `ImageCanvas` passes `AdjustmentUniforms` through `ImagePrimitive` to `prepare()`.
+5. `prepare()` writes all adjustment values to the GPU uniform buffer (~200 bytes).
+6. `render()` draws the textured quad; the shader applies all adjustments per-pixel.
+7. On slider release, `UndoHistory::commit()` pushes state to undo stack.
+8. On save (Ctrl+S), CPU-side `apply_all()` mirrors the shader math at full resolution.
+
 ### Navigation Flow
 1. Arrow keys in Detail tab check `library_index` first (library navigation mode).
 2. If `library_index` is `None`, falls back to `DirNav` (directory navigation mode).
@@ -56,8 +73,14 @@ Photo is a GPU-accelerated image viewer for Windows built in Rust. It provides a
 - Only `nav.rs` scans directories and maintains the `IMAGE_EXTENSIONS` list.
 - `main.rs` coordinates between modules but does not perform decoding or GPU operations directly.
 
+### Module Boundaries
+- Only `edit.rs` knows about adjustment math and undo/redo history.
+- Only `lens.rs` reads EXIF data and parses Lensfun XML. All Lensfun access is through this module.
+- `main.rs` coordinates: UI sliders -> `EditState` -> viewer uniforms.
+
 ### Off-Limits
 - `assets/shaders/image.wgsl` — Shader source. Changes here must be reflected in the `Uniforms` struct and bind group layout in `viewer.rs`.
+- `assets/shaders/blur.wgsl` — Blur shader source. Changes must be reflected in blur pipeline setup in `viewer.rs`.
 
 ### Integration Boundaries
 - File dialogs go through `rfd::AsyncFileDialog` only. All dialog calls live in `main.rs`.
@@ -92,6 +115,8 @@ Photo is a GPU-accelerated image viewer for Windows built in Rust. It provides a
 | Async runtime | tokio | 1.x | Multi-thread, via iced feature |
 | GPU uniforms | bytemuck | 1.x | Pod/Zeroable derive for uniform struct |
 | Natural sort | natord | 1.0 | Filename ordering in nav and library |
+| EXIF reading | kamadak-exif | 0.6 | Camera/lens EXIF metadata extraction |
+| XML parsing | quick-xml | 0.37 | Lensfun XML database parsing |
 | Logging | env_logger + log | 0.11 / 0.4 | Debug logging |
 
 ## Diagram
@@ -119,9 +144,21 @@ flowchart TD
         DirNav[Directory scanner]
     end
 
-    subgraph GPU[viewer.rs + image.wgsl]
+    subgraph Edit[edit.rs]
+        EditState[EditState + UndoHistory]
+        CPUMath[CPU adjustment math]
+        Save[Save pipeline]
+    end
+
+    subgraph Lens[lens.rs]
+        LensDB[Lensfun database]
+        EXIF[EXIF reader]
+    end
+
+    subgraph GPU[viewer.rs + shaders]
         Prepare[Texture upload]
-        Render[Shader render]
+        Blur[Blur pre-pass]
+        Render[Main shader render]
     end
 
     subgraph Ext[External libraries]
@@ -149,8 +186,17 @@ flowchart TD
     Thumb -.-> Tokio
     Full -.-> Tokio
 
+    App -->|slider values| EditState
+    EditState -->|uniforms| Prepare
+    App -->|image load| EXIF
+    EXIF -->|lens match| LensDB
+    LensDB -->|coefficients| Prepare
+
     Full -->|RGBA pixels| Prepare
+    Prepare -->|GPU texture| Blur
+    Blur -->|blur texture| Render
     Prepare -->|GPU texture| Render
+    Save -->|CPU math| ImageCrate
 ```
 
 ## Drift Log
@@ -159,3 +205,5 @@ flowchart TD
 | --- | --- | --- | --- |
 | 2026-03-29 | Initial architecture doc created from template | Project reached stable multi-module state with Library/Detail tabs | agent |
 | 2026-03-30 | Added jpeg-decoder direct dependency | DCT-level downscaling for fast JPEG thumbnails; was already a transitive dep | agent |
+| 2026-03-30 | Added image editing system (edit.rs, lens.rs, extended shader, blur pre-pass) | 12 GPU shader-based adjustments, Lensfun lens corrections, undo/redo, save-as-copy | agent |
+| 2026-03-30 | Added kamadak-exif and quick-xml dependencies | EXIF reading for lens auto-detection, Lensfun XML database parsing | agent |
