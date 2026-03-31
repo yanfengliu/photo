@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod decode;
+mod edit;
 mod nav;
 mod viewer;
 

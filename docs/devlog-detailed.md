@@ -90,3 +90,24 @@
 **Files changed:** `Cargo.toml` (added jpeg-decoder), `src/decode.rs` (rewrote thumbnail pipeline)
 **Reasoning:** User reported slow thumbnail loading. Root cause: `decode_thumbnail` fully decoded every image at original resolution then resized, which is extremely slow for large JPEGs.
 **Notes:** jpeg-decoder 0.3.2 was already a transitive dependency via the image crate, so no new binary size cost. Non-JPEG raster formats still decode at full resolution since the image crate doesn't support downscaled decoding for PNG/BMP/etc.
+
+## [2026-03-30 20:00] — Research photo editing adjustment algorithms
+**Action:** Conducted comprehensive web research on 8 photo editing adjustment algorithms for GPU fragment shader implementation: Exposure (EV-based), Contrast (S-curve/sigmoid), Highlights/Shadows/Whites/Blacks (zone-based tone mapping), Temperature/Tint (Planckian locus + Bradford CAT), Vibrance vs Saturation, Clarity (local contrast), Dehaze (Dark Channel Prior), and Lens Corrections (Lensfun models).
+**Result:** Success — compiled detailed formulas, color spaces, references, and GPU implementation notes for all 8 adjustments.
+**Files changed:** None (research only, delivered as conversation output)
+**Reasoning:** User requested authoritative, well-sourced algorithms before implementation. Each adjustment needs correct color science math, not toy approximations.
+**Notes:** Key findings: (1) Exposure is 2^EV in linear RGB. (2) Adobe's Highlights/Shadows use Local Laplacian Filters (Paris et al. SIGGRAPH 2011) — too expensive for single-pass fragment shader, need smoothstep-mask approximation. (3) Temperature should use CIE Daylight + Bradford CAT, precomputed as 3x3 matrix uniform. (4) Clarity requires multi-pass due to large-radius blur. (5) Dehaze requires min-filter pass. (6) Lensfun provides 4 distortion models, 3 TCA models, 2 vignetting models with exact polynomial formulas.
+
+## [2026-03-30 20:14] — Add image editing dependencies
+**Action:** Added `kamadak-exif = "0.6"` and `quick-xml = "0.37"` to `Cargo.toml` after the `jpeg-decoder` line. Ran `cargo check` to verify compilation.
+**Result:** Success — dependencies resolved without errors. `kamadak-exif` 0.6.1 and `quick-xml` 0.37.5 downloaded and verified. cargo check completed in 10.37s.
+**Files changed:** `Cargo.toml`
+**Reasoning:** `kamadak-exif` is needed to read EXIF data from image files for camera/lens metadata (used in lens profile auto-correction). `quick-xml` is needed to parse Lensfun's XML database of lens correction profiles. Both are lightweight and kamadak-exif is already a transitive dependency of the `image` crate (adds no new binary weight).
+**Notes:** `Cargo.lock` was regenerated but remains in `.gitignore` per project policy. Commit includes only `Cargo.toml`. Task 1 of image editing feature chain.
+
+## [2026-03-30 21:00] — Add EditState and UndoHistory data model
+**Action:** Created `src/edit.rs` with `EditState` (12 f32 adjustments + lens_correction bool, Default + is_default()), and `UndoHistory` (undo/redo stacks with commit/undo/redo/reset_all). Registered `mod edit;` in `src/main.rs`. Fixed a bug in the initial `commit()` design: the original spec pushed `current` (post-edit state) onto the undo stack, but tests require pushing the pre-edit (committed baseline) instead. Fixed by adding a `committed` field to `UndoHistory` — `commit()` pushes `committed` then sets `committed = current`.
+**Result:** Success — all 7 new edit::tests pass; full suite (41 tests) passes; `cargo build --release` succeeds with no errors (4 expected dead_code warnings since structs are not yet wired to UI).
+**Files changed:** `src/edit.rs` (created), `src/main.rs` (added `mod edit;`)
+**Reasoning:** Foundational data model needed before shader uniforms, UI sliders, or save logic can be added. Committed-baseline pattern ensures undo restores correct state when `current` is mutated directly before calling `commit()`.
+**Notes:** Dead_code warnings are expected — `EditState` and `UndoHistory` will be consumed in Tasks 4-8. The `committed` field is private; callers only interact with `current` for live preview updates and `commit()` at drag-end.
