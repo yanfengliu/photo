@@ -78,7 +78,7 @@ fn lum(rgb: vec3<f32>) -> f32 {
     return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
 }
 
-fn smooth(edge0: f32, edge1: f32, x: f32) -> f32 {
+fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
@@ -161,10 +161,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Zone-based tone adjustments
     let l = lum(px);
-    px += u.highlights * smooth(0.5, 1.0, l);
-    px += u.shadows * (1.0 - smooth(0.0, 0.5, l));
-    px += u.whites * smooth(0.85, 1.0, l);
-    px += u.blacks * (1.0 - smooth(0.0, 0.15, l));
+    px += u.highlights * smooth_step(0.5, 1.0, l);
+    px += u.shadows * (1.0 - smooth_step(0.0, 0.5, l));
+    px += u.whites * smooth_step(0.85, 1.0, l);
+    px += u.blacks * (1.0 - smooth_step(0.0, 0.15, l));
 
     // Contrast: sigmoid S-curve on luminance
     let l2 = lum(px);
@@ -196,7 +196,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let blur_sample = textureSample(blur_tex, img_sampler, blur_uv).rgb;
         let blur_lin = vec3(srgb_to_linear(blur_sample.r), srgb_to_linear(blur_sample.g), srgb_to_linear(blur_sample.b));
         let lc = lum(px);
-        let midtone = smooth(0.0, 0.5, lc) * (1.0 - smooth(0.5, 1.0, lc));
+        let midtone = smooth_step(0.0, 0.5, lc) * (1.0 - smooth_step(0.5, 1.0, lc));
         px += u.clarity * (px - blur_lin) * midtone;
     }
 

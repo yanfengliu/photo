@@ -160,3 +160,10 @@
 **Files changed:** `docs/ARCHITECTURE.md`, `docs/devlog-detailed.md`
 **Reasoning:** CLAUDE.md requires updating ARCHITECTURE.md when architecture changes. The image editing feature added 2 new modules, 1 new shader, extended the existing shader, and introduced new data flows.
 **Notes:** None.
+
+## [2026-03-31 07:24] — Fix WGSL shader crash: reserved keyword and dynamic array indexing
+**Action:** Fixed two shader compilation errors that caused the app to crash on startup (when detail view is first rendered). In `assets/shaders/image.wgsl`: renamed function `smooth` to `smooth_step` — `smooth` is a reserved keyword in WGSL. In `assets/shaders/blur.wgsl`: unrolled the `for` loop with dynamic `weights[i]` array indexing — wgpu 0.19 naga forbids dynamic indexing of local arrays. Replaced with explicit per-tap sampling with constant indices.
+**Result:** Success — app launches without crash, 61 tests pass, release build succeeds.
+**Files changed:** `assets/shaders/image.wgsl`, `assets/shaders/blur.wgsl`
+**Reasoning:** The WGSL spec reserves `smooth` as a keyword (it's an alias for `smoothstep` in some shader languages). The naga shader validator in wgpu 0.19 enforces constant-only indexing for local arrays, requiring loop unrolling for the Gaussian blur kernel.
+**Notes:** These errors were introduced during the image editing feature (Tasks 4 and 6) but only manifest at runtime when the GPU compiles the shaders. The shader source is embedded via `include_str!` so no compile-time WGSL validation occurs.

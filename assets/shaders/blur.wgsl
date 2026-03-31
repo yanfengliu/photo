@@ -31,12 +31,30 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let weights = array<f32, 5>(0.2492, 0.1836, 0.1216, 0.0540, 0.0162);
-    var color = textureSample(src_tex, src_sampler, in.uv) * weights[0];
-    for (var i = 1u; i < 5u; i++) {
-        let offset = bu.direction * f32(i);
-        color += textureSample(src_tex, src_sampler, in.uv + offset) * weights[i];
-        color += textureSample(src_tex, src_sampler, in.uv - offset) * weights[i];
-    }
+    // 9-tap Gaussian kernel (unrolled — wgpu 0.19 naga forbids dynamic array indexing)
+    let w0 = 0.2492;
+    let w1 = 0.1836;
+    let w2 = 0.1216;
+    let w3 = 0.0540;
+    let w4 = 0.0162;
+
+    var color = textureSample(src_tex, src_sampler, in.uv) * w0;
+
+    let off1 = bu.direction * 1.0;
+    color += textureSample(src_tex, src_sampler, in.uv + off1) * w1;
+    color += textureSample(src_tex, src_sampler, in.uv - off1) * w1;
+
+    let off2 = bu.direction * 2.0;
+    color += textureSample(src_tex, src_sampler, in.uv + off2) * w2;
+    color += textureSample(src_tex, src_sampler, in.uv - off2) * w2;
+
+    let off3 = bu.direction * 3.0;
+    color += textureSample(src_tex, src_sampler, in.uv + off3) * w3;
+    color += textureSample(src_tex, src_sampler, in.uv - off3) * w3;
+
+    let off4 = bu.direction * 4.0;
+    color += textureSample(src_tex, src_sampler, in.uv + off4) * w4;
+    color += textureSample(src_tex, src_sampler, in.uv - off4) * w4;
+
     return color;
 }

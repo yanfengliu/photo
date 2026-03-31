@@ -53,3 +53,6 @@
 - AdjustmentUniforms uses plain types (f32, bool, arrays) so it can be constructed without wgpu dependency
 - Slider values divided by 100 in uniform write (sliders are -100..+100, shader expects -1..+1)
 - Zero temp_matrix triggers identity matrix fallback; zero TCA scales default to 1.0
+
+## Bug fixes
+24. Fixed WGSL shader crash: renamed `smooth` to `smooth_step` (reserved keyword in WGSL), unrolled blur loop (wgpu 0.19 naga forbids dynamic array indexing) — SUCCESS

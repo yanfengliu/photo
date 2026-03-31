@@ -35,7 +35,9 @@
       "Bash(powershell -Command \"\\(Get-Content ''C:\\\\Users\\\\38909\\\\Documents\\\\github\\\\photo\\\\docs\\\\devlog-detailed.md''\\).Count\")",
       "Bash(powershell -Command \"Get-Date -Format ''yyyy-MM-dd HH:mm''\")",
       "Bash(taskkill //F //IM cargo.exe)",
-      "Bash(taskkill //F //IM clippy-driver.exe)"
+      "Bash(taskkill //F //IM clippy-driver.exe)",
+      "Bash(RUST_BACKTRACE=full timeout 10 ./target/release/photo.exe)",
+      "Bash(RUST_BACKTRACE=1 timeout 10 ./target/release/photo.exe)"
     ]
   }
 }
