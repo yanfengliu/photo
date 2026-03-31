@@ -1,44 +1,24 @@
-/// Image editing state and undo/redo history.
-/// All adjustment math lives here — both the data model and CPU-side
-/// processing for full-resolution save.
+//! Image editing state and undo/redo history.
+//! All adjustment math lives here — both the data model and CPU-side
+//! processing for full-resolution save.
 
 // -- Data model --
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EditState {
-    pub exposure: f32,      // -5.0 to +5.0 (stops)
-    pub contrast: f32,      // -100 to +100
-    pub highlights: f32,    // -100 to +100
-    pub shadows: f32,       // -100 to +100
-    pub whites: f32,        // -100 to +100
-    pub blacks: f32,        // -100 to +100
-    pub temperature: f32,   // -100 to +100
-    pub tint: f32,          // -100 to +100
-    pub vibrance: f32,      // -100 to +100
-    pub saturation: f32,    // -100 to +100
-    pub clarity: f32,       // -100 to +100
-    pub dehaze: f32,        // -100 to +100
+    pub exposure: f32,    // -5.0 to +5.0 (stops)
+    pub contrast: f32,    // -100 to +100
+    pub highlights: f32,  // -100 to +100
+    pub shadows: f32,     // -100 to +100
+    pub whites: f32,      // -100 to +100
+    pub blacks: f32,      // -100 to +100
+    pub temperature: f32, // -100 to +100
+    pub tint: f32,        // -100 to +100
+    pub vibrance: f32,    // -100 to +100
+    pub saturation: f32,  // -100 to +100
+    pub clarity: f32,     // -100 to +100
+    pub dehaze: f32,      // -100 to +100
     pub lens_correction: bool,
-}
-
-impl Default for EditState {
-    fn default() -> Self {
-        Self {
-            exposure: 0.0,
-            contrast: 0.0,
-            highlights: 0.0,
-            shadows: 0.0,
-            whites: 0.0,
-            blacks: 0.0,
-            temperature: 0.0,
-            tint: 0.0,
-            vibrance: 0.0,
-            saturation: 0.0,
-            clarity: 0.0,
-            dehaze: 0.0,
-            lens_correction: false,
-        }
-    }
 }
 
 impl EditState {
@@ -48,6 +28,7 @@ impl EditState {
     }
 }
 
+#[derive(Debug)]
 pub struct UndoHistory {
     undo_stack: Vec<EditState>,
     redo_stack: Vec<EditState>,
@@ -55,6 +36,12 @@ pub struct UndoHistory {
     /// undo stack and then updated to `current`.
     committed: EditState,
     pub current: EditState,
+}
+
+impl Default for UndoHistory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UndoHistory {

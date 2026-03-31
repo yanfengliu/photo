@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod decode;
+#[allow(dead_code)] // Wired to UI in Task 8
 mod edit;
 mod nav;
 mod viewer;
