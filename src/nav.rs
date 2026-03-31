@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "svgz", "ico", "tga",
-    "qoi", "hdr", "exr",
+    "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "svgz", "ico", "tga", "qoi",
+    "hdr", "exr",
 ];
 
 pub struct DirNav {

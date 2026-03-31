@@ -8,8 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::widget::image::Handle as ImageHandle;
-use iced::widget::{button, column, container, horizontal_space, row, scrollable, shader, text, Image};
-use iced::{event, keyboard, window, Alignment, Color, Element, Length, Size, Subscription, Task, Theme};
+use iced::widget::{
+    button, column, container, horizontal_space, row, scrollable, shader, text, Image,
+};
+use iced::{
+    event, keyboard, window, Alignment, Color, Element, Length, Size, Subscription, Task, Theme,
+};
 
 use decode::ImageData;
 use nav::DirNav;
@@ -218,18 +222,16 @@ impl App {
             Message::AddFiles => Task::perform(
                 async {
                     rfd::AsyncFileDialog::new()
-                        .add_filter("Images", &[
-                            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp",
-                            "svg", "svgz", "ico", "tga", "qoi", "hdr", "exr",
-                        ])
+                        .add_filter(
+                            "Images",
+                            &[
+                                "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg",
+                                "svgz", "ico", "tga", "qoi", "hdr", "exr",
+                            ],
+                        )
                         .pick_files()
                         .await
-                        .map(|files| {
-                            files
-                                .into_iter()
-                                .map(|f| f.path().to_path_buf())
-                                .collect()
-                        })
+                        .map(|files| files.into_iter().map(|f| f.path().to_path_buf()).collect())
                 },
                 Message::FilesPicked,
             ),
@@ -318,9 +320,9 @@ impl App {
 
     fn handle_event(&mut self, event: iced::Event) -> Task<Message> {
         match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                key, modifiers, ..
-            }) => self.handle_key(key, modifiers),
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                self.handle_key(key, modifiers)
+            }
 
             iced::Event::Window(window::Event::FileDropped(path)) => {
                 self.nav = Some(DirNav::new(&path));
@@ -453,10 +455,13 @@ impl App {
         Task::perform(
             async {
                 rfd::AsyncFileDialog::new()
-                    .add_filter("Images", &[
-                        "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg",
-                        "svgz", "ico", "tga", "qoi", "hdr", "exr",
-                    ])
+                    .add_filter(
+                        "Images",
+                        &[
+                            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg",
+                            "svgz", "ico", "tga", "qoi", "hdr", "exr",
+                        ],
+                    )
                     .pick_file()
                     .await
                     .map(|f| f.path().to_path_buf())

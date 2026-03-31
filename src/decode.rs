@@ -44,8 +44,7 @@ fn decode_raster(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
         let scale = MAX_TEXTURE_DIM as f32 / w.max(h) as f32;
         let nw = (w as f32 * scale) as u32;
         let nh = (h as f32 * scale) as u32;
-        let resized =
-            image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Lanczos3);
+        let resized = image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Lanczos3);
         let (rw, rh) = resized.dimensions();
         return Ok((resized.into_raw(), rw, rh));
     }

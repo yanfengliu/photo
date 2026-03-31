@@ -62,3 +62,10 @@
 **Files changed:** `docs/ARCHITECTURE.md` (full rewrite from template), `CLAUDE.md` (key directories section)
 **Reasoning:** CLAUDE.md requires reading and updating ARCHITECTURE.md for structural changes. The template was never populated. The Library/Detail tab addition was a structural change that warranted the initial population.
 **Notes:** None.
+
+## [2026-03-30 12:00] — Add development and release instructions to README.md
+**Action:** Expanded README.md from a single title line to full documentation: project description, features, prerequisites, development instructions (build, run, test, lint, format), release workflow, and project structure. Also ran `cargo fmt` to fix pre-existing formatting issues across 4 source files.
+**Result:** Success — all 31 tests pass, clippy clean, formatting clean, release build succeeds.
+**Files changed:** `README.md` (expanded), `src/main.rs` (fmt), `src/decode.rs` (fmt), `src/nav.rs` (fmt), `src/viewer.rs` (fmt)
+**Reasoning:** User requested development and release instructions in README.md.
+**Notes:** Formatting issues were pre-existing from prior sessions. Fixed them to satisfy CLAUDE.md's "all linter tests pass" requirement.
