@@ -166,6 +166,10 @@ struct GpuResources {
     bind_group: Option<wgpu::BindGroup>,
     current_image_id: u64,
     blur_texture_view: Option<wgpu::TextureView>,
+    // Blur pre-pass pipeline resources
+    blur_pipeline: Option<wgpu::RenderPipeline>,
+    blur_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    blur_uniform_buffer: Option<wgpu::Buffer>,
     // Widget bounds in physical pixels (for viewport in render pass)
     phys_bounds: [f32; 4],
 }
@@ -493,6 +497,86 @@ impl shader::Primitive for ImagePrimitive {
             let placeholder_blur_view =
                 placeholder_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
+            // Blur pipeline for clarity/dehaze pre-pass
+            let blur_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("blur_shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../assets/shaders/blur.wgsl").into(),
+                ),
+            });
+
+            let blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("blur_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+            let blur_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("blur_pl"),
+                bind_group_layouts: &[&blur_bgl],
+                push_constant_ranges: &[],
+            });
+
+            let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("blur_pipeline"),
+                layout: Some(&blur_pl),
+                vertex: wgpu::VertexState {
+                    module: &blur_module,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blur_module,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            });
+
+            // Blur uniform buffer (vec2 direction + vec2 pad = 16 bytes)
+            let blur_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("blur_uniforms"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
             storage.store(GpuResources {
                 pipeline,
                 bind_group_layout: bgl,
@@ -503,6 +587,9 @@ impl shader::Primitive for ImagePrimitive {
                 bind_group: None,
                 current_image_id: 0,
                 blur_texture_view: Some(placeholder_blur_view),
+                blur_pipeline: Some(blur_pipeline),
+                blur_bind_group_layout: Some(blur_bgl),
+                blur_uniform_buffer: Some(blur_uniform_buffer),
                 phys_bounds: [0.0; 4],
             });
         }
@@ -584,6 +671,160 @@ impl shader::Primitive for ImagePrimitive {
 
                 let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
 
+                // Generate blur texture for clarity/dehaze
+                if let (Some(blur_pipeline), Some(blur_bgl), Some(blur_ubuf)) = (
+                    &res.blur_pipeline,
+                    &res.blur_bind_group_layout,
+                    &res.blur_uniform_buffer,
+                ) {
+                    let blur_w = (upload_w / 4).max(1);
+                    let blur_h = (upload_h / 4).max(1);
+
+                    // Intermediate texture (horizontal blur output)
+                    let intermediate_tex = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("blur_intermediate"),
+                        size: wgpu::Extent3d {
+                            width: blur_w,
+                            height: blur_h,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    });
+                    let intermediate_view =
+                        intermediate_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                    // Final blur texture
+                    let blur_tex = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("blur_final"),
+                        size: wgpu::Extent3d {
+                            width: blur_w,
+                            height: blur_h,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    });
+                    let blur_final_view =
+                        blur_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                    // Horizontal blur pass: source = image texture -> intermediate
+                    {
+                        let h_dir: [f32; 4] = [1.0 / blur_w as f32, 0.0, 0.0, 0.0];
+                        queue.write_buffer(blur_ubuf, 0, bytemuck::cast_slice(&h_dir));
+
+                        let h_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("blur_h_bg"),
+                            layout: blur_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: blur_ubuf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(&res.sampler),
+                                },
+                            ],
+                        });
+
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("blur_h_enc"),
+                            });
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("blur_h_pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &intermediate_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                            pass.set_pipeline(blur_pipeline);
+                            pass.set_bind_group(0, &h_bg, &[]);
+                            pass.draw(0..6, 0..1);
+                        }
+                        queue.submit(std::iter::once(encoder.finish()));
+                    }
+
+                    // Vertical blur pass: source = intermediate -> final blur
+                    {
+                        let v_dir: [f32; 4] = [0.0, 1.0 / blur_h as f32, 0.0, 0.0];
+                        queue.write_buffer(blur_ubuf, 0, bytemuck::cast_slice(&v_dir));
+
+                        let v_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("blur_v_bg"),
+                            layout: blur_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: blur_ubuf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &intermediate_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(&res.sampler),
+                                },
+                            ],
+                        });
+
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("blur_v_enc"),
+                            });
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("blur_v_pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &blur_final_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                            pass.set_pipeline(blur_pipeline);
+                            pass.set_bind_group(0, &v_bg, &[]);
+                            pass.draw(0..6, 0..1);
+                        }
+                        queue.submit(std::iter::once(encoder.finish()));
+                    }
+
+                    res.blur_texture_view = Some(blur_final_view);
+                }
+
+                // Create main bind group AFTER blur passes so it uses the
+                // real blur texture view instead of the placeholder.
                 let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("photo_bg"),
                     layout: &res.bind_group_layout,

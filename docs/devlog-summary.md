@@ -31,6 +31,14 @@
 14. Added `decode_thumbnail` function in decode.rs, made `is_image_file` public in nav.rs — SUCCESS
 15. Added 7 new tests (31 total): thumbnail decode tests and library UI tests — SUCCESS
 
+## Image editing feature (feat/image-editing branch)
+16. Added kamadak-exif and quick-xml dependencies for EXIF/lens data — SUCCESS
+17. Added EditState (12 adjustments) and UndoHistory (undo/redo/reset) in src/edit.rs — SUCCESS
+18. Added CPU adjustment math (exposure, contrast, highlights, shadows, whites, blacks, vibrance, saturation, clarity, dehaze, temperature/tint Bradford CAT, lens corrections) and edited_save_path — SUCCESS
+19. Rewrote WGSL shader with full adjustment pipeline (32-field Uniforms, blur texture binding 3, lens corrections) — SUCCESS
+20. Extended Rust-side Uniforms struct to match shader, added AdjustmentUniforms, blur placeholder texture, wired adjustments through pipeline — SUCCESS
+21. Added Gaussian blur pre-pass: blur.wgsl shader, blur pipeline in viewer.rs, two-pass separable blur at 1/4 resolution on image load — SUCCESS
+
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate (avoids type mismatches in `shader::Primitive` trait)
 - GPU texture limit check done at upload time in `prepare()`, not at decode time (GPU not available during decode)
@@ -40,3 +48,6 @@
 - Thumbnails decode full image then resize; optimization for large files deferred
 - Grid uses fixed 6 columns; tab highlighting uses Unicode bullet character
 - Two navigation modes: library-based (entering from library) and directory-based (CLI/drag-drop/Ctrl+O)
+- AdjustmentUniforms uses plain types (f32, bool, arrays) so it can be constructed without wgpu dependency
+- Slider values divided by 100 in uniform write (sliders are -100..+100, shader expects -1..+1)
+- Zero temp_matrix triggers identity matrix fallback; zero TCA scales default to 1.0
