@@ -23,6 +23,7 @@ pub struct LensProfile {
 
 #[derive(Debug, Clone, Copy)]
 pub struct DistortionCoeffs {
+    #[allow(dead_code)]
     pub model: DistortionModel,
     pub a: f32,
     pub b: f32,
@@ -51,10 +52,13 @@ pub struct TcaCoeffs {
 #[derive(Debug, Clone, Default)]
 pub struct ExifInfo {
     pub camera_make: String,
+    #[allow(dead_code)]
     pub camera_model: String,
     pub lens_make: String,
     pub lens_model: String,
+    #[allow(dead_code)]
     pub focal_length: Option<f32>,
+    #[allow(dead_code)]
     pub aperture: Option<f32>,
 }
 

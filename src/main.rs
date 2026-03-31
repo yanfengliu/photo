@@ -1,9 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod decode;
-#[allow(dead_code)] // Wired to UI in Task 8
 mod edit;
-#[allow(dead_code)] // Wired to UI in Task 8
 mod lens;
 mod nav;
 mod viewer;
@@ -13,7 +11,8 @@ use std::sync::Arc;
 
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
-    button, column, container, horizontal_space, row, scrollable, shader, text, Image,
+    button, column, container, horizontal_space, row, scrollable, shader, slider, text, text_input,
+    Image,
 };
 use iced::{
     event, keyboard, window, Alignment, Color, Element, Length, Size, Subscription, Task, Theme,
@@ -48,6 +47,22 @@ enum Tab {
     Detail,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliderKind {
+    Exposure,
+    Contrast,
+    Highlights,
+    Shadows,
+    Whites,
+    Blacks,
+    Temperature,
+    Tint,
+    Vibrance,
+    Saturation,
+    Clarity,
+    Dehaze,
+}
+
 struct LibraryEntry {
     path: PathBuf,
     filename: String,
@@ -70,6 +85,15 @@ struct App {
     library_index: Option<usize>,
     loading: bool,
     error: Option<String>,
+    edit_panel_open: bool,
+    edit_histories: std::collections::HashMap<PathBuf, edit::UndoHistory>,
+    current_image_path: Option<PathBuf>,
+    lens_db: lens::LensDatabase,
+    current_lens_profile: Option<lens::LensProfile>,
+    current_exif: Option<lens::ExifInfo>,
+    save_status: Option<String>,
+    editing_slider: Option<SliderKind>,
+    slider_text_buf: String,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +111,16 @@ enum Message {
     FilesPicked(Option<Vec<PathBuf>>),
     ThumbnailLoaded(PathBuf, Result<Arc<ImageData>, String>),
     LibraryItemClicked(usize),
+    ToggleEditPanel,
+    SliderChanged(SliderKind, f32),
+    SliderReleased,
+    ResetAll,
+    SaveEdited,
+    SaveCompleted(Result<String, String>),
+    ToggleLensCorrection,
+    SliderTextInput(SliderKind),
+    SliderTextChanged(String),
+    SliderTextSubmit(SliderKind),
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +141,15 @@ impl App {
             library_index: None,
             loading: false,
             error: None,
+            edit_panel_open: false,
+            edit_histories: std::collections::HashMap::new(),
+            current_image_path: None,
+            lens_db: lens::LensDatabase::load_bundled(),
+            current_lens_profile: None,
+            current_exif: None,
+            save_status: None,
+            editing_slider: None,
+            slider_text_buf: String::new(),
         };
 
         // Restore saved library entries
@@ -120,11 +163,13 @@ impl App {
             if path.exists() {
                 app.tab = Tab::Detail;
                 app.nav = Some(DirNav::new(&path));
+                app.current_image_path = Some(path.clone());
                 app.loading = true;
+                let load_path = path;
                 Task::perform(
                     async move {
                         let result: Result<Arc<ImageData>, String> =
-                            tokio::task::spawn_blocking(move || decode::decode_image(&path))
+                            tokio::task::spawn_blocking(move || decode::decode_image(&load_path))
                                 .await
                                 .map_err(|e| e.to_string())?;
                         result
@@ -186,6 +231,7 @@ impl App {
                 self.nav = Some(DirNav::new(&path));
                 self.library_index = None;
                 self.tab = Tab::Detail;
+                self.current_image_path = Some(path.clone());
                 self.start_load(path)
             }
             Message::FileSelected(None) => Task::none(),
@@ -197,6 +243,19 @@ impl App {
                 self.offset = [0.0, 0.0];
                 self.loading = false;
                 self.error = None;
+                if let Some(path) = &self.current_image_path {
+                    self.current_exif = lens::read_exif(path);
+                    self.current_lens_profile = self.current_exif.as_ref().and_then(|exif_info| {
+                        let maker = if exif_info.lens_make.is_empty() {
+                            &exif_info.camera_make
+                        } else {
+                            &exif_info.lens_make
+                        };
+                        self.lens_db
+                            .find_lens(maker, &exif_info.lens_model)
+                            .cloned()
+                    });
+                }
                 Task::none()
             }
             Message::ImageLoaded(Err(e)) => {
@@ -281,10 +340,122 @@ impl App {
                     self.library_index = Some(index);
                     self.tab = Tab::Detail;
                     let path = entry.path.clone();
+                    self.current_image_path = Some(path.clone());
                     self.start_load(path)
                 } else {
                     Task::none()
                 }
+            }
+
+            Message::ToggleEditPanel => {
+                self.edit_panel_open = !self.edit_panel_open;
+                Task::none()
+            }
+
+            Message::SliderChanged(kind, value) => {
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    set_slider_field(&mut history.current, kind, value);
+                }
+                Task::none()
+            }
+
+            Message::SliderReleased => {
+                if let Some(path) = &self.current_image_path {
+                    if let Some(history) = self.edit_histories.get_mut(path) {
+                        history.commit();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ResetAll => {
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    history.reset_all();
+                }
+                Task::none()
+            }
+
+            Message::ToggleLensCorrection => {
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    history.current.lens_correction = !history.current.lens_correction;
+                    history.commit();
+                }
+                Task::none()
+            }
+
+            Message::SaveEdited => {
+                let Some(path) = self.current_image_path.clone() else {
+                    return Task::none();
+                };
+                let Some(img) = self.image.clone() else {
+                    return Task::none();
+                };
+                let state = self
+                    .edit_histories
+                    .get(&path)
+                    .map(|h| h.current)
+                    .unwrap_or_default();
+                self.save_status = Some("Saving...".to_string());
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            edit::save_edited_image(
+                                &path,
+                                &img.pixels,
+                                img.width,
+                                img.height,
+                                &state,
+                            )
+                            .map(|p| p.to_string_lossy().into_owned())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::SaveCompleted,
+                )
+            }
+
+            Message::SaveCompleted(result) => {
+                self.save_status = Some(match result {
+                    Ok(path) => format!("Saved: {path}"),
+                    Err(e) => format!("Save failed: {e}"),
+                });
+                Task::none()
+            }
+
+            Message::SliderTextInput(kind) => {
+                let value = self
+                    .current_image_path
+                    .as_ref()
+                    .and_then(|p| self.edit_histories.get(p))
+                    .map(|h| get_slider_field(&h.current, kind))
+                    .unwrap_or(0.0);
+                self.editing_slider = Some(kind);
+                self.slider_text_buf = format!("{:.1}", value);
+                Task::none()
+            }
+
+            Message::SliderTextChanged(s) => {
+                self.slider_text_buf = s;
+                Task::none()
+            }
+
+            Message::SliderTextSubmit(kind) => {
+                if let Ok(value) = self.slider_text_buf.parse::<f32>() {
+                    let (min, max) = slider_range(kind);
+                    let clamped = value.clamp(min, max);
+                    if let Some(path) = &self.current_image_path {
+                        let history = self.edit_histories.entry(path.clone()).or_default();
+                        set_slider_field(&mut history.current, kind, clamped);
+                        history.commit();
+                    }
+                }
+                self.editing_slider = None;
+                self.slider_text_buf.clear();
+                Task::none()
             }
         }
     }
@@ -339,6 +510,7 @@ impl App {
                 self.nav = Some(DirNav::new(&path));
                 self.library_index = None;
                 self.tab = Tab::Detail;
+                self.current_image_path = Some(path.clone());
                 self.start_load(path)
             }
 
@@ -358,10 +530,12 @@ impl App {
                         if !self.library.is_empty() {
                             *lib_idx = (*lib_idx + 1) % self.library.len();
                             let path = self.library[*lib_idx].path.clone();
+                            self.current_image_path = Some(path.clone());
                             return self.start_load(path);
                         }
                     } else if let Some(nav) = &mut self.nav {
                         if let Some(p) = nav.next() {
+                            self.current_image_path = Some(p.clone());
                             return self.start_load(p);
                         }
                     }
@@ -379,14 +553,42 @@ impl App {
                                 *lib_idx - 1
                             };
                             let path = self.library[*lib_idx].path.clone();
+                            self.current_image_path = Some(path.clone());
                             return self.start_load(path);
                         }
                     } else if let Some(nav) = &mut self.nav {
                         if let Some(p) = nav.prev() {
+                            self.current_image_path = Some(p.clone());
                             return self.start_load(p);
                         }
                     }
                 }
+            }
+
+            // Undo
+            Key::Character(ref c) if c.as_str() == "z" && mods.command() && !mods.shift() => {
+                if let Some(path) = &self.current_image_path {
+                    if let Some(history) = self.edit_histories.get_mut(path) {
+                        history.undo();
+                    }
+                }
+                return Task::none();
+            }
+            // Redo
+            Key::Character(ref c)
+                if (c.as_str() == "z" && mods.command() && mods.shift())
+                    || (c.as_str() == "y" && mods.command()) =>
+            {
+                if let Some(path) = &self.current_image_path {
+                    if let Some(history) = self.edit_histories.get_mut(path) {
+                        history.redo();
+                    }
+                }
+                return Task::none();
+            }
+            // Save
+            Key::Character(ref c) if c.as_str() == "s" && mods.command() => {
+                return self.update(Message::SaveEdited);
             }
 
             // Open file dialog
@@ -529,6 +731,21 @@ impl App {
             .on_press(Message::SwitchTab(Tab::Detail))
             .padding([6, 16]);
 
+        let edit_btn = button(
+            text(if self.edit_panel_open {
+                "* Edit"
+            } else {
+                "  Edit"
+            })
+            .size(13),
+        )
+        .on_press(Message::ToggleEditPanel)
+        .padding([6, 16]);
+
+        let save_btn = button(text("Save").size(12))
+            .on_press(Message::SaveEdited)
+            .padding([5, 12]);
+
         let add_folder_btn = button(text("+ Folder").size(12))
             .on_press(Message::AddFolder)
             .padding([5, 12]);
@@ -541,7 +758,9 @@ impl App {
             row![
                 library_btn,
                 detail_btn,
+                edit_btn,
                 horizontal_space(),
+                save_btn,
                 add_folder_btn,
                 add_files_btn,
             ]
@@ -646,14 +865,19 @@ impl App {
             image_id: self.image_id,
             zoom: self.zoom,
             offset: self.offset,
-            adjustments: Default::default(),
+            adjustments: self.build_adjustment_uniforms(),
         })
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
 
-        let status = self.status_bar();
-        column![canvas.map(Message::Viewer), status].into()
+        let viewer_with_status = column![canvas.map(Message::Viewer), self.status_bar()];
+
+        if self.edit_panel_open {
+            row![viewer_with_status.width(Length::Fill), self.edit_panel(),].into()
+        } else {
+            viewer_with_status.into()
+        }
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
@@ -698,11 +922,256 @@ impl App {
             .padding([5, 10])
             .into()
     }
+
+    // ---------------------------------------------------------------------------
+    // Edit panel
+    // ---------------------------------------------------------------------------
+
+    fn edit_panel(&self) -> Element<'_, Message> {
+        let state = self
+            .current_image_path
+            .as_ref()
+            .and_then(|p| self.edit_histories.get(p))
+            .map(|h| h.current)
+            .unwrap_or_default();
+
+        // Light section
+        let light = column![
+            text("Light").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
+            self.slider_row("Exposure", SliderKind::Exposure, state.exposure),
+            self.slider_row("Contrast", SliderKind::Contrast, state.contrast),
+            self.slider_row("Highlights", SliderKind::Highlights, state.highlights),
+            self.slider_row("Shadows", SliderKind::Shadows, state.shadows),
+            self.slider_row("Whites", SliderKind::Whites, state.whites),
+            self.slider_row("Blacks", SliderKind::Blacks, state.blacks),
+        ]
+        .spacing(4);
+
+        // Color section
+        let color = column![
+            text("Color").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
+            self.slider_row("Temperature", SliderKind::Temperature, state.temperature),
+            self.slider_row("Tint", SliderKind::Tint, state.tint),
+            self.slider_row("Vibrance", SliderKind::Vibrance, state.vibrance),
+            self.slider_row("Saturation", SliderKind::Saturation, state.saturation),
+        ]
+        .spacing(4);
+
+        // Effects section
+        let effects = column![
+            text("Effects")
+                .size(12)
+                .color(Color::from_rgb(0.6, 0.6, 0.6)),
+            self.slider_row("Clarity", SliderKind::Clarity, state.clarity),
+            self.slider_row("Dehaze", SliderKind::Dehaze, state.dehaze),
+        ]
+        .spacing(4);
+
+        // Lens correction section
+        let lens_label = if state.lens_correction {
+            "Lens Correction: ON"
+        } else {
+            "Lens Correction: OFF"
+        };
+        let lens_btn = button(text(lens_label).size(12))
+            .on_press(Message::ToggleLensCorrection)
+            .padding([4, 8]);
+        let lens_info: Element<'_, Message> = if let Some(profile) = &self.current_lens_profile {
+            text(format!("{} {}", profile.maker, profile.model))
+                .size(10)
+                .color(Color::from_rgb(0.5, 0.5, 0.5))
+                .into()
+        } else {
+            text("No lens profile found")
+                .size(10)
+                .color(Color::from_rgb(0.4, 0.4, 0.4))
+                .into()
+        };
+        let lens_section = column![
+            text("Lens").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
+            lens_btn,
+            lens_info
+        ]
+        .spacing(4);
+
+        // Reset button
+        let reset_btn = button(text("Reset All").size(12))
+            .on_press(Message::ResetAll)
+            .padding([4, 12]);
+
+        // Status text
+        let status_text: Element<'_, Message> = if let Some(status) = &self.save_status {
+            text(status)
+                .size(10)
+                .color(Color::from_rgb(0.5, 0.7, 0.5))
+                .into()
+        } else {
+            text("").size(10).into()
+        };
+
+        let panel_content = column![light, color, effects, lens_section, reset_btn, status_text,]
+            .spacing(12)
+            .padding(10);
+
+        container(scrollable(panel_content).height(Length::Fill))
+            .width(280)
+            .into()
+    }
+
+    fn slider_row(&self, label: &str, kind: SliderKind, value: f32) -> Element<'_, Message> {
+        let (min, max) = slider_range(kind);
+        let step = slider_step(kind);
+
+        let label_el: Element<'_, Message> = button(
+            text(label.to_string())
+                .size(11)
+                .color(Color::from_rgb(0.7, 0.7, 0.7)),
+        )
+        .on_press(Message::SliderChanged(kind, 0.0))
+        .padding(0)
+        .into();
+
+        let value_el: Element<'_, Message> = if self.editing_slider == Some(kind) {
+            text_input("", &self.slider_text_buf)
+                .on_input(Message::SliderTextChanged)
+                .on_submit(Message::SliderTextSubmit(kind))
+                .size(11)
+                .width(45)
+                .into()
+        } else {
+            button(
+                text(format!("{:.1}", value))
+                    .size(11)
+                    .color(Color::from_rgb(0.8, 0.8, 0.8)),
+            )
+            .on_press(Message::SliderTextInput(kind))
+            .padding(0)
+            .into()
+        };
+
+        let slider_el = slider(min..=max, value, move |v| Message::SliderChanged(kind, v))
+            .step(step)
+            .on_release(Message::SliderReleased)
+            .width(130);
+
+        row![
+            container(label_el).width(75),
+            container(value_el).width(45),
+            slider_el,
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Adjustment uniforms
+    // ---------------------------------------------------------------------------
+
+    fn build_adjustment_uniforms(&self) -> viewer::AdjustmentUniforms {
+        let state = self
+            .current_image_path
+            .as_ref()
+            .and_then(|p| self.edit_histories.get(p))
+            .map(|h| h.current)
+            .unwrap_or_default();
+
+        let temp_matrix = edit::temperature_tint_matrix(state.temperature, state.tint);
+
+        let (lens_dist, lens_vig, lens_tca_r, lens_tca_b) = if state.lens_correction {
+            match &self.current_lens_profile {
+                Some(p) => {
+                    let dist = p.distortion.map(|d| [d.a, d.b, d.c]).unwrap_or([0.0; 3]);
+                    let vig = p.vignetting.map(|v| [v.k1, v.k2, v.k3]).unwrap_or([0.0; 3]);
+                    let tca_r = p.tca.map(|t| t.vr).unwrap_or(1.0);
+                    let tca_b = p.tca.map(|t| t.vb).unwrap_or(1.0);
+                    (dist, vig, tca_r, tca_b)
+                }
+                None => ([0.0; 3], [0.0; 3], 1.0, 1.0),
+            }
+        } else {
+            ([0.0; 3], [0.0; 3], 1.0, 1.0)
+        };
+
+        let image_aspect = self
+            .image
+            .as_ref()
+            .map(|img| img.width as f32 / img.height as f32)
+            .unwrap_or(1.0);
+
+        viewer::AdjustmentUniforms {
+            exposure: state.exposure,
+            contrast: state.contrast,
+            highlights: state.highlights,
+            shadows: state.shadows,
+            whites: state.whites,
+            blacks: state.blacks,
+            vibrance: state.vibrance,
+            saturation: state.saturation,
+            clarity: state.clarity,
+            dehaze: state.dehaze,
+            temp_matrix,
+            lens_enabled: state.lens_correction,
+            lens_dist,
+            lens_vig,
+            lens_tca_r,
+            lens_tca_b,
+            image_aspect,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
+
+fn set_slider_field(state: &mut edit::EditState, kind: SliderKind, value: f32) {
+    match kind {
+        SliderKind::Exposure => state.exposure = value,
+        SliderKind::Contrast => state.contrast = value,
+        SliderKind::Highlights => state.highlights = value,
+        SliderKind::Shadows => state.shadows = value,
+        SliderKind::Whites => state.whites = value,
+        SliderKind::Blacks => state.blacks = value,
+        SliderKind::Temperature => state.temperature = value,
+        SliderKind::Tint => state.tint = value,
+        SliderKind::Vibrance => state.vibrance = value,
+        SliderKind::Saturation => state.saturation = value,
+        SliderKind::Clarity => state.clarity = value,
+        SliderKind::Dehaze => state.dehaze = value,
+    }
+}
+
+fn get_slider_field(state: &edit::EditState, kind: SliderKind) -> f32 {
+    match kind {
+        SliderKind::Exposure => state.exposure,
+        SliderKind::Contrast => state.contrast,
+        SliderKind::Highlights => state.highlights,
+        SliderKind::Shadows => state.shadows,
+        SliderKind::Whites => state.whites,
+        SliderKind::Blacks => state.blacks,
+        SliderKind::Temperature => state.temperature,
+        SliderKind::Tint => state.tint,
+        SliderKind::Vibrance => state.vibrance,
+        SliderKind::Saturation => state.saturation,
+        SliderKind::Clarity => state.clarity,
+        SliderKind::Dehaze => state.dehaze,
+    }
+}
+
+fn slider_range(kind: SliderKind) -> (f32, f32) {
+    match kind {
+        SliderKind::Exposure => (-5.0, 5.0),
+        _ => (-100.0, 100.0),
+    }
+}
+
+fn slider_step(kind: SliderKind) -> f32 {
+    match kind {
+        SliderKind::Exposure => 0.05,
+        _ => 1.0,
+    }
+}
 
 fn library_file_path() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|dir| Path::new(&dir).join("photo").join("library.txt"))

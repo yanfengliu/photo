@@ -38,6 +38,8 @@
 19. Rewrote WGSL shader with full adjustment pipeline (32-field Uniforms, blur texture binding 3, lens corrections) — SUCCESS
 20. Extended Rust-side Uniforms struct to match shader, added AdjustmentUniforms, blur placeholder texture, wired adjustments through pipeline — SUCCESS
 21. Added Gaussian blur pre-pass: blur.wgsl shader, blur pipeline in viewer.rs, two-pass separable blur at 1/4 resolution on image load — SUCCESS
+22. Added Lensfun XML parser (src/lens.rs): data types, quick-xml parser, kamadak-exif EXIF reader, LensDatabase with substring lookup, 16 bundled lens profiles — SUCCESS
+23. Wired edit panel UI (Tasks 8+9): sidebar with 12 sliders in 4 sections, undo/redo/save keybinds, lens correction toggle, CPU save, EXIF auto-detection, inline text editing — SUCCESS
 
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate (avoids type mismatches in `shader::Primitive` trait)

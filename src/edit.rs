@@ -23,6 +23,7 @@ pub struct EditState {
 
 impl EditState {
     /// Returns true if all adjustments are at their defaults (no edits).
+    #[cfg(test)]
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -94,10 +95,12 @@ impl UndoHistory {
         self.current = EditState::default();
     }
 
+    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
 
+    #[cfg(test)]
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }
@@ -359,6 +362,77 @@ pub fn apply_all(
 
 // -- Save --
 
+/// Apply all edits and save to disk. Returns the output path on success.
+pub fn save_edited_image(
+    original_path: &Path,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    state: &EditState,
+) -> Result<PathBuf, String> {
+    let temp_matrix = temperature_tint_matrix(state.temperature, state.tint);
+    let blur = generate_cpu_blur(pixels, width, height);
+
+    let mut output = Vec::with_capacity(pixels.len());
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+            let srgb = [
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            ];
+            let bx = (x / 4).min((width / 4).saturating_sub(1));
+            let by = (y / 4).min((height / 4).saturating_sub(1));
+            let bw = (width / 4).max(1);
+            let bidx = ((by * bw + bx) * 3) as usize;
+            let blurred = [blur[bidx], blur[bidx + 1], blur[bidx + 2]];
+            let result = apply_all(srgb, state, &temp_matrix, blurred);
+            output.extend_from_slice(&result);
+        }
+    }
+
+    let save_path = edited_save_path(original_path);
+    let img = image::RgbaImage::from_raw(width, height, output)
+        .ok_or_else(|| "Failed to create output image".to_string())?;
+    img.save(&save_path)
+        .map_err(|e| format!("Failed to save: {e}"))?;
+    Ok(save_path)
+}
+
+fn generate_cpu_blur(pixels: &[u8], width: u32, height: u32) -> Vec<f32> {
+    let bw = (width / 4).max(1);
+    let bh = (height / 4).max(1);
+    let mut blur = vec![0.0f32; (bw * bh * 3) as usize];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let mut r = 0.0f32;
+            let mut g = 0.0f32;
+            let mut b = 0.0f32;
+            let mut count = 0.0;
+            for dy in 0..4 {
+                for dx in 0..4 {
+                    let x = bx * 4 + dx;
+                    let y = by * 4 + dy;
+                    if x < width && y < height {
+                        let idx = ((y * width + x) * 4) as usize;
+                        r += srgb_to_linear(pixels[idx] as f32 / 255.0);
+                        g += srgb_to_linear(pixels[idx + 1] as f32 / 255.0);
+                        b += srgb_to_linear(pixels[idx + 2] as f32 / 255.0);
+                        count += 1.0;
+                    }
+                }
+            }
+            let bidx = ((by * bw + bx) * 3) as usize;
+            blur[bidx] = r / count;
+            blur[bidx + 1] = g / count;
+            blur[bidx + 2] = b / count;
+        }
+    }
+    blur
+}
+
 pub fn edited_save_path(original: &Path) -> PathBuf {
     let stem = original
         .file_stem()
@@ -588,5 +662,18 @@ mod tests {
         let p = PathBuf::from("/photos/image");
         let out = edited_save_path(&p);
         assert_eq!(out, PathBuf::from("/photos/image_edited"));
+    }
+
+    #[test]
+    fn apply_all_identity_preserves_pixel() {
+        let state = EditState::default();
+        let identity_mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let blurred = [0.5, 0.5, 0.5];
+        let input = [128, 64, 200, 255];
+        let output = apply_all(input, &state, &identity_mat, blurred);
+        assert!((output[0] as i16 - input[0] as i16).abs() <= 1);
+        assert!((output[1] as i16 - input[1] as i16).abs() <= 1);
+        assert!((output[2] as i16 - input[2] as i16).abs() <= 1);
+        assert_eq!(output[3], 255);
     }
 }
