@@ -3,6 +3,8 @@
 mod decode;
 #[allow(dead_code)] // Wired to UI in Task 8
 mod edit;
+#[allow(dead_code)] // Wired to UI in Task 8
+mod lens;
 mod nav;
 mod viewer;
 
