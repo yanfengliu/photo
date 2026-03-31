@@ -136,20 +136,20 @@ impl App {
         match self.tab {
             Tab::Library => {
                 if self.library.is_empty() {
-                    "Photo \u{2014} Library".to_string()
+                    "Photo - Library".to_string()
                 } else {
-                    format!("Photo \u{2014} Library ({})", self.library.len())
+                    format!("Photo - Library ({})", self.library.len())
                 }
             }
             Tab::Detail => {
                 if let Some(idx) = self.library_index {
                     if let Some(entry) = self.library.get(idx) {
-                        return format!("Photo \u{2014} {}", entry.filename);
+                        return format!("Photo - {}", entry.filename);
                     }
                 }
                 match &self.nav {
                     Some(nav) if !nav.current_filename().is_empty() => {
-                        format!("Photo \u{2014} {}", nav.current_filename())
+                        format!("Photo - {}", nav.current_filename())
                     }
                     _ => "Photo".to_string(),
                 }
@@ -500,12 +500,12 @@ impl App {
 
     fn tab_bar(&self) -> Element<'_, Message> {
         let lib_label = if self.tab == Tab::Library {
-            "\u{25CF} Library"
+            "* Library"
         } else {
             "  Library"
         };
         let det_label = if self.tab == Tab::Detail {
-            "\u{25CF} Detail"
+            "* Detail"
         } else {
             "  Detail"
         };
@@ -608,16 +608,12 @@ impl App {
             .center_y(Length::Shrink)
             .into()
         } else {
-            container(
-                text("\u{231B}")
-                    .size(24)
-                    .color(Color::from_rgb(0.3, 0.3, 0.3)),
-            )
-            .width(thumb_size)
-            .height(thumb_size)
-            .center_x(Length::Shrink)
-            .center_y(Length::Shrink)
-            .into()
+            container(text("...").size(24).color(Color::from_rgb(0.3, 0.3, 0.3)))
+                .width(thumb_size)
+                .height(thumb_size)
+                .center_x(Length::Shrink)
+                .center_y(Length::Shrink)
+                .into()
         };
 
         let label = container(
@@ -673,17 +669,16 @@ impl App {
             let zoom_pct = (self.zoom * 100.0) as u32;
             let mb = img.file_size as f64 / 1_048_576.0;
             format!(
-                "  {name}  \u{2502}  {w}\u{00d7}{h}  \u{2502}  {mb:.1} MB  \u{2502}  {zoom_pct}%{pos}",
+                "  {name}  |  {w}x{h}  |  {mb:.1} MB  |  {zoom_pct}%{pos}",
                 w = img.width,
                 h = img.height,
             )
         } else if self.loading {
-            "  Loading\u{2026}".to_string()
+            "  Loading...".to_string()
         } else if let Some(e) = &self.error {
             format!("  Error: {e}")
         } else {
-            "  Ctrl+O to open  \u{2502}  Drag & drop an image  \u{2502}  \u{2190}\u{2192} navigate"
-                .to_string()
+            "  Ctrl+O to open  |  Drag & drop an image  |  Arrow keys to navigate".to_string()
         };
 
         container(text(s).size(13).color(Color::from_rgb(0.55, 0.55, 0.55)))

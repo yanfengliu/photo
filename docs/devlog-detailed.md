@@ -69,3 +69,10 @@
 **Files changed:** `README.md` (expanded), `src/main.rs` (fmt), `src/decode.rs` (fmt), `src/nav.rs` (fmt), `src/viewer.rs` (fmt)
 **Reasoning:** User requested development and release instructions in README.md.
 **Notes:** Formatting issues were pre-existing from prior sessions. Fixed them to satisfy CLAUDE.md's "all linter tests pass" requirement.
+
+## [2026-03-30 12:30] — Replace Unicode symbols with ASCII in UI text
+**Action:** Replaced all Unicode escape sequences in main.rs UI strings with ASCII equivalents: `│` (U+2502) → `|`, `×` (U+00D7) → `x`, `←→` (U+2190/2192) → "Arrow keys", `●` (U+25CF) → `*`, `…` (U+2026) → `...`, `⌛` (U+231B) → `...`, `—` (U+2014) → `-`.
+**Result:** Success — all symbols now render correctly with iced's default font. 31 tests pass, clippy clean.
+**Files changed:** `src/main.rs`
+**Reasoning:** iced's default font lacks glyphs for box-drawing, bullet, arrow, and hourglass characters, causing them to render as missing-glyph placeholders in the status bar and tab bar.
+**Notes:** If a broader Unicode font is added later, these could be reverted to the original symbols.
