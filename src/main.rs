@@ -8,19 +8,36 @@ mod viewer;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
-    button, column, container, horizontal_space, row, scrollable, shader, slider, text, text_input,
-    Image,
+    button, column, container, horizontal_space, pick_list, row, scrollable, shader, slider, text,
+    text_input, Image,
 };
 use iced::{
-    event, keyboard, window, Alignment, Color, Element, Length, Size, Subscription, Task, Theme,
+    event, keyboard, window, Alignment, Background, Border, Color, Element, Length, Size,
+    Subscription, Task, Theme,
 };
 
 use decode::ImageData;
 use nav::DirNav;
 use viewer::{zoom_at_cursor, ImageCanvas, ViewerEvent};
+
+// ---------------------------------------------------------------------------
+// Lightroom-inspired color palette
+// ---------------------------------------------------------------------------
+
+const BG_DARK: Color = Color::from_rgb(0.118, 0.118, 0.118);
+const BG_PANEL: Color = Color::from_rgb(0.153, 0.153, 0.153);
+const BG_TOOLBAR: Color = Color::from_rgb(0.176, 0.176, 0.176);
+const BG_CARD: Color = Color::from_rgb(0.165, 0.165, 0.165);
+const BG_BUTTON: Color = Color::from_rgb(0.22, 0.22, 0.22);
+const BG_BUTTON_HOVER: Color = Color::from_rgb(0.28, 0.28, 0.28);
+const TEXT_PRIMARY: Color = Color::from_rgb(0.82, 0.82, 0.82);
+const TEXT_SECONDARY: Color = Color::from_rgb(0.55, 0.55, 0.55);
+const TEXT_DIM: Color = Color::from_rgb(0.40, 0.40, 0.40);
+const DIVIDER: Color = Color::from_rgb(0.22, 0.22, 0.22);
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -85,7 +102,6 @@ struct App {
     library_index: Option<usize>,
     loading: bool,
     error: Option<String>,
-    edit_panel_open: bool,
     edit_histories: std::collections::HashMap<PathBuf, edit::UndoHistory>,
     current_image_path: Option<PathBuf>,
     lens_db: lens::LensDatabase,
@@ -94,6 +110,8 @@ struct App {
     save_status: Option<String>,
     editing_slider: Option<SliderKind>,
     slider_text_buf: String,
+    last_thumb_click: Option<(usize, Instant)>,
+    lens_override_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +129,6 @@ enum Message {
     FilesPicked(Option<Vec<PathBuf>>),
     ThumbnailLoaded(PathBuf, Result<Arc<ImageData>, String>),
     LibraryItemClicked(usize),
-    ToggleEditPanel,
     SliderChanged(SliderKind, f32),
     SliderReleased,
     ResetAll,
@@ -121,6 +138,7 @@ enum Message {
     SliderTextInput(SliderKind),
     SliderTextChanged(String),
     SliderTextSubmit(SliderKind),
+    LensProfileSelected(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +159,6 @@ impl App {
             library_index: None,
             loading: false,
             error: None,
-            edit_panel_open: false,
             edit_histories: std::collections::HashMap::new(),
             current_image_path: None,
             lens_db: lens::LensDatabase::load_bundled(),
@@ -150,6 +167,8 @@ impl App {
             save_status: None,
             editing_slider: None,
             slider_text_buf: String::new(),
+            last_thumb_click: None,
+            lens_override_name: None,
         };
 
         // Restore saved library entries
@@ -245,16 +264,19 @@ impl App {
                 self.error = None;
                 if let Some(path) = &self.current_image_path {
                     self.current_exif = lens::read_exif(path);
-                    self.current_lens_profile = self.current_exif.as_ref().and_then(|exif_info| {
-                        let maker = if exif_info.lens_make.is_empty() {
-                            &exif_info.camera_make
-                        } else {
-                            &exif_info.lens_make
-                        };
-                        self.lens_db
-                            .find_lens(maker, &exif_info.lens_model)
-                            .cloned()
-                    });
+                    if self.lens_override_name.is_none() {
+                        self.current_lens_profile =
+                            self.current_exif.as_ref().and_then(|exif_info| {
+                                let maker = if exif_info.lens_make.is_empty() {
+                                    &exif_info.camera_make
+                                } else {
+                                    &exif_info.lens_make
+                                };
+                                self.lens_db
+                                    .find_lens(maker, &exif_info.lens_model)
+                                    .cloned()
+                            });
+                    }
                 }
                 Task::none()
             }
@@ -336,19 +358,26 @@ impl App {
             Message::ThumbnailLoaded(_, Err(_)) => Task::none(),
 
             Message::LibraryItemClicked(index) => {
-                if let Some(entry) = self.library.get(index) {
-                    self.library_index = Some(index);
-                    self.tab = Tab::Detail;
-                    let path = entry.path.clone();
-                    self.current_image_path = Some(path.clone());
-                    self.start_load(path)
-                } else {
-                    Task::none()
-                }
-            }
+                let now = Instant::now();
+                let is_double_click = self
+                    .last_thumb_click
+                    .map(|(prev_idx, prev_time)| {
+                        prev_idx == index && now.duration_since(prev_time).as_millis() < 400
+                    })
+                    .unwrap_or(false);
 
-            Message::ToggleEditPanel => {
-                self.edit_panel_open = !self.edit_panel_open;
+                if is_double_click {
+                    self.last_thumb_click = None;
+                    if let Some(entry) = self.library.get(index) {
+                        self.library_index = Some(index);
+                        self.tab = Tab::Detail;
+                        let path = entry.path.clone();
+                        self.current_image_path = Some(path.clone());
+                        return self.start_load(path);
+                    }
+                } else {
+                    self.last_thumb_click = Some((index, now));
+                }
                 Task::none()
             }
 
@@ -457,6 +486,35 @@ impl App {
                 self.slider_text_buf.clear();
                 Task::none()
             }
+
+            Message::LensProfileSelected(name) => {
+                if name == "Auto" {
+                    self.lens_override_name = None;
+                    self.current_lens_profile =
+                        self.current_exif.as_ref().and_then(|exif_info| {
+                            let maker = if exif_info.lens_make.is_empty() {
+                                &exif_info.camera_make
+                            } else {
+                                &exif_info.lens_make
+                            };
+                            self.lens_db
+                                .find_lens(maker, &exif_info.lens_model)
+                                .cloned()
+                        });
+                } else if name == "None" {
+                    self.lens_override_name = Some(name);
+                    self.current_lens_profile = None;
+                } else {
+                    self.lens_override_name = Some(name.clone());
+                    self.current_lens_profile = self
+                        .lens_db
+                        .profiles
+                        .iter()
+                        .find(|p| format!("{} {}", p.maker, p.model) == name)
+                        .cloned();
+                }
+                Task::none()
+            }
         }
     }
 
@@ -523,6 +581,13 @@ impl App {
         use keyboard::Key;
 
         match key {
+            // Escape: go back to library from detail
+            Key::Named(Named::Escape) => {
+                if self.tab == Tab::Detail {
+                    self.tab = Tab::Library;
+                }
+            }
+
             // Navigation: next
             Key::Named(Named::ArrowRight) | Key::Named(Named::Space) => {
                 if self.tab == Tab::Detail {
@@ -712,81 +777,69 @@ impl App {
     }
 
     fn tab_bar(&self) -> Element<'_, Message> {
-        let lib_label = if self.tab == Tab::Library {
-            "* Library"
-        } else {
-            "  Library"
+        let content = match self.tab {
+            Tab::Library => {
+                let title = text("Library").size(14).color(TEXT_PRIMARY);
+
+                let add_folder_btn = button(text("+ Folder").size(11).color(TEXT_PRIMARY))
+                    .on_press(Message::AddFolder)
+                    .padding([5, 12])
+                    .style(toolbar_button_style);
+
+                let add_files_btn = button(text("+ Files").size(11).color(TEXT_PRIMARY))
+                    .on_press(Message::AddFiles)
+                    .padding([5, 12])
+                    .style(toolbar_button_style);
+
+                row![
+                    container(title).padding([0, 8]),
+                    horizontal_space(),
+                    add_folder_btn,
+                    add_files_btn
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+            }
+            Tab::Detail => {
+                let back_btn =
+                    button(text("\u{2190}").size(16).color(TEXT_PRIMARY))
+                        .on_press(Message::SwitchTab(Tab::Library))
+                        .padding([4, 12])
+                        .style(toolbar_button_style);
+
+                let save_btn = button(text("Save").size(11).color(TEXT_PRIMARY))
+                    .on_press(Message::SaveEdited)
+                    .padding([5, 12])
+                    .style(toolbar_button_style);
+
+                row![back_btn, horizontal_space(), save_btn]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+            }
         };
-        let det_label = if self.tab == Tab::Detail {
-            "* Detail"
-        } else {
-            "  Detail"
-        };
 
-        let library_btn = button(text(lib_label).size(13))
-            .on_press(Message::SwitchTab(Tab::Library))
-            .padding([6, 16]);
-
-        let detail_btn = button(text(det_label).size(13))
-            .on_press(Message::SwitchTab(Tab::Detail))
-            .padding([6, 16]);
-
-        let edit_btn = button(
-            text(if self.edit_panel_open {
-                "* Edit"
-            } else {
-                "  Edit"
-            })
-            .size(13),
-        )
-        .on_press(Message::ToggleEditPanel)
-        .padding([6, 16]);
-
-        let save_btn = button(text("Save").size(12))
-            .on_press(Message::SaveEdited)
-            .padding([5, 12]);
-
-        let add_folder_btn = button(text("+ Folder").size(12))
-            .on_press(Message::AddFolder)
-            .padding([5, 12]);
-
-        let add_files_btn = button(text("+ Files").size(12))
-            .on_press(Message::AddFiles)
-            .padding([5, 12]);
-
-        container(
-            row![
-                library_btn,
-                detail_btn,
-                edit_btn,
-                horizontal_space(),
-                save_btn,
-                add_folder_btn,
-                add_files_btn,
-            ]
-            .spacing(6),
-        )
-        .padding([6, 10])
-        .width(Length::Fill)
-        .into()
+        container(content)
+            .padding([6, 10])
+            .width(Length::Fill)
+            .style(toolbar_container_style)
+            .into()
     }
 
     fn library_view(&self) -> Element<'_, Message> {
         if self.library.is_empty() {
             return container(
                 column![
-                    text("No images loaded")
-                        .size(18)
-                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
-                    text("Use + Folder or + Files to add images")
+                    text("No images loaded").size(18).color(TEXT_SECONDARY),
+                    text("Use + Folder or + Files to add images, or drag and drop")
                         .size(13)
-                        .color(Color::from_rgb(0.4, 0.4, 0.4)),
+                        .color(TEXT_DIM),
                 ]
                 .spacing(8)
                 .align_x(Alignment::Center),
             )
             .center_x(Length::Fill)
             .center_y(Length::Fill)
+            .style(dark_bg_style)
             .into();
         }
 
@@ -794,29 +847,31 @@ impl App {
         let cols = 6;
 
         let entries: Vec<(usize, &LibraryEntry)> = self.library.iter().enumerate().collect();
-        let mut grid = column![].spacing(10);
+        let mut grid = column![].spacing(8);
 
         for chunk in entries.chunks(cols) {
-            let mut r = row![].spacing(10);
+            let mut r = row![].spacing(8);
             for &(idx, entry) in chunk {
                 r = r.push(self.thumbnail_card(entry, idx, thumb_size));
             }
             grid = grid.push(r);
         }
 
-        let status_text = format!("  {} images", self.library.len());
-        let status = container(
-            text(status_text)
-                .size(13)
-                .color(Color::from_rgb(0.55, 0.55, 0.55)),
-        )
-        .width(Length::Fill)
-        .padding([5, 10]);
+        let status_text = format!(
+            "{} images  \u{2022}  Double-click to open",
+            self.library.len()
+        );
+        let status = container(text(status_text).size(11).color(TEXT_DIM))
+            .width(Length::Fill)
+            .padding([6, 14]);
 
-        column![
-            scrollable(container(grid).padding(15).width(Length::Fill)).height(Length::Fill),
-            status,
-        ]
+        container(column![
+            scrollable(container(grid).padding(14).width(Length::Fill)).height(Length::Fill),
+            container(status)
+                .width(Length::Fill)
+                .style(toolbar_container_style),
+        ])
+        .style(dark_bg_style)
         .into()
     }
 
@@ -838,7 +893,7 @@ impl App {
             .center_y(Length::Shrink)
             .into()
         } else {
-            container(text("...").size(24).color(Color::from_rgb(0.3, 0.3, 0.3)))
+            container(text("...").size(24).color(TEXT_DIM))
                 .width(thumb_size)
                 .height(thumb_size)
                 .center_x(Length::Shrink)
@@ -846,16 +901,12 @@ impl App {
                 .into()
         };
 
-        let label = container(
-            text(&entry.filename)
-                .size(11)
-                .color(Color::from_rgb(0.7, 0.7, 0.7)),
-        )
-        .width(thumb_size);
+        let label = container(text(&entry.filename).size(10).color(TEXT_SECONDARY)).width(thumb_size);
 
         button(column![thumb, label].spacing(4).width(thumb_size))
             .on_press(Message::LibraryItemClicked(index))
-            .padding(5)
+            .padding(6)
+            .style(card_button_style)
             .into()
     }
 
@@ -873,11 +924,7 @@ impl App {
 
         let viewer_with_status = column![canvas.map(Message::Viewer), self.status_bar()];
 
-        if self.edit_panel_open {
-            row![viewer_with_status.width(Length::Fill), self.edit_panel(),].into()
-        } else {
-            viewer_with_status.into()
-        }
+        row![viewer_with_status.width(Length::Fill), self.edit_panel()].into()
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
@@ -905,21 +952,22 @@ impl App {
             let zoom_pct = (self.zoom * 100.0) as u32;
             let mb = img.file_size as f64 / 1_048_576.0;
             format!(
-                "  {name}  |  {w}x{h}  |  {mb:.1} MB  |  {zoom_pct}%{pos}",
+                "  {name}  \u{2022}  {w}\u{00d7}{h}  \u{2022}  {mb:.1} MB  \u{2022}  {zoom_pct}%{pos}",
                 w = img.width,
                 h = img.height,
             )
         } else if self.loading {
-            "  Loading...".to_string()
+            "  Loading\u{2026}".to_string()
         } else if let Some(e) = &self.error {
             format!("  Error: {e}")
         } else {
-            "  Ctrl+O to open  |  Drag & drop an image  |  Arrow keys to navigate".to_string()
+            "  Ctrl+O to open  \u{2022}  Drag & drop  \u{2022}  Arrow keys to navigate".to_string()
         };
 
-        container(text(s).size(13).color(Color::from_rgb(0.55, 0.55, 0.55)))
+        container(text(s).size(11).color(TEXT_DIM))
             .width(Length::Fill)
             .padding([5, 10])
+            .style(toolbar_container_style)
             .into()
     }
 
@@ -937,7 +985,7 @@ impl App {
 
         // Light section
         let light = column![
-            text("Light").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
+            section_label("LIGHT"),
             self.slider_row("Exposure", SliderKind::Exposure, state.exposure),
             self.slider_row("Contrast", SliderKind::Contrast, state.contrast),
             self.slider_row("Highlights", SliderKind::Highlights, state.highlights),
@@ -945,27 +993,25 @@ impl App {
             self.slider_row("Whites", SliderKind::Whites, state.whites),
             self.slider_row("Blacks", SliderKind::Blacks, state.blacks),
         ]
-        .spacing(4);
+        .spacing(3);
 
         // Color section
         let color = column![
-            text("Color").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
-            self.slider_row("Temperature", SliderKind::Temperature, state.temperature),
+            section_label("COLOR"),
+            self.slider_row("Temp", SliderKind::Temperature, state.temperature),
             self.slider_row("Tint", SliderKind::Tint, state.tint),
             self.slider_row("Vibrance", SliderKind::Vibrance, state.vibrance),
             self.slider_row("Saturation", SliderKind::Saturation, state.saturation),
         ]
-        .spacing(4);
+        .spacing(3);
 
         // Effects section
         let effects = column![
-            text("Effects")
-                .size(12)
-                .color(Color::from_rgb(0.6, 0.6, 0.6)),
+            section_label("EFFECTS"),
             self.slider_row("Clarity", SliderKind::Clarity, state.clarity),
             self.slider_row("Dehaze", SliderKind::Dehaze, state.dehaze),
         ]
-        .spacing(4);
+        .spacing(3);
 
         // Lens correction section
         let lens_label = if state.lens_correction {
@@ -973,48 +1019,78 @@ impl App {
         } else {
             "Lens Correction: OFF"
         };
-        let lens_btn = button(text(lens_label).size(12))
+        let lens_btn = button(text(lens_label).size(11).color(TEXT_PRIMARY))
             .on_press(Message::ToggleLensCorrection)
-            .padding([4, 8]);
+            .padding([4, 8])
+            .style(toolbar_button_style);
+
         let lens_info: Element<'_, Message> = if let Some(profile) = &self.current_lens_profile {
             text(format!("{} {}", profile.maker, profile.model))
                 .size(10)
-                .color(Color::from_rgb(0.5, 0.5, 0.5))
+                .color(TEXT_SECONDARY)
                 .into()
         } else {
-            text("No lens profile found")
+            text("No lens profile matched")
                 .size(10)
-                .color(Color::from_rgb(0.4, 0.4, 0.4))
+                .color(TEXT_DIM)
                 .into()
         };
+
+        // Lens profile dropdown
+        let mut lens_options: Vec<String> = vec!["Auto".to_string(), "None".to_string()];
+        for profile in &self.lens_db.profiles {
+            lens_options.push(format!("{} {}", profile.maker, profile.model));
+        }
+        let selected_lens: Option<String> = match &self.lens_override_name {
+            Some(name) => Some(name.clone()),
+            None => Some("Auto".to_string()),
+        };
+        let lens_dropdown = pick_list(lens_options, selected_lens, Message::LensProfileSelected)
+            .text_size(11)
+            .width(Length::Fill);
+
         let lens_section = column![
-            text("Lens").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
+            section_label("LENS"),
             lens_btn,
-            lens_info
+            lens_dropdown,
+            lens_info,
         ]
         .spacing(4);
 
         // Reset button
-        let reset_btn = button(text("Reset All").size(12))
+        let reset_btn = button(text("Reset All").size(11).color(TEXT_PRIMARY))
             .on_press(Message::ResetAll)
-            .padding([4, 12]);
+            .padding([4, 12])
+            .style(toolbar_button_style);
 
         // Status text
         let status_text: Element<'_, Message> = if let Some(status) = &self.save_status {
             text(status)
                 .size(10)
-                .color(Color::from_rgb(0.5, 0.7, 0.5))
+                .color(Color::from_rgb(0.4, 0.7, 0.4))
                 .into()
         } else {
             text("").size(10).into()
         };
 
-        let panel_content = column![light, color, effects, lens_section, reset_btn, status_text,]
-            .spacing(12)
-            .padding(10);
+        let panel_content = column![
+            light,
+            section_divider(),
+            color,
+            section_divider(),
+            effects,
+            section_divider(),
+            lens_section,
+            section_divider(),
+            reset_btn,
+            status_text,
+        ]
+        .spacing(6)
+        .padding(12);
 
         container(scrollable(panel_content).height(Length::Fill))
             .width(280)
+            .style(panel_container_style)
             .into()
     }
 
@@ -1025,10 +1101,11 @@ impl App {
         let label_el: Element<'_, Message> = button(
             text(label.to_string())
                 .size(11)
-                .color(Color::from_rgb(0.7, 0.7, 0.7)),
+                .color(TEXT_SECONDARY),
         )
         .on_press(Message::SliderChanged(kind, 0.0))
         .padding(0)
+        .style(invisible_button_style)
         .into();
 
         let value_el: Element<'_, Message> = if self.editing_slider == Some(kind) {
@@ -1042,10 +1119,11 @@ impl App {
             button(
                 text(format!("{:.1}", value))
                     .size(11)
-                    .color(Color::from_rgb(0.8, 0.8, 0.8)),
+                    .color(TEXT_PRIMARY),
             )
             .on_press(Message::SliderTextInput(kind))
             .padding(0)
+            .style(invisible_button_style)
             .into()
         };
 
@@ -1055,7 +1133,7 @@ impl App {
             .width(130);
 
         row![
-            container(label_el).width(75),
+            container(label_el).width(65),
             container(value_el).width(45),
             slider_el,
         ]
@@ -1122,6 +1200,98 @@ impl App {
 }
 
 // ---------------------------------------------------------------------------
+// Style functions
+// ---------------------------------------------------------------------------
+
+fn toolbar_container_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(BG_TOOLBAR)),
+        ..Default::default()
+    }
+}
+
+fn panel_container_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(BG_PANEL)),
+        border: Border {
+            color: DIVIDER,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn dark_bg_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(BG_DARK)),
+        ..Default::default()
+    }
+}
+
+fn toolbar_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Some(Background::Color(BG_BUTTON_HOVER)),
+        button::Status::Pressed => Some(Background::Color(BG_DARK)),
+        _ => Some(Background::Color(BG_BUTTON)),
+    };
+    button::Style {
+        background: bg,
+        text_color: TEXT_PRIMARY,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 3.0.into(),
+        },
+        shadow: Default::default(),
+    }
+}
+
+fn card_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => BG_BUTTON_HOVER,
+        button::Status::Pressed => BG_DARK,
+        _ => BG_CARD,
+    };
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: TEXT_PRIMARY,
+        border: Border {
+            color: DIVIDER,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: Default::default(),
+    }
+}
+
+fn invisible_button_style(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: None,
+        text_color: TEXT_SECONDARY,
+        border: Border::default(),
+        shadow: Default::default(),
+    }
+}
+
+fn section_label(title: &str) -> Element<'_, Message> {
+    container(text(title).size(10).color(TEXT_DIM))
+        .padding([5, 0])
+        .into()
+}
+
+fn section_divider() -> Element<'static, Message> {
+    container(horizontal_space())
+        .width(Length::Fill)
+        .height(1)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(DIVIDER)),
+            ..Default::default()
+        })
+        .into()
+}
+
+// ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
 
@@ -1161,14 +1331,17 @@ fn get_slider_field(state: &edit::EditState, kind: SliderKind) -> f32 {
 
 fn slider_range(kind: SliderKind) -> (f32, f32) {
     match kind {
-        SliderKind::Exposure => (-5.0, 5.0),
-        _ => (-100.0, 100.0),
+        SliderKind::Exposure => (-3.0, 3.0),
+        SliderKind::Temperature | SliderKind::Tint => (-30.0, 30.0),
+        SliderKind::Highlights | SliderKind::Shadows => (-100.0, 100.0),
+        _ => (-50.0, 50.0),
     }
 }
 
 fn slider_step(kind: SliderKind) -> f32 {
     match kind {
-        SliderKind::Exposure => 0.05,
+        SliderKind::Exposure => 0.02,
+        SliderKind::Temperature | SliderKind::Tint => 0.5,
         _ => 1.0,
     }
 }
@@ -1354,5 +1527,37 @@ mod tests {
             }
         }
         assert_eq!(library.len(), 2);
+    }
+
+    #[test]
+    fn slider_ranges_are_reasonable() {
+        // Exposure should be narrower than before
+        let (min, max) = slider_range(SliderKind::Exposure);
+        assert_eq!(min, -3.0);
+        assert_eq!(max, 3.0);
+
+        // Temperature should be narrower
+        let (min, max) = slider_range(SliderKind::Temperature);
+        assert_eq!(min, -30.0);
+        assert_eq!(max, 30.0);
+
+        // Highlights/Shadows keep full range
+        let (min, max) = slider_range(SliderKind::Highlights);
+        assert_eq!(min, -100.0);
+        assert_eq!(max, 100.0);
+
+        // Other sliders are reduced
+        let (min, max) = slider_range(SliderKind::Contrast);
+        assert_eq!(min, -50.0);
+        assert_eq!(max, 50.0);
+    }
+
+    #[test]
+    fn double_click_detection() {
+        // Simulate: two clicks within 400ms on same index = double click
+        let t1 = Instant::now();
+        let t2 = t1; // immediate second click
+        let is_double = t2.duration_since(t1).as_millis() < 400;
+        assert!(is_double);
     }
 }

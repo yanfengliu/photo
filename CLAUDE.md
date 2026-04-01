@@ -37,7 +37,7 @@ This project uses a two-tier devlog for change tracking and agent context.
 - Each entry must include: timestamp, action taken, result, files modified, and reasoning.
 - Format:
   ```
-  ## [YYYY-MM-DD HH:MM] — [Short title]
+  ## [YYYY-MM-DD HH:MM, timezone] — [Short title]
   **Action:** What was done
   **Result:** What happened (success/failure/partial)
   **Files changed:** List of files touched

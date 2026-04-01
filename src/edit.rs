@@ -6,18 +6,18 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EditState {
-    pub exposure: f32,    // -5.0 to +5.0 (stops)
-    pub contrast: f32,    // -100 to +100
+    pub exposure: f32,    // -3.0 to +3.0 (stops)
+    pub contrast: f32,    // -50 to +50
     pub highlights: f32,  // -100 to +100
     pub shadows: f32,     // -100 to +100
-    pub whites: f32,      // -100 to +100
-    pub blacks: f32,      // -100 to +100
-    pub temperature: f32, // -100 to +100
-    pub tint: f32,        // -100 to +100
-    pub vibrance: f32,    // -100 to +100
-    pub saturation: f32,  // -100 to +100
-    pub clarity: f32,     // -100 to +100
-    pub dehaze: f32,      // -100 to +100
+    pub whites: f32,      // -50 to +50
+    pub blacks: f32,      // -50 to +50
+    pub temperature: f32, // -30 to +30
+    pub tint: f32,        // -30 to +30
+    pub vibrance: f32,    // -50 to +50
+    pub saturation: f32,  // -50 to +50
+    pub clarity: f32,     // -50 to +50
+    pub dehaze: f32,      // -50 to +50
     pub lens_correction: bool,
 }
 
