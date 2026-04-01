@@ -137,9 +137,11 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
     [px[0] * m, px[1] * m, px[2] * m]
 }
 
-/// Lightroom-style zone-based tone adjustments.
-/// Works in perceptual (gamma 2.2) space for zone targeting and applies
-/// as a luminance ratio to preserve channel ratios (no color shift).
+/// Zone-based tone adjustments (stop-based).
+/// Zone weights target perceptual (gamma 2.2) luminance ranges.
+/// Delta is in photographic stops: px *= 2^stops.
+/// This bounds the effect uniformly — 1.5 stops max per slider regardless
+/// of pixel brightness, preventing overblown darks.
 pub fn apply_tone_zones(
     px: [f32; 3],
     highlights: f32,
@@ -153,33 +155,29 @@ pub fn apply_tone_zones(
     }
     let l_p = l_lin.powf(1.0 / 2.2);
 
-    // Shadows: rises from 0, peaks ~0.15-0.20, fades by ~0.65
-    let sh_rise = smoothstep(0.0, 0.15, l_p);
-    let sh_fall = 1.0 - smoothstep(0.2, 0.65, l_p);
+    // Shadows: peaks ~0.20-0.25, fades by ~0.65
+    let sh_rise = smoothstep(0.0, 0.20, l_p);
+    let sh_fall = 1.0 - smoothstep(0.25, 0.65, l_p);
     let w_sh = sh_rise * sh_fall;
 
     // Highlights: rises from ~0.35, full above ~0.75
     let w_hi = smoothstep(0.35, 0.75, l_p);
 
-    // Blacks: strongest at 0, quadratic falloff by ~0.25
-    let t_bk = 1.0 - smoothstep(0.0, 0.25, l_p);
+    // Blacks: concentrated endpoint control, fades by ~0.15
+    let t_bk = 1.0 - smoothstep(0.0, 0.15, l_p);
     let w_bk = t_bk * t_bk;
 
-    // Whites: strongest at 1, quadratic rise from ~0.75
+    // Whites: endpoint control, quadratic rise from ~0.75
     let t_wh = smoothstep(0.75, 1.0, l_p);
     let w_wh = t_wh * t_wh;
 
-    // Sum delta in perceptual space
-    let delta = shadows * w_sh * 0.25
-        + highlights * w_hi * 0.25
-        + blacks * w_bk * 0.30
-        + whites * w_wh * 0.30;
+    // Stop-change: max ±1.5 stops per slider at full value
+    let stops = shadows * w_sh * 1.5
+        + highlights * w_hi * 1.5
+        + blacks * w_bk * 1.5
+        + whites * w_wh * 1.5;
 
-    let l_p_new = (l_p + delta).max(0.001);
-    let l_lin_new = l_p_new.powf(2.2);
-
-    // Multiplicative ratio preserves R:G:B channel ratios
-    let ratio = l_lin_new / l_lin;
+    let ratio = 2.0_f32.powf(stops);
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
 }
 

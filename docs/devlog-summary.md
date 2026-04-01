@@ -57,6 +57,8 @@
 34. Fixed contrast sigmoid: k=4+|amount|×8 (was k=1+amount×4, which was below identity threshold) — SUCCESS
 35. Unified GPU contrast with CPU: both use blend formula `lum + amount * (sig - lum)` — SUCCESS
 36. Rewrote zone tone adjustments (Lightroom-style): multiplicative luminance ratio (not additive), perceptual-space zone targeting, wider overlapping zones — SUCCESS
+38. Rewrote zone adjustments again: stop-based model (px *= 2^stops, max 1.5 stops), narrowed blacks zone to 0-15% perceptual, shifted shadow peak to 20-25% — SUCCESS
+37. Prevented slider track click from teleporting knob; only drag and double-click-to-reset work — SUCCESS
 
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate

@@ -39,7 +39,8 @@
       "Bash(RUST_BACKTRACE=full timeout 10 ./target/release/photo.exe)",
       "Bash(RUST_BACKTRACE=1 timeout 10 ./target/release/photo.exe)",
       "Bash(RUST_BACKTRACE=1 timeout 5 target/release/photo.exe)",
-      "Bash(RUST_BACKTRACE=1 timeout 3 target/release/photo.exe)"
+      "Bash(RUST_BACKTRACE=1 timeout 3 target/release/photo.exe)",
+      "Bash(taskkill //IM photo.exe //F)"
     ]
   }
 }

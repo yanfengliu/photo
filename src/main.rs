@@ -112,6 +112,9 @@ struct App {
     slider_text_buf: String,
     last_thumb_click: Option<(usize, Instant)>,
     last_slider_release: Option<(SliderKind, Instant)>,
+    /// Tracks slider drag vs. single click: (which slider, event count).
+    /// Only apply values after 2+ on_change events (i.e., actual drag).
+    slider_drag: Option<(SliderKind, u32)>,
     lens_override_name: Option<String>,
 }
 
@@ -132,6 +135,7 @@ enum Message {
     LibraryItemClicked(usize),
     SliderChanged(SliderKind, f32),
     SliderReleased(SliderKind),
+    ResetSlider(SliderKind),
     ResetAll,
     SaveEdited,
     SaveCompleted(Result<String, String>),
@@ -170,6 +174,7 @@ impl App {
             slider_text_buf: String::new(),
             last_thumb_click: None,
             last_slider_release: None,
+            slider_drag: None,
             lens_override_name: None,
         };
 
@@ -384,14 +389,25 @@ impl App {
             }
 
             Message::SliderChanged(kind, value) => {
-                if let Some(path) = &self.current_image_path {
-                    let history = self.edit_histories.entry(path.clone()).or_default();
-                    set_slider_field(&mut history.current, kind, value);
+                let count = match self.slider_drag {
+                    Some((k, c)) if k == kind => c + 1,
+                    _ => 1,
+                };
+                self.slider_drag = Some((kind, count));
+                // Only apply on 2nd+ event (actual drag, not a track click)
+                if count >= 2 {
+                    if let Some(path) = &self.current_image_path {
+                        let history = self.edit_histories.entry(path.clone()).or_default();
+                        set_slider_field(&mut history.current, kind, value);
+                    }
                 }
                 Task::none()
             }
 
             Message::SliderReleased(kind) => {
+                let was_drag = matches!(self.slider_drag, Some((k, c)) if k == kind && c >= 2);
+                self.slider_drag = None;
+
                 let now = Instant::now();
                 let is_double_click = self
                     .last_slider_release
@@ -409,11 +425,23 @@ impl App {
                     }
                 } else {
                     self.last_slider_release = Some((kind, now));
-                    if let Some(path) = &self.current_image_path {
-                        if let Some(history) = self.edit_histories.get_mut(path) {
-                            history.commit();
+                    // Only commit if the user actually dragged (not a single track click)
+                    if was_drag {
+                        if let Some(path) = &self.current_image_path {
+                            if let Some(history) = self.edit_histories.get_mut(path) {
+                                history.commit();
+                            }
                         }
                     }
+                }
+                Task::none()
+            }
+
+            Message::ResetSlider(kind) => {
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    set_slider_field(&mut history.current, kind, 0.0);
+                    history.commit();
                 }
                 Task::none()
             }
@@ -1123,7 +1151,7 @@ impl App {
                 .size(11)
                 .color(TEXT_SECONDARY),
         )
-        .on_press(Message::SliderChanged(kind, 0.0))
+        .on_press(Message::ResetSlider(kind))
         .padding(0)
         .style(invisible_button_style)
         .into();

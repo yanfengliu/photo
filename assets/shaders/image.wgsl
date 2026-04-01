@@ -159,41 +159,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     px = temp_mat * px;
 
-    // Lightroom-style zone-based tone adjustments
-    // Work in perceptual (gamma) space for zone targeting,
-    // apply as luminance ratio to preserve channel ratios (no color shift).
+    // Zone-based tone adjustments (stop-based).
+    // Zone weights target perceptual (gamma 2.2) luminance ranges.
+    // Delta is in photographic stops: px *= 2^stops.
+    // This bounds the effect uniformly — 1.5 stops max per slider regardless
+    // of pixel brightness, preventing overblown darks.
     if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
         let L_lin = lum(px);
         if L_lin > 0.0001 {
             let L_p = pow(L_lin, 1.0 / 2.2);
 
-            // Shadows: rises from 0, peaks ~0.15-0.20, fades by ~0.65
-            let sh_rise = smooth_step(0.0, 0.15, L_p);
-            let sh_fall = 1.0 - smooth_step(0.2, 0.65, L_p);
+            // Shadows: peaks ~0.20-0.25, fades by ~0.65
+            let sh_rise = smooth_step(0.0, 0.20, L_p);
+            let sh_fall = 1.0 - smooth_step(0.25, 0.65, L_p);
             let w_sh = sh_rise * sh_fall;
 
             // Highlights: rises from ~0.35, full above ~0.75
             let w_hi = smooth_step(0.35, 0.75, L_p);
 
-            // Blacks: strongest at 0, quadratic falloff by ~0.25
-            let t_bk = 1.0 - smooth_step(0.0, 0.25, L_p);
+            // Blacks: concentrated endpoint control, fades by ~0.15
+            let t_bk = 1.0 - smooth_step(0.0, 0.15, L_p);
             let w_bk = t_bk * t_bk;
 
-            // Whites: strongest at 1, quadratic rise from ~0.75
+            // Whites: endpoint control, quadratic rise from ~0.75
             let t_wh = smooth_step(0.75, 1.0, L_p);
             let w_wh = t_wh * t_wh;
 
-            // Sum delta in perceptual space
-            let delta = u.shadows * w_sh * 0.25
-                      + u.highlights * w_hi * 0.25
-                      + u.blacks * w_bk * 0.30
-                      + u.whites * w_wh * 0.30;
+            // Stop-change: max ±1.5 stops per slider at full value
+            let stops = u.shadows * w_sh * 1.5
+                      + u.highlights * w_hi * 1.5
+                      + u.blacks * w_bk * 1.5
+                      + u.whites * w_wh * 1.5;
 
-            let L_p_new = max(L_p + delta, 0.001);
-            let L_lin_new = pow(L_p_new, 2.2);
-
-            // Multiplicative ratio preserves R:G:B channel ratios
-            px = px * (L_lin_new / L_lin);
+            px = px * pow(2.0, stops);
         }
     }
 
