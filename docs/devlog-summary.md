@@ -52,6 +52,12 @@
 31. Applied Lightroom-inspired professional dark theme (styled containers, buttons, color palette) — SUCCESS
 32. Added Escape key to return to library from detail — SUCCESS
 
+## Formula fixes
+33. Fixed zone adjustment scaling: highlights/shadows ×0.15, whites/blacks ×0.30 (was ×1.0) — SUCCESS
+34. Fixed contrast sigmoid: k=4+|amount|×8 (was k=1+amount×4, which was below identity threshold) — SUCCESS
+35. Unified GPU contrast with CPU: both use blend formula `lum + amount * (sig - lum)` — SUCCESS
+36. Rewrote zone tone adjustments (Lightroom-style): multiplicative luminance ratio (not additive), perceptual-space zone targeting, wider overlapping zones — SUCCESS
+
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate
 - GPU texture limit check at upload time in `prepare()`

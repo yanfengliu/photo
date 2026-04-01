@@ -111,6 +111,7 @@ struct App {
     editing_slider: Option<SliderKind>,
     slider_text_buf: String,
     last_thumb_click: Option<(usize, Instant)>,
+    last_slider_release: Option<(SliderKind, Instant)>,
     lens_override_name: Option<String>,
 }
 
@@ -130,7 +131,7 @@ enum Message {
     ThumbnailLoaded(PathBuf, Result<Arc<ImageData>, String>),
     LibraryItemClicked(usize),
     SliderChanged(SliderKind, f32),
-    SliderReleased,
+    SliderReleased(SliderKind),
     ResetAll,
     SaveEdited,
     SaveCompleted(Result<String, String>),
@@ -168,6 +169,7 @@ impl App {
             editing_slider: None,
             slider_text_buf: String::new(),
             last_thumb_click: None,
+            last_slider_release: None,
             lens_override_name: None,
         };
 
@@ -389,10 +391,28 @@ impl App {
                 Task::none()
             }
 
-            Message::SliderReleased => {
-                if let Some(path) = &self.current_image_path {
-                    if let Some(history) = self.edit_histories.get_mut(path) {
+            Message::SliderReleased(kind) => {
+                let now = Instant::now();
+                let is_double_click = self
+                    .last_slider_release
+                    .map(|(prev_kind, prev_time)| {
+                        prev_kind == kind && now.duration_since(prev_time).as_millis() < 400
+                    })
+                    .unwrap_or(false);
+
+                if is_double_click {
+                    self.last_slider_release = None;
+                    if let Some(path) = &self.current_image_path {
+                        let history = self.edit_histories.entry(path.clone()).or_default();
+                        set_slider_field(&mut history.current, kind, 0.0);
                         history.commit();
+                    }
+                } else {
+                    self.last_slider_release = Some((kind, now));
+                    if let Some(path) = &self.current_image_path {
+                        if let Some(history) = self.edit_histories.get_mut(path) {
+                            history.commit();
+                        }
                     }
                 }
                 Task::none()
@@ -1129,7 +1149,7 @@ impl App {
 
         let slider_el = slider(min..=max, value, move |v| Message::SliderChanged(kind, v))
             .step(step)
-            .on_release(Message::SliderReleased)
+            .on_release(Message::SliderReleased(kind))
             .width(130);
 
         row![

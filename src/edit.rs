@@ -137,32 +137,50 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
     [px[0] * m, px[1] * m, px[2] * m]
 }
 
-pub fn apply_highlights(px: [f32; 3], amount: f32) -> [f32; 3] {
-    let lum = luminance(px);
-    let mask = smoothstep(0.5, 1.0, lum);
-    let d = amount * mask;
-    [px[0] + d, px[1] + d, px[2] + d]
-}
+/// Lightroom-style zone-based tone adjustments.
+/// Works in perceptual (gamma 2.2) space for zone targeting and applies
+/// as a luminance ratio to preserve channel ratios (no color shift).
+pub fn apply_tone_zones(
+    px: [f32; 3],
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+) -> [f32; 3] {
+    let l_lin = luminance(px);
+    if l_lin <= 0.0001 {
+        return px;
+    }
+    let l_p = l_lin.powf(1.0 / 2.2);
 
-pub fn apply_shadows(px: [f32; 3], amount: f32) -> [f32; 3] {
-    let lum = luminance(px);
-    let mask = 1.0 - smoothstep(0.0, 0.5, lum);
-    let d = amount * mask;
-    [px[0] + d, px[1] + d, px[2] + d]
-}
+    // Shadows: rises from 0, peaks ~0.15-0.20, fades by ~0.65
+    let sh_rise = smoothstep(0.0, 0.15, l_p);
+    let sh_fall = 1.0 - smoothstep(0.2, 0.65, l_p);
+    let w_sh = sh_rise * sh_fall;
 
-pub fn apply_whites(px: [f32; 3], amount: f32) -> [f32; 3] {
-    let lum = luminance(px);
-    let mask = smoothstep(0.85, 1.0, lum);
-    let d = amount * mask;
-    [px[0] + d, px[1] + d, px[2] + d]
-}
+    // Highlights: rises from ~0.35, full above ~0.75
+    let w_hi = smoothstep(0.35, 0.75, l_p);
 
-pub fn apply_blacks(px: [f32; 3], amount: f32) -> [f32; 3] {
-    let lum = luminance(px);
-    let mask = 1.0 - smoothstep(0.0, 0.15, lum);
-    let d = amount * mask;
-    [px[0] + d, px[1] + d, px[2] + d]
+    // Blacks: strongest at 0, quadratic falloff by ~0.25
+    let t_bk = 1.0 - smoothstep(0.0, 0.25, l_p);
+    let w_bk = t_bk * t_bk;
+
+    // Whites: strongest at 1, quadratic rise from ~0.75
+    let t_wh = smoothstep(0.75, 1.0, l_p);
+    let w_wh = t_wh * t_wh;
+
+    // Sum delta in perceptual space
+    let delta = shadows * w_sh * 0.25
+        + highlights * w_hi * 0.25
+        + blacks * w_bk * 0.30
+        + whites * w_wh * 0.30;
+
+    let l_p_new = (l_p + delta).max(0.001);
+    let l_lin_new = l_p_new.powf(2.2);
+
+    // Multiplicative ratio preserves R:G:B channel ratios
+    let ratio = l_lin_new / l_lin;
+    [px[0] * ratio, px[1] * ratio, px[2] * ratio]
 }
 
 pub fn apply_contrast(px: [f32; 3], amount: f32) -> [f32; 3] {
@@ -170,11 +188,11 @@ pub fn apply_contrast(px: [f32; 3], amount: f32) -> [f32; 3] {
     if lum <= 0.0 {
         return px;
     }
-    // Sigmoid contrast: blend between original lum and a steep sigmoid.
-    // At amount=0 the result is the original pixel (identity).
-    let k = 1.0 + amount.abs() * 4.0;
+    // Sigmoid contrast: blend between original lum and a steep S-curve.
+    // k must be > 4 (the identity slope at midpoint) to actually boost contrast.
+    // At amount=0, blend factor is 0 so the result is identity.
+    let k = 4.0 + amount.abs() * 8.0;
     let sig = 1.0 / (1.0 + (-k * (lum - 0.5)).exp());
-    // sig at lum=0.5 is always 0.5; blending keeps midtones stable.
     let lum_new = lum + amount * (sig - lum);
     let ratio = lum_new / lum;
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
@@ -325,10 +343,13 @@ pub fn apply_all(
     }
 
     let n = |v: f32| v / 100.0;
-    px = apply_highlights(px, n(state.highlights));
-    px = apply_shadows(px, n(state.shadows));
-    px = apply_whites(px, n(state.whites));
-    px = apply_blacks(px, n(state.blacks));
+    px = apply_tone_zones(
+        px,
+        n(state.highlights),
+        n(state.shadows),
+        n(state.whites),
+        n(state.blacks),
+    );
 
     px = apply_contrast(px, n(state.contrast));
 
@@ -618,25 +639,36 @@ mod tests {
     }
 
     #[test]
-    fn apply_highlights_only_affects_bright() {
-        let dark = [0.1, 0.1, 0.1];
-        let out = apply_highlights(dark, 1.0);
-        assert!(approx(out[0], dark[0]));
-
+    fn tone_zones_highlights_affects_bright_not_dark() {
+        // Highlights should brighten bright pixels
         let bright = [0.9, 0.9, 0.9];
-        let out2 = apply_highlights(bright, 1.0);
-        assert!(out2[0] > bright[0]);
+        let out = apply_tone_zones(bright, 1.0, 0.0, 0.0, 0.0);
+        assert!(out[0] > bright[0], "highlights should brighten bright pixels");
+
+        // Highlights should minimally affect dark pixels
+        let dark = [0.02, 0.02, 0.02];
+        let out2 = apply_tone_zones(dark, 1.0, 0.0, 0.0, 0.0);
+        assert!(
+            (out2[0] - dark[0]).abs() < 0.01,
+            "highlights should minimally affect dark pixels"
+        );
     }
 
     #[test]
-    fn apply_shadows_only_affects_dark() {
-        let bright = [0.9, 0.9, 0.9];
-        let out = apply_shadows(bright, 1.0);
-        assert!(approx(out[0], bright[0]));
+    fn tone_zones_shadows_affects_dark_not_bright() {
+        // Shadows should brighten dark pixels
+        let dark = [0.02, 0.02, 0.02];
+        let out = apply_tone_zones(dark, 0.0, 1.0, 0.0, 0.0);
+        assert!(out[0] > dark[0], "shadows should brighten dark pixels");
 
-        let dark = [0.1, 0.1, 0.1];
-        let out2 = apply_shadows(dark, 1.0);
-        assert!(out2[0] > dark[0]);
+        // Shadows should minimally affect bright pixels
+        let bright = [0.9, 0.9, 0.9];
+        let out2 = apply_tone_zones(bright, 0.0, 1.0, 0.0, 0.0);
+        // Bright pixels are above the shadow zone, so minimal effect
+        assert!(
+            (out2[0] - bright[0]).abs() / bright[0] < 0.05,
+            "shadows should minimally affect bright pixels"
+        );
     }
 
     #[test]
@@ -646,6 +678,69 @@ mod tests {
         assert!(approx(out[0], px[0]));
         assert!(approx(out[1], px[1]));
         assert!(approx(out[2], px[2]));
+    }
+
+    #[test]
+    fn contrast_positive_increases_contrast() {
+        // Positive contrast should darken shadows and brighten highlights
+        let shadow = [0.2, 0.2, 0.2];
+        let highlight = [0.8, 0.8, 0.8];
+        let out_s = apply_contrast(shadow, 0.5);
+        let out_h = apply_contrast(highlight, 0.5);
+        assert!(out_s[0] < shadow[0], "positive contrast should darken shadows");
+        assert!(out_h[0] > highlight[0], "positive contrast should brighten highlights");
+    }
+
+    #[test]
+    fn contrast_negative_reduces_contrast() {
+        let shadow = [0.2, 0.2, 0.2];
+        let highlight = [0.8, 0.8, 0.8];
+        let out_s = apply_contrast(shadow, -0.5);
+        let out_h = apply_contrast(highlight, -0.5);
+        assert!(out_s[0] > shadow[0], "negative contrast should brighten shadows");
+        assert!(out_h[0] < highlight[0], "negative contrast should darken highlights");
+    }
+
+    #[test]
+    fn tone_zones_preserve_color_ratios() {
+        // A colored pixel should maintain its R:G:B ratios after zone adjustment
+        let colored = [0.6, 0.3, 0.1];
+        let out = apply_tone_zones(colored, -0.5, 0.0, 0.0, 0.0);
+
+        // Ratios should be preserved (R/G and G/B)
+        let orig_rg = colored[0] / colored[1];
+        let orig_gb = colored[1] / colored[2];
+        let out_rg = out[0] / out[1];
+        let out_gb = out[1] / out[2];
+        assert!(approx(orig_rg, out_rg), "R:G ratio shifted");
+        assert!(approx(orig_gb, out_gb), "G:B ratio shifted");
+    }
+
+    #[test]
+    fn tone_zones_zero_is_identity() {
+        let px = [0.5, 0.3, 0.1];
+        let out = apply_tone_zones(px, 0.0, 0.0, 0.0, 0.0);
+        assert!(approx(out[0], px[0]));
+        assert!(approx(out[1], px[1]));
+        assert!(approx(out[2], px[2]));
+    }
+
+    #[test]
+    fn tone_zones_positive_brightens_negative_darkens() {
+        let mid = [0.2, 0.2, 0.2]; // dark-ish pixel for shadows
+        let bright = [0.8, 0.8, 0.8]; // bright pixel for highlights
+
+        // Positive shadows should brighten
+        let out_s = apply_tone_zones(mid, 0.0, 0.5, 0.0, 0.0);
+        assert!(out_s[0] > mid[0], "positive shadows should brighten");
+
+        // Negative shadows should darken
+        let out_sn = apply_tone_zones(mid, 0.0, -0.5, 0.0, 0.0);
+        assert!(out_sn[0] < mid[0], "negative shadows should darken");
+
+        // Negative highlights should darken bright pixels
+        let out_hn = apply_tone_zones(bright, -0.5, 0.0, 0.0, 0.0);
+        assert!(out_hn[0] < bright[0], "negative highlights should darken");
     }
 
     #[test]
