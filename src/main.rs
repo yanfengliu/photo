@@ -1381,7 +1381,10 @@ fn slider_range(kind: SliderKind) -> (f32, f32) {
     match kind {
         SliderKind::Exposure => (-3.0, 3.0),
         SliderKind::Temperature | SliderKind::Tint => (-30.0, 30.0),
-        SliderKind::Highlights | SliderKind::Shadows => (-100.0, 100.0),
+        SliderKind::Highlights
+        | SliderKind::Shadows
+        | SliderKind::Whites
+        | SliderKind::Blacks => (-100.0, 100.0),
         _ => (-50.0, 50.0),
     }
 }
@@ -1589,10 +1592,17 @@ mod tests {
         assert_eq!(min, -30.0);
         assert_eq!(max, 30.0);
 
-        // Highlights/Shadows keep full range
-        let (min, max) = slider_range(SliderKind::Highlights);
-        assert_eq!(min, -100.0);
-        assert_eq!(max, 100.0);
+        // Highlights/Shadows/Whites/Blacks keep full range
+        for kind in [
+            SliderKind::Highlights,
+            SliderKind::Shadows,
+            SliderKind::Whites,
+            SliderKind::Blacks,
+        ] {
+            let (min, max) = slider_range(kind);
+            assert_eq!(min, -100.0);
+            assert_eq!(max, 100.0);
+        }
 
         // Other sliders are reduced
         let (min, max) = slider_range(SliderKind::Contrast);

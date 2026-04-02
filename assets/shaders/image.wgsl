@@ -159,12 +159,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     px = temp_mat * px;
 
-    // Zone-based tone adjustments (stop-based).
-    // Zone weights target perceptual (gamma 2.2) luminance ranges.
-    // Modeled after Lightroom-style parametric curve zones with overlapping
-    // smoothstep weights (similar to darktable's Gaussian-windowed tone equalizer).
-    // Whites/blacks are endpoint controls with wider zones and higher stop range
-    // (2.5 stops, matching professional tools' 2-3 stop endpoint control).
+    // Zone-based tone adjustments (stop-based, ±2 stops max per slider).
+    // Matches darktable tone equalizer's ±2 stop clamp (correction 0.25x-4.0x).
+    // Zone weights in perceptual (gamma 2.2) luminance space with overlapping
+    // smoothstep transitions (analogous to darktable's Gaussian-windowed bands).
+    // Whites/blacks are endpoint controls with wider zones than highlights/shadows.
     if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
         let L_lin = lum(px);
         if L_lin > 0.0001 {
@@ -184,10 +183,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Whites: endpoint control, affects top ~40% of perceptual range
             let w_wh = smooth_step(0.60, 1.0, L_p);
 
-            let stops = u.shadows * w_sh * 1.5
-                      + u.highlights * w_hi * 1.5
-                      + u.blacks * w_bk * 2.5
-                      + u.whites * w_wh * 2.5;
+            let stops = u.shadows * w_sh * 2.0
+                      + u.highlights * w_hi * 2.0
+                      + u.blacks * w_bk * 2.0
+                      + u.whites * w_wh * 2.0;
 
             px = px * pow(2.0, stops);
         }
@@ -202,12 +201,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         px = px * (l_adj / l2);
     }
 
-    // Vibrance
+    // Vibrance: power-law selective saturation (darktable colorbalancergb approach).
+    // pow(sat, |amount|) attenuates boost for already-saturated colors.
     if u.vibrance != 0.0 {
         let mx = max(px.r, max(px.g, px.b));
         let mn = min(px.r, min(px.g, px.b));
         let sat = select(0.0, (mx - mn) / mx, mx > 0.0);
-        let weight = 1.0 + u.vibrance * (1.0 - sat);
+        let atten = 1.0 - pow(sat, max(abs(u.vibrance), 0.001));
+        let weight = 1.0 + u.vibrance * atten;
         let lv = lum(px);
         px = vec3(lv) + (px - vec3(lv)) * weight;
     }

@@ -10,8 +10,8 @@ pub struct EditState {
     pub contrast: f32,    // -50 to +50
     pub highlights: f32,  // -100 to +100
     pub shadows: f32,     // -100 to +100
-    pub whites: f32,      // -50 to +50
-    pub blacks: f32,      // -50 to +50
+    pub whites: f32,      // -100 to +100
+    pub blacks: f32,      // -100 to +100
     pub temperature: f32, // -30 to +30
     pub tint: f32,        // -30 to +30
     pub vibrance: f32,    // -50 to +50
@@ -137,12 +137,11 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
     [px[0] * m, px[1] * m, px[2] * m]
 }
 
-/// Zone-based tone adjustments (stop-based).
-/// Zone weights target perceptual (gamma 2.2) luminance ranges.
-/// Modeled after Lightroom-style parametric curve zones with overlapping
-/// smoothstep weights (similar to darktable's Gaussian-windowed tone equalizer).
-/// Whites/blacks are endpoint controls with wider zones and higher stop range
-/// (2.5 stops, matching professional tools' 2-3 stop endpoint control).
+/// Zone-based tone adjustments (stop-based, ±2 stops max per slider).
+/// Matches darktable tone equalizer's ±2 stop clamp (correction 0.25x-4.0x).
+/// Zone weights in perceptual (gamma 2.2) luminance space with overlapping
+/// smoothstep transitions (analogous to darktable's Gaussian-windowed bands).
+/// Whites/blacks are endpoint controls with wider zones than highlights/shadows.
 pub fn apply_tone_zones(
     px: [f32; 3],
     highlights: f32,
@@ -170,10 +169,10 @@ pub fn apply_tone_zones(
     // Whites: endpoint control, affects top ~40% of perceptual range
     let w_wh = smoothstep(0.60, 1.0, l_p);
 
-    let stops = shadows * w_sh * 1.5
-        + highlights * w_hi * 1.5
-        + blacks * w_bk * 2.5
-        + whites * w_wh * 2.5;
+    let stops = shadows * w_sh * 2.0
+        + highlights * w_hi * 2.0
+        + blacks * w_bk * 2.0
+        + whites * w_wh * 2.0;
 
     let ratio = 2.0_f32.powf(stops);
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
@@ -204,6 +203,11 @@ pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
     ]
 }
 
+/// Vibrance: selective saturation boost that protects already-saturated colors.
+/// Uses darktable's power-law approach from colorbalancergb.c:
+///   attenuation = pow(chroma, |amount|)
+/// This gives a smoother rolloff than linear (1-sat) weighting — already-vivid
+/// colors are barely affected while muted colors get the full boost.
 pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
     let max_c = px[0].max(px[1]).max(px[2]);
     let min_c = px[0].min(px[1]).min(px[2]);
@@ -212,7 +216,10 @@ pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
     } else {
         0.0
     };
-    let weight = 1.0 + amount * (1.0 - sat);
+    // Power-law attenuation: pow(sat, |amount|) approaches 1 for high sat,
+    // meaning already-saturated pixels get almost no additional boost.
+    let attenuation = 1.0 - sat.powf(amount.abs().max(0.001));
+    let weight = 1.0 + amount * attenuation;
     let lum = luminance(px);
     [
         lum + (px[0] - lum) * weight,

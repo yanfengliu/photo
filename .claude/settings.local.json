@@ -40,7 +40,23 @@
       "Bash(RUST_BACKTRACE=1 timeout 10 ./target/release/photo.exe)",
       "Bash(RUST_BACKTRACE=1 timeout 5 target/release/photo.exe)",
       "Bash(RUST_BACKTRACE=1 timeout 3 target/release/photo.exe)",
-      "Bash(taskkill //IM photo.exe //F)"
+      "Bash(taskkill //IM photo.exe //F)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darktable-org/darktable/master/src/iop/toneequal.c\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darktable-org/darktable/master/src/iop/shadhi.c\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darktable-org/darktable/master/src/iop/filmicrgb.c\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/BradLarson/GPUImage/master/framework/Source/GPUImageHighlightShadowFilter.m\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Beep6581/RawTherapee/dev/rtengine/improcfun.h\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Beep6581/RawTherapee/dev/rtengine/shmap.cc\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Beep6581/RawTherapee/dev/rtengine/ipshadowshighlights.cc\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Beep6581/RawTherapee/dev/rtengine/procparams.cc\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darktable-org/darktable/master/src/common/luminance_mask.h\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Beep6581/RawTherapee/dev/rtengine/procparams.h\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/artpixls/ART/master/rtengine/ipshadowshighlights.cc\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/CarVac/filmulator-gui/master/filmulator-gui/core/filmulate.cpp\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/artpixls/ART/main/rtengine/ipshadowshighlights.cc\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Beep6581/RawTherapee/dev/rtengine/guidedfilter.cc\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/aferrero2k/PhotoFlow/master/src/operations/shadows_highlights.hh\")",
+      "Bash(curl:*)"
     ]
   }
 }

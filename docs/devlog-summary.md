@@ -60,6 +60,7 @@
 38. Rewrote zone adjustments again: stop-based model (px *= 2^stops, max 1.5 stops), narrowed blacks zone to 0-15% perceptual, shifted shadow peak to 20-25% — SUCCESS
 37. Prevented slider track click from teleporting knob; only drag and double-click-to-reset work — SUCCESS
 39. Fixed whites/blacks zones: widened (blacks 0-30%, whites 60-100%), removed quadratic weighting, increased to 2.5 max stops — SUCCESS
+40. Full parameter audit: unified all tone zones to ±2 stops (darktable standard), widened W/B sliders to ±100, vibrance switched to power-law (darktable colorbalancergb approach) — SUCCESS
 
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate
