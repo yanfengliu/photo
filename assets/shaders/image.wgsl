@@ -161,9 +161,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Zone-based tone adjustments (stop-based).
     // Zone weights target perceptual (gamma 2.2) luminance ranges.
-    // Delta is in photographic stops: px *= 2^stops.
-    // This bounds the effect uniformly — 1.5 stops max per slider regardless
-    // of pixel brightness, preventing overblown darks.
+    // Modeled after Lightroom-style parametric curve zones with overlapping
+    // smoothstep weights (similar to darktable's Gaussian-windowed tone equalizer).
+    // Whites/blacks are endpoint controls with wider zones and higher stop range
+    // (2.5 stops, matching professional tools' 2-3 stop endpoint control).
     if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
         let L_lin = lum(px);
         if L_lin > 0.0001 {
@@ -177,19 +178,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Highlights: rises from ~0.35, full above ~0.75
             let w_hi = smooth_step(0.35, 0.75, L_p);
 
-            // Blacks: concentrated endpoint control, fades by ~0.15
-            let t_bk = 1.0 - smooth_step(0.0, 0.15, L_p);
-            let w_bk = t_bk * t_bk;
+            // Blacks: endpoint control, affects bottom ~30% of perceptual range
+            let w_bk = 1.0 - smooth_step(0.0, 0.30, L_p);
 
-            // Whites: endpoint control, quadratic rise from ~0.75
-            let t_wh = smooth_step(0.75, 1.0, L_p);
-            let w_wh = t_wh * t_wh;
+            // Whites: endpoint control, affects top ~40% of perceptual range
+            let w_wh = smooth_step(0.60, 1.0, L_p);
 
-            // Stop-change: max ±1.5 stops per slider at full value
             let stops = u.shadows * w_sh * 1.5
                       + u.highlights * w_hi * 1.5
-                      + u.blacks * w_bk * 1.5
-                      + u.whites * w_wh * 1.5;
+                      + u.blacks * w_bk * 2.5
+                      + u.whites * w_wh * 2.5;
 
             px = px * pow(2.0, stops);
         }

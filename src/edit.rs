@@ -139,9 +139,10 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
 
 /// Zone-based tone adjustments (stop-based).
 /// Zone weights target perceptual (gamma 2.2) luminance ranges.
-/// Delta is in photographic stops: px *= 2^stops.
-/// This bounds the effect uniformly — 1.5 stops max per slider regardless
-/// of pixel brightness, preventing overblown darks.
+/// Modeled after Lightroom-style parametric curve zones with overlapping
+/// smoothstep weights (similar to darktable's Gaussian-windowed tone equalizer).
+/// Whites/blacks are endpoint controls with wider zones and higher stop range
+/// (2.5 stops, matching professional tools' 2-3 stop endpoint control).
 pub fn apply_tone_zones(
     px: [f32; 3],
     highlights: f32,
@@ -163,19 +164,16 @@ pub fn apply_tone_zones(
     // Highlights: rises from ~0.35, full above ~0.75
     let w_hi = smoothstep(0.35, 0.75, l_p);
 
-    // Blacks: concentrated endpoint control, fades by ~0.15
-    let t_bk = 1.0 - smoothstep(0.0, 0.15, l_p);
-    let w_bk = t_bk * t_bk;
+    // Blacks: endpoint control, affects bottom ~30% of perceptual range
+    let w_bk = 1.0 - smoothstep(0.0, 0.30, l_p);
 
-    // Whites: endpoint control, quadratic rise from ~0.75
-    let t_wh = smoothstep(0.75, 1.0, l_p);
-    let w_wh = t_wh * t_wh;
+    // Whites: endpoint control, affects top ~40% of perceptual range
+    let w_wh = smoothstep(0.60, 1.0, l_p);
 
-    // Stop-change: max ±1.5 stops per slider at full value
     let stops = shadows * w_sh * 1.5
         + highlights * w_hi * 1.5
-        + blacks * w_bk * 1.5
-        + whites * w_wh * 1.5;
+        + blacks * w_bk * 2.5
+        + whites * w_wh * 2.5;
 
     let ratio = 2.0_f32.powf(stops);
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
@@ -666,6 +664,48 @@ mod tests {
         assert!(
             (out2[0] - bright[0]).abs() / bright[0] < 0.05,
             "shadows should minimally affect bright pixels"
+        );
+    }
+
+    #[test]
+    fn tone_zones_whites_brightens_bright_pixels() {
+        // Whites at +1 should noticeably brighten near-white pixels
+        let bright = [0.8, 0.8, 0.8];
+        let out = apply_tone_zones(bright, 0.0, 0.0, 1.0, 0.0);
+        let pct_change = (out[0] - bright[0]) / bright[0];
+        assert!(
+            pct_change > 0.10,
+            "whites should brighten bright pixels by >10%, got {:.1}%",
+            pct_change * 100.0
+        );
+
+        // Whites should minimally affect dark pixels
+        let dark = [0.02, 0.02, 0.02];
+        let out2 = apply_tone_zones(dark, 0.0, 0.0, 1.0, 0.0);
+        assert!(
+            (out2[0] - dark[0]).abs() / dark[0] < 0.05,
+            "whites should minimally affect dark pixels"
+        );
+    }
+
+    #[test]
+    fn tone_zones_blacks_darkens_dark_pixels() {
+        // Blacks at -1 should noticeably darken near-black pixels
+        let dark = [0.02, 0.02, 0.02];
+        let out = apply_tone_zones(dark, 0.0, 0.0, 0.0, -1.0);
+        let pct_change = (dark[0] - out[0]) / dark[0];
+        assert!(
+            pct_change > 0.10,
+            "blacks should darken dark pixels by >10%, got {:.1}%",
+            pct_change * 100.0
+        );
+
+        // Blacks should minimally affect bright pixels
+        let bright = [0.8, 0.8, 0.8];
+        let out2 = apply_tone_zones(bright, 0.0, 0.0, 0.0, -1.0);
+        assert!(
+            (out2[0] - bright[0]).abs() / bright[0] < 0.05,
+            "blacks should minimally affect bright pixels"
         );
     }
 

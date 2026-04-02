@@ -59,6 +59,7 @@
 36. Rewrote zone tone adjustments (Lightroom-style): multiplicative luminance ratio (not additive), perceptual-space zone targeting, wider overlapping zones — SUCCESS
 38. Rewrote zone adjustments again: stop-based model (px *= 2^stops, max 1.5 stops), narrowed blacks zone to 0-15% perceptual, shifted shadow peak to 20-25% — SUCCESS
 37. Prevented slider track click from teleporting knob; only drag and double-click-to-reset work — SUCCESS
+39. Fixed whites/blacks zones: widened (blacks 0-30%, whites 60-100%), removed quadratic weighting, increased to 2.5 max stops — SUCCESS
 
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate
