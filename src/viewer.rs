@@ -886,9 +886,11 @@ impl shader::Primitive for ImagePrimitive {
             dehaze: adj.dehaze / 100.0,
             _pad0: 0.0,
             _pad1: 0.0,
-            temp_mat_row0: [mat[0], mat[1], mat[2], 0.0],
-            temp_mat_row1: [mat[3], mat[4], mat[5], 0.0],
-            temp_mat_row2: [mat[6], mat[7], mat[8], 0.0],
+            // WGSL mat3x3(v0,v1,v2) treats vectors as columns, so transpose
+            // the row-major Rust matrix by passing columns instead of rows.
+            temp_mat_row0: [mat[0], mat[3], mat[6], 0.0],
+            temp_mat_row1: [mat[1], mat[4], mat[7], 0.0],
+            temp_mat_row2: [mat[2], mat[5], mat[8], 0.0],
             lens_enabled: if adj.lens_enabled { 1.0 } else { 0.0 },
             lens_dist_a: adj.lens_dist[0],
             lens_dist_b: adj.lens_dist[1],

@@ -169,13 +169,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if L_lin > 0.0001 {
             let L_p = pow(L_lin, 1.0 / 2.2);
 
-            // Shadows: peaks ~0.20-0.25, fades by ~0.65
+            // Shadows: peaks ~0.20-0.25, fades by ~0.50 (tighter to avoid midtone bleed)
             let sh_rise = smooth_step(0.0, 0.20, L_p);
-            let sh_fall = 1.0 - smooth_step(0.25, 0.65, L_p);
+            let sh_fall = 1.0 - smooth_step(0.25, 0.50, L_p);
             let w_sh = sh_rise * sh_fall;
 
-            // Highlights: rises from ~0.35, full above ~0.75
-            let w_hi = smooth_step(0.35, 0.75, L_p);
+            // Highlights: bell shape, rises 0.35-0.55, falls 0.75-1.0 (separates from whites)
+            let w_hi = smooth_step(0.35, 0.55, L_p) * (1.0 - smooth_step(0.75, 1.0, L_p));
 
             // Blacks: endpoint control, affects bottom ~30% of perceptual range
             let w_bk = 1.0 - smooth_step(0.0, 0.30, L_p);
@@ -183,31 +183,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Whites: endpoint control, affects top ~40% of perceptual range
             let w_wh = smooth_step(0.60, 1.0, L_p);
 
-            let stops = u.shadows * w_sh * 2.0
+            let stops = clamp(u.shadows * w_sh * 2.0
                       + u.highlights * w_hi * 2.0
                       + u.blacks * w_bk * 2.0
-                      + u.whites * w_wh * 2.0;
+                      + u.whites * w_wh * 2.0, -2.0, 2.0);
 
             px = px * pow(2.0, stops);
         }
     }
 
-    // Contrast: sigmoid S-curve blend (k > 4 ensures proper contrast boost)
+    // Contrast: sigmoid S-curve blend (k > 4 ensures proper contrast boost).
+    // For HDR values (lum > 1), normalize into [0,1] before sigmoid, then scale back.
     let l2 = lum(px);
     if l2 > 0.0 && u.contrast != 0.0 {
         let k = 4.0 + abs(u.contrast) * 8.0;
-        let sig = 1.0 / (1.0 + exp(-k * (l2 - 0.5)));
-        let l_adj = l2 + u.contrast * (sig - l2);
+        let peak = max(l2, 1.0);
+        let l2n = l2 / peak;
+        let sig = 1.0 / (1.0 + exp(-k * (l2n - 0.5)));
+        let l_adj = (l2n + u.contrast * (sig - l2n)) * peak;
         px = px * (l_adj / l2);
     }
 
-    // Vibrance: power-law selective saturation (darktable colorbalancergb approach).
-    // pow(sat, |amount|) attenuates boost for already-saturated colors.
+    // Vibrance: selective saturation adjustment.
+    // Positive: boosts muted colors, protects saturated (attenuation = 1 - sat^e).
+    // Negative: desaturates vivid colors, protects muted/skin (attenuation = sat^e).
     if u.vibrance != 0.0 {
         let mx = max(px.r, max(px.g, px.b));
         let mn = min(px.r, min(px.g, px.b));
-        let sat = select(0.0, (mx - mn) / mx, mx > 0.0);
-        let atten = 1.0 - pow(sat, max(abs(u.vibrance), 0.001));
+        let sat = clamp(select(0.0, (mx - mn) / mx, mx > 0.0), 0.0, 1.0);
+        let e = max(abs(u.vibrance), 0.001);
+        let atten = select(pow(sat, e), 1.0 - pow(sat, e), u.vibrance >= 0.0);
         let weight = 1.0 + u.vibrance * atten;
         let lv = lum(px);
         px = vec3(lv) + (px - vec3(lv)) * weight;

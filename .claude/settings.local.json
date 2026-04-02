@@ -56,7 +56,12 @@
       "Bash(curl -sL \"https://raw.githubusercontent.com/artpixls/ART/main/rtengine/ipshadowshighlights.cc\")",
       "Bash(curl -sL \"https://raw.githubusercontent.com/Beep6581/RawTherapee/dev/rtengine/guidedfilter.cc\")",
       "Bash(curl -sL \"https://raw.githubusercontent.com/aferrero2k/PhotoFlow/master/src/operations/shadows_highlights.hh\")",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(where python:*)",
+      "Bash(where python3:*)",
+      "Bash(where py:*)",
+      "Bash(rustc verify_bradford.rs -o verify_bradford.exe)",
+      "Bash(./verify_bradford.exe)"
     ]
   }
 }

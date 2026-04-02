@@ -14,7 +14,7 @@ pub struct EditState {
     pub blacks: f32,      // -100 to +100
     pub temperature: f32, // -30 to +30
     pub tint: f32,        // -30 to +30
-    pub vibrance: f32,    // -50 to +50
+    pub vibrance: f32,    // -100 to +100
     pub saturation: f32,  // -50 to +50
     pub clarity: f32,     // -50 to +50
     pub dehaze: f32,      // -50 to +50
@@ -155,13 +155,13 @@ pub fn apply_tone_zones(
     }
     let l_p = l_lin.powf(1.0 / 2.2);
 
-    // Shadows: peaks ~0.20-0.25, fades by ~0.65
+    // Shadows: peaks ~0.20-0.25, fades by ~0.50 (tighter to avoid midtone bleed)
     let sh_rise = smoothstep(0.0, 0.20, l_p);
-    let sh_fall = 1.0 - smoothstep(0.25, 0.65, l_p);
+    let sh_fall = 1.0 - smoothstep(0.25, 0.50, l_p);
     let w_sh = sh_rise * sh_fall;
 
-    // Highlights: rises from ~0.35, full above ~0.75
-    let w_hi = smoothstep(0.35, 0.75, l_p);
+    // Highlights: bell shape, rises 0.35-0.55, falls 0.75-1.0 (separates from whites)
+    let w_hi = smoothstep(0.35, 0.55, l_p) * (1.0 - smoothstep(0.75, 1.0, l_p));
 
     // Blacks: endpoint control, affects bottom ~30% of perceptual range
     let w_bk = 1.0 - smoothstep(0.0, 0.30, l_p);
@@ -169,10 +169,11 @@ pub fn apply_tone_zones(
     // Whites: endpoint control, affects top ~40% of perceptual range
     let w_wh = smoothstep(0.60, 1.0, l_p);
 
-    let stops = shadows * w_sh * 2.0
+    let stops = (shadows * w_sh * 2.0
         + highlights * w_hi * 2.0
         + blacks * w_bk * 2.0
-        + whites * w_wh * 2.0;
+        + whites * w_wh * 2.0)
+        .clamp(-2.0, 2.0);
 
     let ratio = 2.0_f32.powf(stops);
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
@@ -186,9 +187,13 @@ pub fn apply_contrast(px: [f32; 3], amount: f32) -> [f32; 3] {
     // Sigmoid contrast: blend between original lum and a steep S-curve.
     // k must be > 4 (the identity slope at midpoint) to actually boost contrast.
     // At amount=0, blend factor is 0 so the result is identity.
+    // For HDR values (lum > 1), normalize into [0,1] before applying the sigmoid,
+    // then scale back, so contrast works correctly across the full range.
     let k = 4.0 + amount.abs() * 8.0;
-    let sig = 1.0 / (1.0 + (-k * (lum - 0.5)).exp());
-    let lum_new = lum + amount * (sig - lum);
+    let peak = lum.max(1.0);
+    let lum_n = lum / peak;
+    let sig = 1.0 / (1.0 + (-k * (lum_n - 0.5)).exp());
+    let lum_new = (lum_n + amount * (sig - lum_n)) * peak;
     let ratio = lum_new / lum;
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
 }
@@ -203,22 +208,27 @@ pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
     ]
 }
 
-/// Vibrance: selective saturation boost that protects already-saturated colors.
-/// Uses darktable's power-law approach from colorbalancergb.c:
-///   attenuation = pow(chroma, |amount|)
-/// This gives a smoother rolloff than linear (1-sat) weighting — already-vivid
-/// colors are barely affected while muted colors get the full boost.
+/// Vibrance: selective saturation adjustment.
+/// Positive: boosts muted colors while protecting already-saturated ones
+/// (power-law attenuation: high sat → low boost).
+/// Negative: desaturates vivid colors more while protecting muted/skin tones
+/// (power-law attenuation: high sat → strong desaturation).
 pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
     let max_c = px[0].max(px[1]).max(px[2]);
     let min_c = px[0].min(px[1]).min(px[2]);
     let sat = if max_c > 0.0 {
-        (max_c - min_c) / max_c
+        ((max_c - min_c) / max_c).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    // Power-law attenuation: pow(sat, |amount|) approaches 1 for high sat,
-    // meaning already-saturated pixels get almost no additional boost.
-    let attenuation = 1.0 - sat.powf(amount.abs().max(0.001));
+    let exp = amount.abs().max(0.001);
+    // Positive: attenuation high for low sat, low for high sat → boost muted
+    // Negative: attenuation high for high sat, low for low sat → desaturate vivid
+    let attenuation = if amount >= 0.0 {
+        1.0 - sat.powf(exp)
+    } else {
+        sat.powf(exp)
+    };
     let weight = 1.0 + amount * attenuation;
     let lum = luminance(px);
     [
@@ -324,14 +334,30 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Apply lens vignetting correction. `uv` is the pixel's normalized position
+/// (0..1) within the image. `vig` is [k1, k2, k3].
+pub fn apply_vignetting(px: [f32; 3], uv: [f32; 2], vig: [f32; 3]) -> [f32; 3] {
+    let dx = uv[0] - 0.5;
+    let dy = uv[1] - 0.5;
+    let r2 = dx * dx + dy * dy;
+    let r4 = r2 * r2;
+    let r6 = r4 * r2;
+    let correction = 1.0 + vig[0] * r2 + vig[1] * r4 + vig[2] * r6;
+    [px[0] * correction, px[1] * correction, px[2] * correction]
+}
+
 /// Apply all adjustments to a single pixel (sRGB u8 input -> sRGB u8 output).
 /// `blurred` is the corresponding blurred pixel for clarity/dehaze (linear RGB).
 /// `temp_matrix` is the precomputed Bradford CAT matrix.
+/// `uv` is the pixel's normalized position (0..1) for lens vignetting.
+/// `vig` is the lens vignetting coefficients [k1, k2, k3].
 pub fn apply_all(
     srgb: [u8; 4],
     state: &EditState,
     temp_matrix: &[f32; 9],
     blurred: [f32; 3],
+    uv: [f32; 2],
+    vig: [f32; 3],
 ) -> [u8; 4] {
     let mut px = [
         srgb_to_linear(srgb[0] as f32 / 255.0),
@@ -378,6 +404,10 @@ pub fn apply_all(
         }
     }
 
+    if state.lens_correction && (vig[0] != 0.0 || vig[1] != 0.0 || vig[2] != 0.0) {
+        px = apply_vignetting(px, uv, vig);
+    }
+
     let r = (linear_to_srgb(px[0].clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
     let g = (linear_to_srgb(px[1].clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
     let b = (linear_to_srgb(px[2].clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
@@ -387,17 +417,21 @@ pub fn apply_all(
 // -- Save --
 
 /// Apply all edits and save to disk. Returns the output path on success.
+/// `vig` is the lens vignetting coefficients [k1, k2, k3] (pass [0;3] if none).
 pub fn save_edited_image(
     original_path: &Path,
     pixels: &[u8],
     width: u32,
     height: u32,
     state: &EditState,
+    vig: [f32; 3],
 ) -> Result<PathBuf, String> {
     let temp_matrix = temperature_tint_matrix(state.temperature, state.tint);
     let blur = generate_cpu_blur(pixels, width, height);
 
     let mut output = Vec::with_capacity(pixels.len());
+    let w_f = width as f32;
+    let h_f = height as f32;
     for y in 0..height {
         for x in 0..width {
             let idx = ((y * width + x) * 4) as usize;
@@ -412,7 +446,8 @@ pub fn save_edited_image(
             let bw = (width / 4).max(1);
             let bidx = ((by * bw + bx) * 3) as usize;
             let blurred = [blur[bidx], blur[bidx + 1], blur[bidx + 2]];
-            let result = apply_all(srgb, state, &temp_matrix, blurred);
+            let uv = [(x as f32 + 0.5) / w_f, (y as f32 + 0.5) / h_f];
+            let result = apply_all(srgb, state, &temp_matrix, blurred, uv, vig);
             output.extend_from_slice(&result);
         }
     }
@@ -810,10 +845,128 @@ mod tests {
         let identity_mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         let blurred = [0.5, 0.5, 0.5];
         let input = [128, 64, 200, 255];
-        let output = apply_all(input, &state, &identity_mat, blurred);
+        let uv = [0.5, 0.5];
+        let vig = [0.0, 0.0, 0.0];
+        let output = apply_all(input, &state, &identity_mat, blurred, uv, vig);
         assert!((output[0] as i16 - input[0] as i16).abs() <= 1);
         assert!((output[1] as i16 - input[1] as i16).abs() <= 1);
         assert!((output[2] as i16 - input[2] as i16).abs() <= 1);
         assert_eq!(output[3], 255);
+    }
+
+    #[test]
+    fn contrast_works_for_hdr_luminance() {
+        // After +2EV exposure, pixel luminance can exceed 1.0.
+        // The S-curve normalizes into [0,1] per-pixel, so HDR values produce
+        // reasonable results instead of being wildly inverted.
+        let hdr = [1.5, 1.5, 1.5];
+
+        // HDR values should stay close to input (S-curve compresses extremes slightly,
+        // which is correct — contrast compresses highlights at the extreme end).
+        let out_pos = apply_contrast(hdr, 0.5);
+        assert!(
+            (out_pos[0] - hdr[0]).abs() / hdr[0] < 0.05,
+            "HDR contrast compression should be small (<5%), got {:.4} vs {:.4}",
+            out_pos[0],
+            hdr[0]
+        );
+
+        // Standard [0,1] range: contrast should still work correctly.
+        // Above midpoint brightens, below midpoint darkens.
+        let highlight = [0.8, 0.8, 0.8];
+        let out_h = apply_contrast(highlight, 0.5);
+        assert!(
+            out_h[0] > highlight[0],
+            "positive contrast should brighten highlights, got {}",
+            out_h[0]
+        );
+        let shadow = [0.2, 0.2, 0.2];
+        let out_s = apply_contrast(shadow, 0.5);
+        assert!(
+            out_s[0] < shadow[0],
+            "positive contrast should darken shadows, got {}",
+            out_s[0]
+        );
+    }
+
+    #[test]
+    fn negative_vibrance_targets_saturated_colors() {
+        // Highly saturated pixel
+        let vivid = [0.8, 0.1, 0.1];
+        // Muted pixel (similar channel values)
+        let muted = [0.4, 0.35, 0.3];
+
+        let out_vivid = apply_vibrance(vivid, -0.5);
+        let out_muted = apply_vibrance(muted, -0.5);
+
+        // Compute relative saturation change for each
+        let lum_v = luminance(vivid);
+        let lum_m = luminance(muted);
+        let chroma_orig_v = ((vivid[0] - lum_v).powi(2) + (vivid[1] - lum_v).powi(2)).sqrt();
+        let chroma_new_v =
+            ((out_vivid[0] - lum_v).powi(2) + (out_vivid[1] - lum_v).powi(2)).sqrt();
+        let chroma_orig_m = ((muted[0] - lum_m).powi(2) + (muted[1] - lum_m).powi(2)).sqrt();
+        let chroma_new_m =
+            ((out_muted[0] - lum_m).powi(2) + (out_muted[1] - lum_m).powi(2)).sqrt();
+
+        let reduction_vivid = 1.0 - chroma_new_v / chroma_orig_v;
+        let reduction_muted = 1.0 - chroma_new_m / chroma_orig_m;
+
+        assert!(
+            reduction_vivid > reduction_muted,
+            "negative vibrance should reduce saturated colors more ({:.3}) than muted ({:.3})",
+            reduction_vivid,
+            reduction_muted
+        );
+    }
+
+    #[test]
+    fn tone_zones_total_stops_clamped() {
+        // Max all sliders: highlights=1, whites=1 on a bright pixel
+        let bright = [0.9, 0.9, 0.9];
+        let out = apply_tone_zones(bright, 1.0, 0.0, 1.0, 0.0);
+        // With ±2 stop clamp, max multiplier is 4.0x
+        let max_expected = bright[0] * 4.0;
+        assert!(
+            out[0] <= max_expected + 0.01,
+            "total stops should be clamped to ±2 (4x), got {:.3} vs max {:.3}",
+            out[0],
+            max_expected
+        );
+    }
+
+    #[test]
+    fn highlights_does_not_affect_pure_white() {
+        // With the bell-shaped highlights zone, pure white (L_p ~1.0) should have
+        // reduced highlights influence since whites takes over there
+        let white = [0.95, 0.95, 0.95];
+        let mid_bright = [0.5, 0.5, 0.5]; // L_p ~0.73 (in highlights peak zone)
+        let out_w = apply_tone_zones(white, 1.0, 0.0, 0.0, 0.0);
+        let out_m = apply_tone_zones(mid_bright, 1.0, 0.0, 0.0, 0.0);
+        let pct_w = (out_w[0] - white[0]) / white[0];
+        let pct_m = (out_m[0] - mid_bright[0]) / mid_bright[0];
+        // Highlights should have MORE effect in the mid-bright range than pure white
+        assert!(
+            pct_m > pct_w,
+            "highlights should peak in mid-brights ({:.3}%) not whites ({:.3}%)",
+            pct_m * 100.0,
+            pct_w * 100.0
+        );
+    }
+
+    #[test]
+    fn vignetting_correction_brightens_corners() {
+        let px = [0.5, 0.5, 0.5];
+        let vig = [1.0, 0.5, 0.1]; // typical vignetting correction coefficients
+        // Center pixel: UV (0.5, 0.5) has r=0, correction=1.0 (no change)
+        let center = apply_vignetting(px, [0.5, 0.5], vig);
+        assert!(approx(center[0], px[0]));
+        // Corner pixel: UV (0.0, 0.0) has r²=0.5, correction>1.0 (brightened)
+        let corner = apply_vignetting(px, [0.0, 0.0], vig);
+        assert!(
+            corner[0] > px[0],
+            "vignetting should brighten corners, got {}",
+            corner[0]
+        );
     }
 }

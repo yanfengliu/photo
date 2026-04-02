@@ -475,6 +475,15 @@ impl App {
                     .get(&path)
                     .map(|h| h.current)
                     .unwrap_or_default();
+                let vig = if state.lens_correction {
+                    self.current_lens_profile
+                        .as_ref()
+                        .and_then(|p| p.vignetting)
+                        .map(|v| [v.k1, v.k2, v.k3])
+                        .unwrap_or([0.0; 3])
+                } else {
+                    [0.0; 3]
+                };
                 self.save_status = Some("Saving...".to_string());
                 Task::perform(
                     async move {
@@ -485,6 +494,7 @@ impl App {
                                 img.width,
                                 img.height,
                                 &state,
+                                vig,
                             )
                             .map(|p| p.to_string_lossy().into_owned())
                         })
@@ -1384,7 +1394,8 @@ fn slider_range(kind: SliderKind) -> (f32, f32) {
         SliderKind::Highlights
         | SliderKind::Shadows
         | SliderKind::Whites
-        | SliderKind::Blacks => (-100.0, 100.0),
+        | SliderKind::Blacks
+        | SliderKind::Vibrance => (-100.0, 100.0),
         _ => (-50.0, 50.0),
     }
 }

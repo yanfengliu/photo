@@ -61,6 +61,7 @@
 37. Prevented slider track click from teleporting knob; only drag and double-click-to-reset work — SUCCESS
 39. Fixed whites/blacks zones: widened (blacks 0-30%, whites 60-100%), removed quadratic weighting, increased to 2.5 max stops — SUCCESS
 40. Full parameter audit: unified all tone zones to ±2 stops (darktable standard), widened W/B sliders to ±100, vibrance switched to power-law (darktable colorbalancergb approach) — SUCCESS
+41. Comprehensive formula audit (5 independent agents): fixed Bradford matrix transpose, clamped total stops to ±2, added vignetting to CPU save, fixed negative vibrance direction, fixed contrast for HDR lum, reshaped highlights bell zone, tightened shadows zone — SUCCESS
 
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate
