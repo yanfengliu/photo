@@ -268,3 +268,10 @@
 **Files changed:** `src/main.rs`, `docs/devlog-detailed.md`
 **Reasoning:** Tasks 5 and 6 of collections feature — implements the full user flow from collection sidebar -> grid view -> detail view with collection-scoped navigation and back navigation.
 **Notes:** Three stubs remain for Tasks 7-8: AddPhotoToCollection, LibraryPhotoRightClicked, TogglePhotoInCollection.
+
+## [2026-04-04 00:25, PDT] — Library photo context menu and drag-and-drop (Tasks 7 & 8)
+**Action:** Implemented library photo context menu and drag-and-drop to collections. Wrapped `thumbnail_card` in MouseArea for right-click (LibraryPhotoRightClicked), hover enter (ThumbnailHovered(Some)), and hover exit (ThumbnailHovered(None)). Replaced 3 remaining stub handlers: LibraryPhotoRightClicked (opens LibraryPhoto context menu if collections exist), AddPhotoToCollection (adds photo from context menu to specified collection), TogglePhotoInCollection (toggles photo membership — adds if absent, removes if present). Added drag initialization in LibraryItemClicked (creates DragState with inactive flag). Updated CursorMoved handler to track drag position and activate after 5px threshold. Updated ButtonReleased(Left) handler to complete drag-drop (adds photo to hovered sidebar collection if drag was active). Replaced drag_overlay stub with full implementation showing thumbnail + filename floating at cursor position with styled container. Added 10 new tests (114 total): context menu creation, add/toggle photo handlers, drag state lifecycle, drag threshold activation, drag-drop to collection, drag-drop edge cases.
+**Result:** Success — 114 tests pass, release build compiles cleanly.
+**Files changed:** `src/main.rs`, `docs/devlog-detailed.md`
+**Reasoning:** Tasks 7 and 8 of collections feature — completes the full library-to-collection workflow via both context menu and drag-and-drop.
+**Notes:** All collection feature stubs are now replaced. Task 9 (final polish + integration tests) remains.

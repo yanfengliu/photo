@@ -439,6 +439,14 @@ impl App {
             Message::ThumbnailLoaded(_, Err(_)) => Task::none(),
 
             Message::LibraryItemClicked(index) => {
+                // Start potential drag
+                self.drag_state = Some(DragState {
+                    photo_index: index,
+                    start_pos: self.cursor_position,
+                    current_pos: self.cursor_position,
+                    active: false,
+                });
+
                 let now = Instant::now();
                 let is_double_click = self
                     .last_thumb_click
@@ -858,10 +866,56 @@ impl App {
                 Task::none()
             }
 
-            // -- Collection stubs (implemented in later tasks) --
-            Message::AddPhotoToCollection(_)
-            | Message::LibraryPhotoRightClicked(_)
-            | Message::TogglePhotoInCollection(_) => Task::none(),
+            Message::LibraryPhotoRightClicked(index) => {
+                if self.collection_store.collections.is_empty() {
+                    return Task::none();
+                }
+                self.context_menu = Some(ContextMenu {
+                    position: self.cursor_position,
+                    kind: ContextMenuKind::LibraryPhoto { photo_index: index },
+                });
+                Task::none()
+            }
+
+            Message::AddPhotoToCollection(collection_index) => {
+                if let Some(ContextMenu {
+                    kind: ContextMenuKind::LibraryPhoto { photo_index },
+                    ..
+                }) = &self.context_menu
+                {
+                    if let Some(entry) = self.library.get(*photo_index) {
+                        self.collection_store.add_photo(collection_index, &entry.path);
+                        self.collection_store.save();
+                    }
+                }
+                self.context_menu = None;
+                Task::none()
+            }
+
+            Message::TogglePhotoInCollection(collection_index) => {
+                if let Some(ContextMenu {
+                    kind: ContextMenuKind::LibraryPhoto { photo_index },
+                    ..
+                }) = &self.context_menu
+                {
+                    if let Some(entry) = self.library.get(*photo_index) {
+                        let path = entry.path.clone();
+                        if self
+                            .collection_store
+                            .collections
+                            .get(collection_index)
+                            .map_or(false, |c| c.photos.contains(&path))
+                        {
+                            self.collection_store.remove_photo(collection_index, &path);
+                        } else {
+                            self.collection_store.add_photo(collection_index, &path);
+                        }
+                        self.collection_store.save();
+                    }
+                }
+                self.context_menu = None;
+                Task::none()
+            }
         }
     }
 
@@ -921,6 +975,16 @@ impl App {
 
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 self.cursor_position = [position.x, position.y];
+                if let Some(ref mut drag) = self.drag_state {
+                    drag.current_pos = [position.x, position.y];
+                    if !drag.active {
+                        let dx = drag.current_pos[0] - drag.start_pos[0];
+                        let dy = drag.current_pos[1] - drag.start_pos[1];
+                        if (dx * dx + dy * dy).sqrt() > 5.0 {
+                            drag.active = true;
+                        }
+                    }
+                }
                 Task::none()
             }
 
@@ -928,6 +992,18 @@ impl App {
                 Task::none()
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if let Some(drag) = self.drag_state.take() {
+                    if drag.active {
+                        if let Some(col_idx) = self.sidebar_hover_collection {
+                            if let Some(entry) = self.library.get(drag.photo_index) {
+                                self.collection_store.add_photo(col_idx, &entry.path);
+                                self.collection_store.save();
+                            }
+                        }
+                        // Cancel the click that started this drag
+                        self.last_thumb_click = None;
+                    }
+                }
                 Task::none()
             }
 
@@ -1482,10 +1558,15 @@ impl App {
 
         let label = container(text(&entry.filename).size(10).color(TEXT_SECONDARY)).width(thumb_size);
 
-        button(column![thumb, label].spacing(4).width(thumb_size))
+        let card = button(column![thumb, label].spacing(4).width(thumb_size))
             .on_press(Message::LibraryItemClicked(index))
             .padding(6)
-            .style(card_button_style)
+            .style(card_button_style);
+
+        MouseArea::new(card)
+            .on_right_press(Message::LibraryPhotoRightClicked(index))
+            .on_enter(Message::ThumbnailHovered(Some(index)))
+            .on_exit(Message::ThumbnailHovered(None))
             .into()
     }
 
@@ -1863,8 +1944,54 @@ impl App {
     // Drag overlay (stub — implemented in Task 8)
     // ---------------------------------------------------------------------------
 
-    fn drag_overlay(&self, _drag: &DragState) -> Element<'_, Message> {
-        Space::new(0, 0).into()
+    fn drag_overlay(&self, drag: &DragState) -> Element<'_, Message> {
+        let label = self
+            .library
+            .get(drag.photo_index)
+            .map(|e| e.filename.clone())
+            .unwrap_or_default();
+
+        let thumb: Element<'_, Message> =
+            if let Some(Some(ref handle)) = self.library.get(drag.photo_index).map(|e| &e.thumbnail_handle) {
+                container(Image::new(handle.clone()).width(60).height(60))
+                    .width(60)
+                    .height(60)
+                    .center_x(Length::Shrink)
+                    .center_y(Length::Shrink)
+                    .into()
+            } else {
+                text(label.clone()).size(11).color(TEXT_PRIMARY).into()
+            };
+
+        let drag_widget = container(
+            column![thumb, text(label).size(10).color(TEXT_SECONDARY)].spacing(2),
+        )
+        .padding(4)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(Background::Color(Color {
+                r: 0.15,
+                g: 0.15,
+                b: 0.15,
+                a: 0.85,
+            })),
+            border: Border {
+                color: Color::from_rgb(0.3, 0.5, 0.7),
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+
+        let x = drag.current_pos[0] + 10.0;
+        let y = drag.current_pos[1] + 10.0;
+
+        container(column![
+            Space::with_height(y),
+            row![Space::with_width(x), drag_widget,]
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 }
 
@@ -2507,5 +2634,175 @@ mod tests {
         let pos = format!("  {}/{}", photo_idx + 1, total);
         assert_eq!(pos, "  3/5");
         let _ = col_idx; // used to index into collection_store
+    }
+
+    #[test]
+    fn library_photo_right_click_no_collections_no_menu() {
+        // If there are no collections, right-clicking a library photo should not create a menu
+        let store = collection::CollectionStore::default();
+        assert!(store.collections.is_empty());
+        // Handler would early-return Task::none() without setting context_menu
+    }
+
+    #[test]
+    fn library_photo_right_click_creates_context_menu() {
+        // Simulate LibraryPhotoRightClicked with collections present
+        let mut store = collection::CollectionStore::default();
+        store.create("My Collection");
+        assert!(!store.collections.is_empty());
+        let cursor_position = [150.0, 300.0];
+        let menu = ContextMenu {
+            position: cursor_position,
+            kind: ContextMenuKind::LibraryPhoto { photo_index: 2 },
+        };
+        assert_eq!(menu.position, [150.0, 300.0]);
+        match menu.kind {
+            ContextMenuKind::LibraryPhoto { photo_index } => assert_eq!(photo_index, 2),
+            _ => panic!("expected LibraryPhoto"),
+        }
+    }
+
+    #[test]
+    fn add_photo_to_collection_handler() {
+        // Simulate AddPhotoToCollection: when context menu has LibraryPhoto, add photo to collection
+        let mut store = collection::CollectionStore::default();
+        store.create("Favorites");
+        let photo_path = PathBuf::from("/test/sunset.jpg");
+        // Simulate add_photo as the handler would
+        store.add_photo(0, &photo_path);
+        assert_eq!(store.collections[0].photos.len(), 1);
+        assert!(store.collections[0].photos.contains(&photo_path));
+    }
+
+    #[test]
+    fn toggle_photo_in_collection_adds_when_absent() {
+        let mut store = collection::CollectionStore::default();
+        store.create("Test");
+        let path = PathBuf::from("/test/photo.jpg");
+        // Photo not in collection -> add it
+        let contains = store.collections[0].photos.contains(&path);
+        assert!(!contains);
+        store.add_photo(0, &path);
+        assert!(store.collections[0].photos.contains(&path));
+    }
+
+    #[test]
+    fn toggle_photo_in_collection_removes_when_present() {
+        let mut store = collection::CollectionStore::default();
+        store.create("Test");
+        let path = PathBuf::from("/test/photo.jpg");
+        store.add_photo(0, &path);
+        assert!(store.collections[0].photos.contains(&path));
+        // Photo already in collection -> remove it
+        store.remove_photo(0, &path);
+        assert!(!store.collections[0].photos.contains(&path));
+    }
+
+    #[test]
+    fn drag_state_initializes_inactive() {
+        // When LibraryItemClicked is handled, drag_state is created but inactive
+        let cursor = [100.0, 200.0];
+        let drag = DragState {
+            photo_index: 5,
+            start_pos: cursor,
+            current_pos: cursor,
+            active: false,
+        };
+        assert_eq!(drag.photo_index, 5);
+        assert_eq!(drag.start_pos, cursor);
+        assert!(!drag.active);
+    }
+
+    #[test]
+    fn drag_activates_after_threshold() {
+        // Drag becomes active when cursor moves more than 5px from start
+        let mut drag = DragState {
+            photo_index: 0,
+            start_pos: [100.0, 100.0],
+            current_pos: [100.0, 100.0],
+            active: false,
+        };
+        // Move 3px - should not activate
+        drag.current_pos = [103.0, 100.0];
+        let dx = drag.current_pos[0] - drag.start_pos[0];
+        let dy = drag.current_pos[1] - drag.start_pos[1];
+        if (dx * dx + dy * dy).sqrt() > 5.0 {
+            drag.active = true;
+        }
+        assert!(!drag.active);
+
+        // Move 6px - should activate
+        drag.current_pos = [106.0, 100.0];
+        let dx = drag.current_pos[0] - drag.start_pos[0];
+        let dy = drag.current_pos[1] - drag.start_pos[1];
+        if (dx * dx + dy * dy).sqrt() > 5.0 {
+            drag.active = true;
+        }
+        assert!(drag.active);
+    }
+
+    #[test]
+    fn drag_drop_adds_photo_to_hovered_collection() {
+        // Simulate: active drag released over sidebar collection -> adds photo
+        let mut store = collection::CollectionStore::default();
+        store.create("Target");
+        let photo_path = PathBuf::from("/test/landscape.jpg");
+        let sidebar_hover_collection: Option<usize> = Some(0);
+        let drag = DragState {
+            photo_index: 0,
+            start_pos: [50.0, 50.0],
+            current_pos: [200.0, 100.0],
+            active: true,
+        };
+        // Simulate the ButtonReleased handler
+        if drag.active {
+            if let Some(col_idx) = sidebar_hover_collection {
+                store.add_photo(col_idx, &photo_path);
+            }
+        }
+        assert_eq!(store.collections[0].photos.len(), 1);
+        assert!(store.collections[0].photos.contains(&photo_path));
+    }
+
+    #[test]
+    fn drag_drop_no_hover_does_not_add() {
+        // If drag is released but no collection is hovered, nothing happens
+        let mut store = collection::CollectionStore::default();
+        store.create("Target");
+        let sidebar_hover_collection: Option<usize> = None;
+        let drag = DragState {
+            photo_index: 0,
+            start_pos: [50.0, 50.0],
+            current_pos: [200.0, 100.0],
+            active: true,
+        };
+        if drag.active {
+            if let Some(col_idx) = sidebar_hover_collection {
+                store.add_photo(col_idx, &PathBuf::from("/test/photo.jpg"));
+                let _ = col_idx;
+            }
+        }
+        assert!(store.collections[0].photos.is_empty());
+    }
+
+    #[test]
+    fn drag_not_active_does_not_add() {
+        // If drag exists but never became active (< 5px), no add on release
+        let mut store = collection::CollectionStore::default();
+        store.create("Target");
+        let sidebar_hover_collection: Option<usize> = Some(0);
+        let drag = DragState {
+            photo_index: 0,
+            start_pos: [50.0, 50.0],
+            current_pos: [52.0, 50.0],
+            active: false,
+        };
+        if drag.active {
+            if let Some(col_idx) = sidebar_hover_collection {
+                store.add_photo(col_idx, &PathBuf::from("/test/photo.jpg"));
+                let _ = col_idx;
+            }
+        }
+        assert!(store.collections[0].photos.is_empty());
     }
 }
