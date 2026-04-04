@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod collection;
 mod decode;
 mod edit;
 mod lens;

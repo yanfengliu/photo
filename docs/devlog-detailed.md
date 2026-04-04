@@ -240,3 +240,10 @@
 **Files changed:** `src/edit.rs`, `src/viewer.rs`, `assets/shaders/image.wgsl`, `src/main.rs`
 **Reasoning:** Independent review agents found real bugs that would cause visible GPU/CPU mismatches (matrix transpose, missing vignetting) and incorrect editing behavior (vibrance direction, contrast HDR, zone shapes). All fixes applied to both GPU shader and CPU code to maintain parity.
 **Notes:** The matrix transpose bug (#1) was the most impactful — it meant every temperature/tint adjustment looked different in preview vs saved image. The vibrance fix (#4) changes negative vibrance behavior to match Lightroom: pulling vibrance left now targets vivid colors while protecting muted/skin tones.
+
+## [2026-04-03 21:28, PDT] — Add collection.rs data module with CRUD and persistence
+**Action:** Added `serde` and `serde_json` to `Cargo.toml`; created `src/collection.rs` with `Collection` and `CollectionStore` types, full CRUD (create, rename, delete, add_photo, remove_photo), natural-sort ordering via `natord`, JSON persistence (`save_to`/`load_from`/`save`/`load`), and `next_default_name` helper. Added `mod collection;` to `src/main.rs`. Wrote 16 unit tests covering all public APIs.
+**Result:** Success — all 89 tests pass, release build compiles cleanly.
+**Files changed:** `Cargo.toml`, `src/collection.rs` (new), `src/main.rs`
+**Reasoning:** Self-contained data layer with no UI dependencies; `tempfile` dev-dependency (already present) used for round-trip persistence tests. Natural sort via `natord` keeps collection list consistent with rest of app.
+**Notes:** `collections_file_path()` targets `%LOCALAPPDATA%\photo\collections.json` on Windows, returns `None` if env var absent (graceful fallback to empty store).
