@@ -12,6 +12,7 @@ pub struct CollectionStore {
     pub collections: Vec<Collection>,
 }
 
+#[allow(dead_code)]
 impl CollectionStore {
     pub fn create(&mut self, name: &str) {
         self.collections.push(Collection {

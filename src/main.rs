@@ -14,11 +14,12 @@ use std::time::Instant;
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
     button, column, container, horizontal_space, pick_list, row, scrollable, shader, slider, text,
-    text_input, Image,
+    text_input, Image, MouseArea, Space,
 };
+#[allow(unused_imports)]
 use iced::{
-    event, keyboard, window, Alignment, Background, Border, Color, Element, Length, Size,
-    Subscription, Task, Theme,
+    event, keyboard, mouse, window, Alignment, Background, Border, Color, Element, Length, Point,
+    Size, Subscription, Task, Theme,
 };
 
 use decode::ImageData;
@@ -81,6 +82,29 @@ enum SliderKind {
     Dehaze,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum ContextMenuKind {
+    LibraryPhoto { photo_index: usize },
+    CollectionPhoto { photo_index: usize },
+    SidebarCollection { collection_index: usize },
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ContextMenu {
+    position: [f32; 2],
+    kind: ContextMenuKind,
+}
+
+#[allow(dead_code)]
+struct DragState {
+    photo_index: usize,
+    start_pos: [f32; 2],
+    current_pos: [f32; 2],
+    active: bool,
+}
+
 struct LibraryEntry {
     path: PathBuf,
     filename: String,
@@ -117,11 +141,28 @@ struct App {
     /// Only apply values after 2+ on_change events (i.e., actual drag).
     slider_drag: Option<(SliderKind, u32)>,
     lens_override_name: Option<String>,
+    collection_store: collection::CollectionStore,
+    #[allow(dead_code)]
+    active_collection: Option<usize>,
+    #[allow(dead_code)]
+    context_menu: Option<ContextMenu>,
+    drag_state: Option<DragState>,
+    editing_collection_name: Option<usize>,
+    collection_name_buf: String,
+    #[allow(dead_code)]
+    hovered_thumbnail: Option<usize>,
+    sidebar_hover_collection: Option<usize>,
+    cursor_position: [f32; 2],
+    #[allow(dead_code)]
+    last_collection_click: Option<(usize, Instant)>,
+    /// When entering Detail from a collection, stores (collection_index, photo_index_within_collection).
+    #[allow(dead_code)]
+    collection_nav: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum Message {
-    #[allow(dead_code)]
     OpenFile,
     FileSelected(Option<PathBuf>),
     ImageLoaded(Result<Arc<ImageData>, String>),
@@ -145,6 +186,31 @@ enum Message {
     SliderTextChanged(String),
     SliderTextSubmit(SliderKind),
     LensProfileSelected(String),
+    // Collections
+    CreateCollection,
+    CollectionNameChanged(String),
+    CollectionNameSubmit,
+    CollectionNameCancel,
+    SidebarCollectionClicked(usize),
+    SidebarCollectionRightClicked(usize),
+    SidebarCollectionHovered(Option<usize>),
+    ExitCollectionView,
+    CollectionPhotoClicked(usize),
+    CollectionPhotoRightClicked(usize),
+    // Context menu
+    DismissContextMenu,
+    ContextMenuRename,
+    ContextMenuDelete,
+    AddPhotoToCollection(usize),
+    RemovePhotoFromCollection,
+    // Thumbnail hover
+    ThumbnailHovered(Option<usize>),
+    // Right-click on library thumbnail
+    LibraryPhotoRightClicked(usize),
+    // Toggle photo in collection
+    TogglePhotoInCollection(usize),
+    // Back from detail to collection grid
+    ExitCollectionDetail,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +243,17 @@ impl App {
             last_slider_release: None,
             slider_drag: None,
             lens_override_name: None,
+            collection_store: collection::CollectionStore::load(),
+            active_collection: None,
+            context_menu: None,
+            drag_state: None,
+            editing_collection_name: None,
+            collection_name_buf: String::new(),
+            hovered_thumbnail: None,
+            sidebar_hover_collection: None,
+            cursor_position: [0.0, 0.0],
+            last_collection_click: None,
+            collection_nav: None,
         };
 
         // Restore saved library entries
@@ -574,6 +651,27 @@ impl App {
                 }
                 Task::none()
             }
+
+            // -- Collection stubs (implemented in later tasks) --
+            Message::CreateCollection
+            | Message::CollectionNameChanged(_)
+            | Message::CollectionNameSubmit
+            | Message::CollectionNameCancel
+            | Message::SidebarCollectionClicked(_)
+            | Message::SidebarCollectionRightClicked(_)
+            | Message::SidebarCollectionHovered(_)
+            | Message::ExitCollectionView
+            | Message::CollectionPhotoClicked(_)
+            | Message::CollectionPhotoRightClicked(_)
+            | Message::DismissContextMenu
+            | Message::ContextMenuRename
+            | Message::ContextMenuDelete
+            | Message::AddPhotoToCollection(_)
+            | Message::RemovePhotoFromCollection
+            | Message::ThumbnailHovered(_)
+            | Message::LibraryPhotoRightClicked(_)
+            | Message::TogglePhotoInCollection(_)
+            | Message::ExitCollectionDetail => Task::none(),
         }
     }
 
@@ -629,6 +727,11 @@ impl App {
                 self.tab = Tab::Detail;
                 self.current_image_path = Some(path.clone());
                 self.start_load(path)
+            }
+
+            iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                self.cursor_position = [position.x, position.y];
+                Task::none()
             }
 
             _ => Task::none(),
@@ -924,13 +1027,81 @@ impl App {
             .width(Length::Fill)
             .padding([6, 14]);
 
-        container(column![
+        let grid_area = column![
             scrollable(container(grid).padding(14).width(Length::Fill)).height(Length::Fill),
             container(status)
                 .width(Length::Fill)
                 .style(toolbar_container_style),
-        ])
-        .style(dark_bg_style)
+        ];
+
+        let sidebar = self.collection_sidebar();
+        let divider = container(Space::with_width(1))
+            .height(Length::Fill)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(Background::Color(DIVIDER)),
+                ..Default::default()
+            });
+
+        container(row![sidebar, divider, container(grid_area).width(Length::Fill)])
+            .style(dark_bg_style)
+            .into()
+    }
+
+    fn collection_sidebar(&self) -> Element<'_, Message> {
+        let header = row![
+            container(text("COLLECTIONS").size(10).color(TEXT_DIM)).padding([5, 0]),
+            horizontal_space(),
+            button(text("+").size(14).color(TEXT_PRIMARY))
+                .on_press(Message::CreateCollection)
+                .padding([2, 8])
+                .style(toolbar_button_style),
+        ]
+        .align_y(Alignment::Center);
+
+        let mut list = column![].spacing(2);
+        for (i, col) in self.collection_store.collections.iter().enumerate() {
+            let entry: Element<'_, Message> = if self.editing_collection_name == Some(i) {
+                text_input("Collection name", &self.collection_name_buf)
+                    .on_input(Message::CollectionNameChanged)
+                    .on_submit(Message::CollectionNameSubmit)
+                    .size(12)
+                    .width(Length::Fill)
+                    .into()
+            } else {
+                let label = format!("{} ({})", col.name, col.photos.len());
+                let is_drop_target = self
+                    .drag_state
+                    .as_ref()
+                    .map_or(false, |d| d.active)
+                    && self.sidebar_hover_collection == Some(i);
+                let style_fn = if is_drop_target {
+                    sidebar_item_drop_target_style
+                } else {
+                    sidebar_item_style
+                };
+                MouseArea::new(
+                    button(text(label).size(12).color(TEXT_SECONDARY))
+                        .on_press(Message::SidebarCollectionClicked(i))
+                        .padding([4, 8])
+                        .width(Length::Fill)
+                        .style(style_fn),
+                )
+                .on_right_press(Message::SidebarCollectionRightClicked(i))
+                .on_enter(Message::SidebarCollectionHovered(Some(i)))
+                .on_exit(Message::SidebarCollectionHovered(None))
+                .into()
+            };
+            list = list.push(entry);
+        }
+
+        container(
+            column![header, scrollable(list).height(Length::Fill)]
+                .spacing(6)
+                .padding(8),
+        )
+        .width(180)
+        .height(Length::Fill)
+        .style(panel_container_style)
         .into()
     }
 
@@ -1329,6 +1500,36 @@ fn invisible_button_style(_theme: &Theme, _status: button::Status) -> button::St
         background: None,
         text_color: TEXT_SECONDARY,
         border: Border::default(),
+        shadow: Default::default(),
+    }
+}
+
+fn sidebar_item_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Some(Background::Color(BG_BUTTON_HOVER)),
+        _ => None,
+    };
+    button::Style {
+        background: bg,
+        text_color: TEXT_SECONDARY,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 3.0.into(),
+        },
+        shadow: Default::default(),
+    }
+}
+
+fn sidebar_item_drop_target_style(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(Background::Color(Color::from_rgb(0.2, 0.3, 0.4))),
+        text_color: TEXT_PRIMARY,
+        border: Border {
+            color: Color::from_rgb(0.3, 0.5, 0.7),
+            width: 1.0,
+            radius: 3.0.into(),
+        },
         shadow: Default::default(),
     }
 }
