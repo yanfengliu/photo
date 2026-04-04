@@ -68,6 +68,16 @@ Photo is a GPU-accelerated image viewer and editor for Windows built in Rust. It
 3. Library mode: cycles through `App::library` entries.
 4. Directory mode: cycles through `DirNav::files` from the image's parent directory.
 
+### Collection Flow
+1. Collections loaded from `LOCALAPPDATA/photo/collections.json` on startup.
+2. User creates/renames/deletes collections via sidebar UI.
+3. Photos added via drag-and-drop (library → sidebar) or right-click context menu.
+4. Adding stores a `PathBuf` reference — no file copying.
+5. Removing a photo from a collection does not delete the file.
+6. `CollectionStore::save()` writes JSON after every mutation.
+7. Double-clicking a collection enters collection grid view (sub-view of Library tab).
+8. Opening a photo from collection grid enters Detail view with collection-scoped navigation.
+
 ## Boundaries and Rules
 
 ### Ownership Rules
@@ -214,3 +224,5 @@ flowchart TD
 | 2026-03-30 | Added image editing system (edit.rs, lens.rs, extended shader, blur pre-pass) | 12 GPU shader-based adjustments, Lensfun lens corrections, undo/redo, save-as-copy | agent |
 | 2026-03-30 | Added kamadak-exif and quick-xml dependencies | EXIF reading for lens auto-detection, Lensfun XML database parsing | agent |
 | 2026-04-03 | Added collection module (collection.rs) and sidebar UI integration | Named photo collections with JSON persistence, collection sidebar in Library view, context menu/drag types, 19 new message variants (stubbed) | agent |
+| 2026-04-03 | Completed collections system (collection.rs, sidebar UI, context menus, drag-drop, grid view, detail nav) | Named photo collections with JSON persistence, context menu overlay, drag-and-drop, collection-scoped navigation | agent |
+| 2026-04-03 | Added serde and serde_json dependencies | JSON serialization for collection persistence | agent |

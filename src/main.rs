@@ -904,7 +904,7 @@ impl App {
                             .collection_store
                             .collections
                             .get(collection_index)
-                            .map_or(false, |c| c.photos.contains(&path))
+                            .is_some_and(|c| c.photos.contains(&path))
                         {
                             self.collection_store.remove_photo(collection_index, &path);
                         } else {
@@ -1243,7 +1243,7 @@ impl App {
         let main = column![tab_bar, content];
 
         let has_overlay = self.context_menu.is_some()
-            || self.drag_state.as_ref().map_or(false, |d| d.active);
+            || self.drag_state.as_ref().is_some_and(|d| d.active);
 
         if has_overlay {
             let mut layers: Vec<Element<'_, Message>> = vec![main.into()];
@@ -1405,7 +1405,7 @@ impl App {
                 let is_drop_target = self
                     .drag_state
                     .as_ref()
-                    .map_or(false, |d| d.active)
+                    .is_some_and(|d| d.active)
                     && self.sidebar_hover_collection == Some(i);
                 let style_fn = if is_drop_target {
                     sidebar_item_drop_target_style
@@ -1923,8 +1923,8 @@ impl App {
             .style(context_menu_container_style)
             .width(Length::Shrink);
 
-        let x = menu.position[0].min(1000.0).max(0.0);
-        let y = menu.position[1].min(700.0).max(0.0);
+        let x = menu.position[0].clamp(0.0, 1000.0);
+        let y = menu.position[1].clamp(0.0, 700.0);
 
         let positioned = column![
             Space::with_height(y),
@@ -2317,7 +2317,7 @@ mod tests {
         std::fs::write(&p1, b"").unwrap();
         std::fs::write(&p2, b"").unwrap();
 
-        let entries = vec![
+        let entries = [
             LibraryEntry {
                 path: p1.clone(),
                 filename: "a.png".to_string(),

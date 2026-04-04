@@ -275,3 +275,10 @@
 **Files changed:** `src/main.rs`, `docs/devlog-detailed.md`
 **Reasoning:** Tasks 7 and 8 of collections feature — completes the full library-to-collection workflow via both context menu and drag-and-drop.
 **Notes:** All collection feature stubs are now replaced. Task 9 (final polish + integration tests) remains.
+
+## [2026-04-04 00:31, PDT] — Collections feature: final polish + documentation
+**Action:** Ran cargo clippy, fixed useless_vec warning in test (vec![] -> array literal). Updated ARCHITECTURE.md with Collection Flow subsection, drift log entries. Updated devlog-detailed.md and devlog-summary.md with collections feature entries.
+**Result:** SUCCESS — clippy clean, all tests pass, release build succeeds
+**Files changed:** src/main.rs (clippy fix), docs/ARCHITECTURE.md, docs/devlog-detailed.md, docs/devlog-summary.md
+**Reasoning:** Task 9 final polish: ensure lint-clean codebase and up-to-date documentation
+**Notes:** Single clippy issue was a `vec![]` in a test that could be a plain array since it was only iterated, not mutated.

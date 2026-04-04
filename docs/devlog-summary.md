@@ -64,11 +64,15 @@
 41. Comprehensive formula audit (5 independent agents): fixed Bradford matrix transpose, clamped total stops to ±2, added vignetting to CPU save, fixed negative vibrance direction, fixed contrast for HDR lum, reshaped highlights bell zone, tightened shadows zone — SUCCESS
 
 ## Collections feature
-42. Added collection.rs module: CollectionStore, Collection, CRUD, JSON persistence, 16 tests — SUCCESS
-43. App state integration + sidebar UI: 3 new types, 11 new App fields, 19 new Message variants (stubbed), collection sidebar in Library view, cursor tracking, ARCHITECTURE.md updated — SUCCESS
-44. Collection CRUD + context menu system: replaced stubs with real handlers (create, rename, delete, double-click open, context menu), added overlay system via iced Stack, 8 new tests (97 total) — SUCCESS
-45. Collection grid view + detail navigation: collection_grid_view() method, library_view routing, 5 stub handlers replaced (ExitCollectionView, CollectionPhotoClicked, CollectionPhotoRightClicked, RemovePhotoFromCollection, ExitCollectionDetail), arrow key collection_nav support, tab bar back button, status bar collection context, 7 new tests (104 total) — SUCCESS
-46. Library photo context menu + drag-and-drop: thumbnail_card wrapped in MouseArea (right-click + hover), 3 stub handlers replaced (LibraryPhotoRightClicked, AddPhotoToCollection, TogglePhotoInCollection), drag initialization in LibraryItemClicked, CursorMoved drag tracking with 5px threshold, ButtonReleased drag-drop to collection, drag_overlay with thumbnail + filename, 10 new tests (114 total) — SUCCESS
+42. Added serde + serde_json dependencies — SUCCESS
+43. Created collection.rs: Collection, CollectionStore, JSON persistence, 16 tests — SUCCESS
+44. Added collection sidebar UI in Library view with create/rename/delete — SUCCESS
+45. Added context menu overlay system (Stack + MouseArea) — SUCCESS
+46. Added collection grid view with back navigation — SUCCESS
+47. Added detail view navigation within collections (arrow keys cycle within collection) — SUCCESS
+48. Added library photo right-click menu (add/remove from collections) — SUCCESS
+49. Added drag-and-drop from library grid to sidebar collections — SUCCESS
+50. Final polish: clippy fix, ARCHITECTURE.md + devlogs updated — SUCCESS
 
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate

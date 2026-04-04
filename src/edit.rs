@@ -530,8 +530,10 @@ mod tests {
 
     #[test]
     fn is_default_false_when_modified() {
-        let mut s = EditState::default();
-        s.exposure = 1.0;
+        let s = EditState {
+            exposure: 1.0,
+            ..EditState::default()
+        };
         assert!(!s.is_default());
     }
 
