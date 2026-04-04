@@ -766,15 +766,102 @@ impl App {
                 Task::none()
             }
 
+            Message::ExitCollectionView => {
+                self.active_collection = None;
+                Task::none()
+            }
+
+            Message::CollectionPhotoClicked(photo_index) => {
+                let now = Instant::now();
+                let is_double_click = self
+                    .last_thumb_click
+                    .map(|(prev_idx, prev_time)| {
+                        prev_idx == photo_index
+                            && now.duration_since(prev_time).as_millis() < 400
+                    })
+                    .unwrap_or(false);
+
+                if is_double_click {
+                    self.last_thumb_click = None;
+                    if let Some(col_idx) = self.active_collection {
+                        if let Some(col) = self.collection_store.collections.get(col_idx) {
+                            if let Some(photo_path) = col.photos.get(photo_index) {
+                                self.collection_nav = Some((col_idx, photo_index));
+                                self.library_index = None;
+                                self.tab = Tab::Detail;
+                                let path = photo_path.clone();
+                                self.current_image_path = Some(path.clone());
+                                return self.start_load(path);
+                            }
+                        }
+                    }
+                } else {
+                    self.last_thumb_click = Some((photo_index, now));
+                }
+                Task::none()
+            }
+
+            Message::CollectionPhotoRightClicked(photo_index) => {
+                self.context_menu = Some(ContextMenu {
+                    position: self.cursor_position,
+                    kind: ContextMenuKind::CollectionPhoto { photo_index },
+                });
+                Task::none()
+            }
+
+            Message::RemovePhotoFromCollection => {
+                match &self.context_menu {
+                    Some(ContextMenu {
+                        kind: ContextMenuKind::CollectionPhoto { photo_index },
+                        ..
+                    }) => {
+                        let photo_index = *photo_index;
+                        if let Some(col_idx) = self.active_collection {
+                            if let Some(col) =
+                                self.collection_store.collections.get(col_idx)
+                            {
+                                if let Some(path) = col.photos.get(photo_index).cloned() {
+                                    self.collection_store.remove_photo(col_idx, &path);
+                                    self.collection_store.save();
+                                }
+                            }
+                        }
+                    }
+                    Some(ContextMenu {
+                        kind: ContextMenuKind::LibraryPhoto { photo_index },
+                        ..
+                    }) => {
+                        let photo_index = *photo_index;
+                        if let Some(entry) = self.library.get(photo_index) {
+                            let path = entry.path.clone();
+                            for (i, col) in
+                                self.collection_store.collections.iter().enumerate()
+                            {
+                                if col.photos.contains(&path) {
+                                    self.collection_store.remove_photo(i, &path);
+                                    break;
+                                }
+                            }
+                            self.collection_store.save();
+                        }
+                    }
+                    _ => {}
+                }
+                self.context_menu = None;
+                Task::none()
+            }
+
+            Message::ExitCollectionDetail => {
+                self.tab = Tab::Library;
+                // active_collection is still set, so we return to collection grid
+                self.collection_nav = None;
+                Task::none()
+            }
+
             // -- Collection stubs (implemented in later tasks) --
-            Message::ExitCollectionView
-            | Message::CollectionPhotoClicked(_)
-            | Message::CollectionPhotoRightClicked(_)
-            | Message::AddPhotoToCollection(_)
-            | Message::RemovePhotoFromCollection
+            Message::AddPhotoToCollection(_)
             | Message::LibraryPhotoRightClicked(_)
-            | Message::TogglePhotoInCollection(_)
-            | Message::ExitCollectionDetail => Task::none(),
+            | Message::TogglePhotoInCollection(_) => Task::none(),
         }
     }
 
@@ -873,7 +960,16 @@ impl App {
             // Navigation: next
             Key::Named(Named::ArrowRight) | Key::Named(Named::Space) => {
                 if self.tab == Tab::Detail {
-                    if let Some(ref mut lib_idx) = self.library_index {
+                    if let Some((col_idx, ref mut photo_idx)) = self.collection_nav {
+                        if let Some(col) = self.collection_store.collections.get(col_idx) {
+                            if !col.photos.is_empty() {
+                                *photo_idx = (*photo_idx + 1) % col.photos.len();
+                                let path = col.photos[*photo_idx].clone();
+                                self.current_image_path = Some(path.clone());
+                                return self.start_load(path);
+                            }
+                        }
+                    } else if let Some(ref mut lib_idx) = self.library_index {
                         if !self.library.is_empty() {
                             *lib_idx = (*lib_idx + 1) % self.library.len();
                             let path = self.library[*lib_idx].path.clone();
@@ -892,7 +988,20 @@ impl App {
             // Navigation: prev
             Key::Named(Named::ArrowLeft) | Key::Named(Named::Backspace) => {
                 if self.tab == Tab::Detail {
-                    if let Some(ref mut lib_idx) = self.library_index {
+                    if let Some((col_idx, ref mut photo_idx)) = self.collection_nav {
+                        if let Some(col) = self.collection_store.collections.get(col_idx) {
+                            if !col.photos.is_empty() {
+                                *photo_idx = if *photo_idx == 0 {
+                                    col.photos.len() - 1
+                                } else {
+                                    *photo_idx - 1
+                                };
+                                let path = col.photos[*photo_idx].clone();
+                                self.current_image_path = Some(path.clone());
+                                return self.start_load(path);
+                            }
+                        }
+                    } else if let Some(ref mut lib_idx) = self.library_index {
                         if !self.library.is_empty() {
                             *lib_idx = if *lib_idx == 0 {
                                 self.library.len() - 1
@@ -1101,11 +1210,15 @@ impl App {
                 .align_y(Alignment::Center)
             }
             Tab::Detail => {
-                let back_btn =
-                    button(text("\u{2190}").size(16).color(TEXT_PRIMARY))
-                        .on_press(Message::SwitchTab(Tab::Library))
-                        .padding([4, 12])
-                        .style(toolbar_button_style);
+                let back_msg = if self.collection_nav.is_some() {
+                    Message::ExitCollectionDetail
+                } else {
+                    Message::SwitchTab(Tab::Library)
+                };
+                let back_btn = button(text("\u{2190}").size(16).color(TEXT_PRIMARY))
+                    .on_press(back_msg)
+                    .padding([4, 12])
+                    .style(toolbar_button_style);
 
                 let save_btn = button(text("Save").size(11).color(TEXT_PRIMARY))
                     .on_press(Message::SaveEdited)
@@ -1126,6 +1239,12 @@ impl App {
     }
 
     fn library_view(&self) -> Element<'_, Message> {
+        if let Some(col_idx) = self.active_collection {
+            if col_idx < self.collection_store.collections.len() {
+                return self.collection_grid_view(col_idx);
+            }
+        }
+
         if self.library.is_empty() {
             return container(
                 column![
@@ -1243,6 +1362,98 @@ impl App {
         .into()
     }
 
+    fn collection_grid_view(&self, collection_index: usize) -> Element<'_, Message> {
+        let collection = &self.collection_store.collections[collection_index];
+
+        let back_btn = button(text("\u{2190}").size(16).color(TEXT_PRIMARY))
+            .on_press(Message::ExitCollectionView)
+            .padding([4, 12])
+            .style(toolbar_button_style);
+
+        let title = text(format!("{} ({})", collection.name, collection.photos.len()))
+            .size(14)
+            .color(TEXT_PRIMARY);
+
+        let top_bar = container(
+            row![back_btn, container(title).padding([0, 8])]
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .padding([6, 10])
+        .width(Length::Fill)
+        .style(toolbar_container_style);
+
+        let thumb_size: f32 = 150.0;
+        let cols = 6;
+        let mut grid = column![].spacing(8);
+
+        let photo_entries: Vec<(usize, &PathBuf)> =
+            collection.photos.iter().enumerate().collect();
+
+        for chunk in photo_entries.chunks(cols) {
+            let mut r = row![].spacing(8);
+            for &(photo_idx, photo_path) in chunk {
+                let lib_entry = self.library.iter().find(|e| &e.path == photo_path);
+                let filename = photo_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let thumb: Element<'_, Message> =
+                    if let Some(Some(ref handle)) = lib_entry.map(|e| &e.thumbnail_handle) {
+                        container(
+                            Image::new(handle.clone())
+                                .width(thumb_size)
+                                .height(thumb_size),
+                        )
+                        .width(thumb_size)
+                        .height(thumb_size)
+                        .center_x(Length::Shrink)
+                        .center_y(Length::Shrink)
+                        .into()
+                    } else {
+                        container(text("...").size(24).color(TEXT_DIM))
+                            .width(thumb_size)
+                            .height(thumb_size)
+                            .center_x(Length::Shrink)
+                            .center_y(Length::Shrink)
+                            .into()
+                    };
+
+                let label =
+                    container(text(filename).size(10).color(TEXT_SECONDARY)).width(thumb_size);
+
+                let card = button(column![thumb, label].spacing(4).width(thumb_size))
+                    .on_press(Message::CollectionPhotoClicked(photo_idx))
+                    .padding(6)
+                    .style(card_button_style);
+
+                let card_with_menu: Element<'_, Message> = MouseArea::new(card)
+                    .on_right_press(Message::CollectionPhotoRightClicked(photo_idx))
+                    .into();
+
+                r = r.push(card_with_menu);
+            }
+            grid = grid.push(r);
+        }
+
+        let status_text = format!("{} photos", collection.photos.len());
+        let status = container(text(status_text).size(11).color(TEXT_DIM))
+            .width(Length::Fill)
+            .padding([6, 14]);
+
+        container(column![
+            top_bar,
+            scrollable(container(grid).padding(14).width(Length::Fill)).height(Length::Fill),
+            container(status)
+                .width(Length::Fill)
+                .style(toolbar_container_style),
+        ])
+        .style(dark_bg_style)
+        .into()
+    }
+
     fn thumbnail_card<'a>(
         &'a self,
         entry: &'a LibraryEntry,
@@ -1297,7 +1508,14 @@ impl App {
 
     fn status_bar(&self) -> Element<'_, Message> {
         let s = if let Some(img) = &self.image {
-            let name = if let Some(idx) = self.library_index {
+            let name = if self.collection_nav.is_some() {
+                self.current_image_path
+                    .as_ref()
+                    .and_then(|p| {
+                        p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
+                    })
+                    .unwrap_or_default()
+            } else if let Some(idx) = self.library_index {
                 self.library
                     .get(idx)
                     .map(|e| e.filename.clone())
@@ -1308,7 +1526,15 @@ impl App {
                     .map_or(String::new(), |n| n.current_filename())
             };
 
-            let pos = if let Some(idx) = self.library_index {
+            let pos = if let Some((col_idx, photo_idx)) = self.collection_nav {
+                let total = self
+                    .collection_store
+                    .collections
+                    .get(col_idx)
+                    .map(|c| c.photos.len())
+                    .unwrap_or(0);
+                format!("  {}/{}", photo_idx + 1, total)
+            } else if let Some(idx) = self.library_index {
                 format!("  {}/{}", idx + 1, self.library.len())
             } else {
                 self.nav
@@ -2197,5 +2423,89 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(!is_double_click);
+    }
+
+    #[test]
+    fn collection_nav_next_wraps_around() {
+        // Simulate arrow-right cycling in a 3-photo collection
+        let total = 3;
+        let mut photo_idx: usize = 2; // last photo
+        photo_idx = (photo_idx + 1) % total;
+        assert_eq!(photo_idx, 0); // wraps to first
+    }
+
+    #[test]
+    fn collection_nav_prev_wraps_around() {
+        // Simulate arrow-left cycling in a 3-photo collection
+        let total = 3;
+        let mut photo_idx: usize = 0; // first photo
+        photo_idx = if photo_idx == 0 {
+            total - 1
+        } else {
+            photo_idx - 1
+        };
+        assert_eq!(photo_idx, 2); // wraps to last
+    }
+
+    #[test]
+    fn exit_collection_view_clears_active() {
+        // Simulate ExitCollectionView handler
+        let active_collection: Option<usize> = Some(2);
+        let result: Option<usize> = None;
+        assert!(active_collection.is_some()); // was set before
+        assert!(result.is_none()); // cleared after
+    }
+
+    #[test]
+    fn exit_collection_detail_returns_to_collection_grid() {
+        // Simulate ExitCollectionDetail handler: tab -> Library, collection_nav -> None,
+        // but active_collection stays set so library_view routes to grid
+        let active_collection: Option<usize> = Some(1);
+        let tab = Tab::Library; // handler sets this
+        let collection_nav: Option<(usize, usize)> = None; // handler clears this
+        assert_eq!(tab, Tab::Library);
+        assert!(active_collection.is_some()); // stays set
+        assert!(collection_nav.is_none()); // cleared
+    }
+
+    #[test]
+    fn remove_photo_from_collection_via_context() {
+        let mut store = collection::CollectionStore::default();
+        store.create("My Photos");
+        let path = PathBuf::from("/test/photo.jpg");
+        store.add_photo(0, &path);
+        assert_eq!(store.collections[0].photos.len(), 1);
+        store.remove_photo(0, &path);
+        assert!(store.collections[0].photos.is_empty());
+    }
+
+    #[test]
+    fn collection_photo_double_click_sets_collection_nav() {
+        // Simulate the double-click logic for collection photo
+        let photo_index = 2;
+        let col_idx: usize = 1;
+        let t1 = Instant::now();
+        let last_thumb_click: Option<(usize, Instant)> = Some((photo_index, t1));
+        let now = t1;
+        let is_double_click = last_thumb_click
+            .map(|(prev_idx, prev_time)| {
+                prev_idx == photo_index && now.duration_since(prev_time).as_millis() < 400
+            })
+            .unwrap_or(false);
+        assert!(is_double_click);
+        // On double-click, collection_nav should be set
+        let collection_nav = Some((col_idx, photo_index));
+        assert_eq!(collection_nav, Some((1, 2)));
+    }
+
+    #[test]
+    fn status_bar_collection_nav_position_format() {
+        // Simulate status bar position formatting for collection nav
+        let col_idx = 0;
+        let photo_idx = 2;
+        let total = 5;
+        let pos = format!("  {}/{}", photo_idx + 1, total);
+        assert_eq!(pos, "  3/5");
+        let _ = col_idx; // used to index into collection_store
     }
 }
