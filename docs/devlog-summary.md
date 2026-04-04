@@ -63,6 +63,11 @@
 40. Full parameter audit: unified all tone zones to ±2 stops (darktable standard), widened W/B sliders to ±100, vibrance switched to power-law (darktable colorbalancergb approach) — SUCCESS
 41. Comprehensive formula audit (5 independent agents): fixed Bradford matrix transpose, clamped total stops to ±2, added vignetting to CPU save, fixed negative vibrance direction, fixed contrast for HDR lum, reshaped highlights bell zone, tightened shadows zone — SUCCESS
 
+## Collections feature
+42. Added collection.rs module: CollectionStore, Collection, CRUD, JSON persistence, 16 tests — SUCCESS
+43. App state integration + sidebar UI: 3 new types, 11 new App fields, 19 new Message variants (stubbed), collection sidebar in Library view, cursor tracking, ARCHITECTURE.md updated — SUCCESS
+44. Collection CRUD + context menu system: replaced stubs with real handlers (create, rename, delete, double-click open, context menu), added overlay system via iced Stack, 8 new tests (97 total) — SUCCESS
+
 ## Key decisions
 - Use iced's wgpu re-export, not standalone wgpu crate
 - GPU texture limit check at upload time in `prepare()`
@@ -73,3 +78,5 @@
 - Double-click detection via timestamp comparison (Instant)
 - Named style functions for Lightroom theme (toolbar_button_style, etc.)
 - pick_list with String values for lens profile selection
+- Collections use JSON persistence at %LOCALAPPDATA%/photo/collections.json
+- MouseArea struct (not function) for right-click/hover on sidebar items (iced 0.13)

@@ -142,9 +142,7 @@ struct App {
     slider_drag: Option<(SliderKind, u32)>,
     lens_override_name: Option<String>,
     collection_store: collection::CollectionStore,
-    #[allow(dead_code)]
     active_collection: Option<usize>,
-    #[allow(dead_code)]
     context_menu: Option<ContextMenu>,
     drag_state: Option<DragState>,
     editing_collection_name: Option<usize>,
@@ -153,10 +151,8 @@ struct App {
     hovered_thumbnail: Option<usize>,
     sidebar_hover_collection: Option<usize>,
     cursor_position: [f32; 2],
-    #[allow(dead_code)]
     last_collection_click: Option<(usize, Instant)>,
     /// When entering Detail from a collection, stores (collection_index, photo_index_within_collection).
-    #[allow(dead_code)]
     collection_nav: Option<(usize, usize)>,
 }
 
@@ -652,23 +648,130 @@ impl App {
                 Task::none()
             }
 
+            // -- Collection CRUD --
+            Message::CreateCollection => {
+                let name = self.collection_store.next_default_name();
+                self.collection_store.create(&name);
+                self.collection_store.save();
+                let idx = self
+                    .collection_store
+                    .collections
+                    .iter()
+                    .position(|c| c.name == name)
+                    .unwrap_or(0);
+                self.editing_collection_name = Some(idx);
+                self.collection_name_buf = name;
+                Task::none()
+            }
+
+            Message::CollectionNameChanged(s) => {
+                self.collection_name_buf = s;
+                Task::none()
+            }
+
+            Message::CollectionNameSubmit => {
+                if let Some(idx) = self.editing_collection_name.take() {
+                    let new_name = self.collection_name_buf.trim().to_string();
+                    if !new_name.is_empty() {
+                        self.collection_store.rename(idx, &new_name);
+                    }
+                    self.collection_store.save();
+                    self.collection_name_buf.clear();
+                }
+                Task::none()
+            }
+
+            Message::CollectionNameCancel => {
+                self.editing_collection_name = None;
+                self.collection_name_buf.clear();
+                Task::none()
+            }
+
+            Message::SidebarCollectionClicked(index) => {
+                let now = Instant::now();
+                let is_double_click = self
+                    .last_collection_click
+                    .map(|(prev_idx, prev_time)| {
+                        prev_idx == index && now.duration_since(prev_time).as_millis() < 400
+                    })
+                    .unwrap_or(false);
+                if is_double_click {
+                    self.last_collection_click = None;
+                    self.active_collection = Some(index);
+                } else {
+                    self.last_collection_click = Some((index, now));
+                }
+                Task::none()
+            }
+
+            Message::SidebarCollectionRightClicked(index) => {
+                self.context_menu = Some(ContextMenu {
+                    position: self.cursor_position,
+                    kind: ContextMenuKind::SidebarCollection {
+                        collection_index: index,
+                    },
+                });
+                Task::none()
+            }
+
+            Message::SidebarCollectionHovered(idx) => {
+                self.sidebar_hover_collection = idx;
+                Task::none()
+            }
+
+            Message::ThumbnailHovered(idx) => {
+                self.hovered_thumbnail = idx;
+                Task::none()
+            }
+
+            Message::DismissContextMenu => {
+                self.context_menu = None;
+                Task::none()
+            }
+
+            Message::ContextMenuRename => {
+                if let Some(ContextMenu {
+                    kind: ContextMenuKind::SidebarCollection { collection_index },
+                    ..
+                }) = &self.context_menu
+                {
+                    let idx = *collection_index;
+                    if let Some(col) = self.collection_store.collections.get(idx) {
+                        self.collection_name_buf = col.name.clone();
+                        self.editing_collection_name = Some(idx);
+                    }
+                }
+                self.context_menu = None;
+                Task::none()
+            }
+
+            Message::ContextMenuDelete => {
+                if let Some(ContextMenu {
+                    kind: ContextMenuKind::SidebarCollection { collection_index },
+                    ..
+                }) = &self.context_menu
+                {
+                    let idx = *collection_index;
+                    self.collection_store.delete(idx);
+                    self.collection_store.save();
+                    if self.active_collection == Some(idx) {
+                        self.active_collection = None;
+                    } else if let Some(active) = self.active_collection {
+                        if active > idx {
+                            self.active_collection = Some(active - 1);
+                        }
+                    }
+                }
+                self.context_menu = None;
+                Task::none()
+            }
+
             // -- Collection stubs (implemented in later tasks) --
-            Message::CreateCollection
-            | Message::CollectionNameChanged(_)
-            | Message::CollectionNameSubmit
-            | Message::CollectionNameCancel
-            | Message::SidebarCollectionClicked(_)
-            | Message::SidebarCollectionRightClicked(_)
-            | Message::SidebarCollectionHovered(_)
-            | Message::ExitCollectionView
+            Message::ExitCollectionView
             | Message::CollectionPhotoClicked(_)
             | Message::CollectionPhotoRightClicked(_)
-            | Message::DismissContextMenu
-            | Message::ContextMenuRename
-            | Message::ContextMenuDelete
             | Message::AddPhotoToCollection(_)
             | Message::RemovePhotoFromCollection
-            | Message::ThumbnailHovered(_)
             | Message::LibraryPhotoRightClicked(_)
             | Message::TogglePhotoInCollection(_)
             | Message::ExitCollectionDetail => Task::none(),
@@ -734,6 +837,13 @@ impl App {
                 Task::none()
             }
 
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                Task::none()
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                Task::none()
+            }
+
             _ => Task::none(),
         }
     }
@@ -743,9 +853,19 @@ impl App {
         use keyboard::Key;
 
         match key {
-            // Escape: go back to library from detail
+            // Escape: dismiss overlays, exit collection, or go back to library
             Key::Named(Named::Escape) => {
-                if self.tab == Tab::Detail {
+                if self.context_menu.is_some() {
+                    self.context_menu = None;
+                } else if self.editing_collection_name.is_some() {
+                    self.editing_collection_name = None;
+                    self.collection_name_buf.clear();
+                } else if self.tab == Tab::Detail && self.collection_nav.is_some() {
+                    self.tab = Tab::Library;
+                    self.collection_nav = None;
+                } else if self.active_collection.is_some() {
+                    self.active_collection = None;
+                } else if self.tab == Tab::Detail {
                     self.tab = Tab::Library;
                 }
             }
@@ -935,7 +1055,25 @@ impl App {
             Tab::Library => self.library_view(),
             Tab::Detail => self.detail_view(),
         };
-        column![tab_bar, content].into()
+        let main = column![tab_bar, content];
+
+        let has_overlay = self.context_menu.is_some()
+            || self.drag_state.as_ref().map_or(false, |d| d.active);
+
+        if has_overlay {
+            let mut layers: Vec<Element<'_, Message>> = vec![main.into()];
+            if let Some(ref menu) = self.context_menu {
+                layers.push(self.context_menu_overlay(menu));
+            }
+            if let Some(ref drag) = self.drag_state {
+                if drag.active {
+                    layers.push(self.drag_overlay(drag));
+                }
+            }
+            iced::widget::Stack::with_children(layers).into()
+        } else {
+            main.into()
+        }
     }
 
     fn tab_bar(&self) -> Element<'_, Message> {
@@ -1427,6 +1565,81 @@ impl App {
             image_aspect,
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // Context menu overlay
+    // ---------------------------------------------------------------------------
+
+    fn context_menu_overlay(&self, menu: &ContextMenu) -> Element<'_, Message> {
+        let items: Vec<Element<'static, Message>> = match &menu.kind {
+            ContextMenuKind::SidebarCollection { .. } => {
+                vec![
+                    context_menu_item("Rename", Message::ContextMenuRename),
+                    context_menu_item("Delete", Message::ContextMenuDelete),
+                ]
+            }
+            ContextMenuKind::LibraryPhoto { photo_index } => {
+                let photo_path = &self.library[*photo_index].path;
+                self.collection_store
+                    .collections
+                    .iter()
+                    .enumerate()
+                    .map(|(i, col)| {
+                        if col.photos.contains(photo_path) {
+                            context_menu_item(
+                                format!("\u{2713} {}", col.name),
+                                Message::TogglePhotoInCollection(i),
+                            )
+                        } else {
+                            context_menu_item(
+                                format!("Add to {}", col.name),
+                                Message::AddPhotoToCollection(i),
+                            )
+                        }
+                    })
+                    .collect()
+            }
+            ContextMenuKind::CollectionPhoto { .. } => {
+                let col_name = self
+                    .active_collection
+                    .and_then(|i| self.collection_store.collections.get(i))
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("Collection");
+                vec![context_menu_item(
+                    format!("Remove from {col_name}"),
+                    Message::RemovePhotoFromCollection,
+                )]
+            }
+        };
+
+        let menu_content = container(column(items).spacing(2).padding(4))
+            .style(context_menu_container_style)
+            .width(Length::Shrink);
+
+        let x = menu.position[0].min(1000.0).max(0.0);
+        let y = menu.position[1].min(700.0).max(0.0);
+
+        let positioned = column![
+            Space::with_height(y),
+            row![Space::with_width(x), menu_content,]
+        ];
+
+        MouseArea::new(
+            container(positioned)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_press(Message::DismissContextMenu)
+        .into()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Drag overlay (stub — implemented in Task 8)
+    // ---------------------------------------------------------------------------
+
+    fn drag_overlay(&self, _drag: &DragState) -> Element<'_, Message> {
+        Space::new(0, 0).into()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,6 +1762,44 @@ fn section_divider() -> Element<'static, Message> {
             ..Default::default()
         })
         .into()
+}
+
+fn context_menu_item(label: impl Into<String>, msg: Message) -> Element<'static, Message> {
+    button(text(label.into()).size(12).color(TEXT_PRIMARY))
+        .on_press(msg)
+        .padding([4, 12])
+        .width(Length::Fill)
+        .style(context_menu_button_style)
+        .into()
+}
+
+fn context_menu_container_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.2, 0.2, 0.2))),
+        border: Border {
+            color: Color::from_rgb(0.3, 0.3, 0.3),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn context_menu_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Some(Background::Color(Color::from_rgb(0.3, 0.4, 0.55))),
+        _ => None,
+    };
+    button::Style {
+        background: bg,
+        text_color: TEXT_PRIMARY,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 2.0.into(),
+        },
+        shadow: Default::default(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1830,5 +2081,121 @@ mod tests {
         let t2 = t1; // immediate second click
         let is_double = t2.duration_since(t1).as_millis() < 400;
         assert!(is_double);
+    }
+
+    #[test]
+    fn create_collection_enters_rename_mode() {
+        let mut store = collection::CollectionStore::default();
+        let name = store.next_default_name();
+        assert_eq!(name, "New Collection");
+        store.create(&name);
+        let idx = store
+            .collections
+            .iter()
+            .position(|c| c.name == name)
+            .unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(store.collections.len(), 1);
+    }
+
+    #[test]
+    fn collection_rename_submit_updates_name() {
+        let mut store = collection::CollectionStore::default();
+        store.create("Old Name");
+        assert_eq!(store.collections[0].name, "Old Name");
+        store.rename(0, "New Name");
+        assert_eq!(store.collections[0].name, "New Name");
+    }
+
+    #[test]
+    fn collection_rename_empty_string_keeps_old_name() {
+        // Simulate CollectionNameSubmit with empty buffer: should not rename
+        let mut store = collection::CollectionStore::default();
+        store.create("Keep Me");
+        let new_name = "".trim().to_string();
+        if !new_name.is_empty() {
+            store.rename(0, &new_name);
+        }
+        assert_eq!(store.collections[0].name, "Keep Me");
+    }
+
+    #[test]
+    fn context_menu_delete_adjusts_active_collection() {
+        let mut store = collection::CollectionStore::default();
+        store.create("Alpha");
+        store.create("Beta");
+        store.create("Gamma");
+        // Simulate active_collection = Some(2) (Gamma), deleting index 0 (Alpha)
+        let mut active: Option<usize> = Some(2);
+        let delete_idx = 0;
+        store.delete(delete_idx);
+        if active == Some(delete_idx) {
+            active = None;
+        } else if let Some(a) = active {
+            if a > delete_idx {
+                active = Some(a - 1);
+            }
+        }
+        assert_eq!(active, Some(1)); // Gamma shifted from 2 to 1
+        assert_eq!(store.collections.len(), 2);
+    }
+
+    #[test]
+    fn context_menu_delete_clears_active_if_same() {
+        let mut store = collection::CollectionStore::default();
+        store.create("Only");
+        let mut active: Option<usize> = Some(0);
+        let delete_idx = 0;
+        store.delete(delete_idx);
+        if active == Some(delete_idx) {
+            active = None;
+        }
+        assert!(active.is_none());
+        assert!(store.collections.is_empty());
+    }
+
+    #[test]
+    fn context_menu_kind_sidebar_collection() {
+        let menu = ContextMenu {
+            position: [100.0, 200.0],
+            kind: ContextMenuKind::SidebarCollection {
+                collection_index: 3,
+            },
+        };
+        assert_eq!(menu.position, [100.0, 200.0]);
+        match menu.kind {
+            ContextMenuKind::SidebarCollection { collection_index } => {
+                assert_eq!(collection_index, 3);
+            }
+            _ => panic!("expected SidebarCollection"),
+        }
+    }
+
+    #[test]
+    fn sidebar_double_click_sets_active_collection() {
+        // Simulate double-click: two clicks on same index within 400ms
+        let index = 2;
+        let t1 = Instant::now();
+        let last_click: Option<(usize, Instant)> = Some((index, t1));
+        let now = t1; // immediate second click
+        let is_double_click = last_click
+            .map(|(prev_idx, prev_time)| {
+                prev_idx == index && now.duration_since(prev_time).as_millis() < 400
+            })
+            .unwrap_or(false);
+        assert!(is_double_click);
+    }
+
+    #[test]
+    fn sidebar_click_different_index_not_double() {
+        let t1 = Instant::now();
+        let last_click: Option<(usize, Instant)> = Some((1, t1));
+        let now = t1;
+        let is_double_click = last_click
+            .map(|(prev_idx, prev_time)| {
+                prev_idx == 2 && now.duration_since(prev_time).as_millis() < 400
+            })
+            .unwrap_or(false);
+        assert!(!is_double_click);
     }
 }

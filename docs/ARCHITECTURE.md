@@ -10,7 +10,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows built in Rust. It
 ## Component Map
 
 ### GUI Framework
-- **iced application** (`src/main.rs`) — Top-level app state, message loop, tab routing, keyboard/event handling, and view composition. Owns: `App` struct, `Message` enum, `Tab`/`LibraryEntry` types, `scan_folder_for_images()`.
+- **iced application** (`src/main.rs`) — Top-level app state, message loop, tab routing, keyboard/event handling, and view composition. Owns: `App` struct, `Message` enum, `Tab`/`LibraryEntry`/`ContextMenu`/`DragState` types, `scan_folder_for_images()`. Includes collection sidebar in Library view.
 
 ### Viewer (Detail Tab)
 - **ImageCanvas / shader pipeline** (`src/viewer.rs`) — Custom `iced::widget::shader::Program` implementation. Handles mouse interaction (zoom, pan, drag), computes image rect in UV space, and manages GPU resources (pipeline, textures, uniforms, bind groups). Owns: `ImageCanvas`, `ViewerEvent`, `ImagePrimitive`, `GpuResources`, `ViewerState`.
@@ -25,6 +25,9 @@ Photo is a GPU-accelerated image viewer and editor for Windows built in Rust. It
 
 ### Lens Corrections
 - **lens** (`src/lens.rs`) — Lensfun XML database parser, EXIF reader (via kamadak-exif), lens profile lookup. Provides distortion, vignetting, and TCA correction coefficients. Owns: `LensDatabase`, `LensProfile`, `ExifInfo`, `parse_lensfun_xml()`, `read_exif()`.
+
+### Collections
+- **collection** (`src/collection.rs`) — Named photo collections with JSON persistence. Owns: `CollectionStore`, `Collection`, `collections_file_path()`. Provides CRUD operations (create, rename, delete), photo add/remove, and save/load to `%LOCALAPPDATA%/photo/collections.json`.
 
 ### Navigation
 - **nav** (`src/nav.rs`) — Directory scanning and file navigation. Sorts image files using natural ordering (`natord`). Provides next/prev cycling. Owns: `DirNav` struct, `IMAGE_EXTENSIONS` list, `is_image_file()`.
@@ -78,6 +81,8 @@ Photo is a GPU-accelerated image viewer and editor for Windows built in Rust. It
 - Only `lens.rs` reads EXIF data and parses Lensfun XML. All Lensfun access is through this module.
 - `main.rs` coordinates: UI sliders -> `EditState` -> viewer uniforms.
 
+- Only `collection.rs` manages collection persistence and CRUD. `main.rs` owns the `CollectionStore` instance and delegates all collection mutations to it.
+
 ### Off-Limits
 - `assets/shaders/image.wgsl` — Shader source. Changes here must be reflected in the `Uniforms` struct and bind group layout in `viewer.rs`.
 - `assets/shaders/blur.wgsl` — Blur shader source. Changes must be reflected in blur pipeline setup in `viewer.rs`.
@@ -117,6 +122,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows built in Rust. It
 | Natural sort | natord | 1.0 | Filename ordering in nav and library |
 | EXIF reading | kamadak-exif | 0.6 | Camera/lens EXIF metadata extraction |
 | XML parsing | quick-xml | 0.37 | Lensfun XML database parsing |
+| JSON serialization | serde + serde_json | 1.x / 1.x | Collection persistence |
 | Logging | env_logger + log | 0.11 / 0.4 | Debug logging |
 
 ## Diagram
@@ -207,3 +213,4 @@ flowchart TD
 | 2026-03-30 | Added jpeg-decoder direct dependency | DCT-level downscaling for fast JPEG thumbnails; was already a transitive dep | agent |
 | 2026-03-30 | Added image editing system (edit.rs, lens.rs, extended shader, blur pre-pass) | 12 GPU shader-based adjustments, Lensfun lens corrections, undo/redo, save-as-copy | agent |
 | 2026-03-30 | Added kamadak-exif and quick-xml dependencies | EXIF reading for lens auto-detection, Lensfun XML database parsing | agent |
+| 2026-04-03 | Added collection module (collection.rs) and sidebar UI integration | Named photo collections with JSON persistence, collection sidebar in Library view, context menu/drag types, 19 new message variants (stubbed) | agent |
