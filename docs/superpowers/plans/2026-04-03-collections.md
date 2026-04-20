@@ -1964,11 +1964,11 @@ git commit -m "docs: update architecture for collections feature"
 
 - [ ] **Step 8: Update devlog**
 
-Append to `docs/devlog-detailed.md` and update `docs/devlog-summary.md` with the collections feature work.
+Append to the latest file in `docs/devlog/detailed/` and update `docs/devlog/summary.md` with the collections feature work.
 
 - [ ] **Step 9: Commit devlog**
 
 ```bash
-git add docs/devlog-detailed.md docs/devlog-summary.md
+git add docs/devlog/detailed/*.md docs/devlog/summary.md
 git commit -m "docs: update devlogs for collections feature"
 ```

@@ -119,7 +119,7 @@ docs/
     README.md - Review artifacts and summaries
 ```
 
-The flat `docs/ARCHITECTURE.md`, `docs/devlog-summary.md`, and `docs/devlog-detailed.md` files are temporary compatibility shims for older references. New content belongs in the canonical paths above.
+The flat `docs/ARCHITECTURE.md` file is a temporary compatibility shim for older references. New content belongs in the canonical paths above.
 
 ## License
 
