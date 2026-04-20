@@ -2,19 +2,19 @@
 
 A GPU-accelerated image viewer for Windows, built with Rust, [iced](https://github.com/iced-rs/iced), and wgpu.
 
-Supports JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, TGA, QOI, HDR, EXR, and SVG formats.
+Supports JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, TGA, QOI, HDR, EXR, SVG, and common camera RAW formats including DNG, CR2/CR3, NEF, ARW, RAF, RW2, ORF, and more.
 
 ## Features
 
-- **Library tab** — Browse image collections as a scrollable thumbnail grid. Load images via folder picker or file picker.
-- **Detail tab** — View individual images with GPU-rendered zoom and pan.
-- **Keyboard navigation** — Arrow keys to cycle through images.
-- **CLI support** — Open a file directly: `photo.exe path/to/image.jpg`
+- **Library tab** - Browse image collections as a scrollable thumbnail grid. Load images via folder picker or file picker.
+- **Detail tab** - View individual images with GPU-rendered zoom and pan.
+- **Keyboard navigation** - Arrow keys to cycle through images.
+- **CLI support** - Open a file directly: `photo.exe path/to/image.jpg`
 
 ## Prerequisites
 
-- **Rust toolchain** — Install via [rustup](https://rustup.rs/). Minimum edition: 2021.
-- **GPU** — A GPU with Vulkan, DX12, or Metal support (required by wgpu).
+- **Rust toolchain** - Install via [rustup](https://rustup.rs/). Minimum edition: 2021.
+- **GPU** - A GPU with Vulkan, DX12, or Metal support (required by wgpu).
 
 ## Development
 
@@ -49,7 +49,7 @@ cargo run --release -- path/to/image.jpg
 cargo test
 ```
 
-There are 31 unit tests across three modules (`decode`, `nav`, `viewer` math). All tests run without a GPU.
+Rust unit tests cover decode, navigation, viewer math, collections, and edit logic without requiring a GPU.
 
 ### Lint
 
@@ -86,22 +86,40 @@ cargo fmt           # Auto-format
 
 4. **Distribute:**
 
-   `photo.exe` is a single self-contained binary — no installer or runtime dependencies required. Ship the `.exe` directly.
+   `photo.exe` is a single self-contained binary - no installer or runtime dependencies required. Ship the `.exe` directly.
 
 ## Project Structure
 
 ```
 src/
-  main.rs    — App state, message loop, tab routing, keyboard/event handling
-  viewer.rs  — GPU shader pipeline for image rendering (zoom, pan, texture upload)
-  decode.rs  — Image decoding (raster via image crate, SVG via resvg)
-  nav.rs     — Directory scanning and file navigation
+  main.rs    - App state, message loop, tab routing, keyboard/event handling
+  viewer.rs  - GPU shader pipeline for image rendering (zoom, pan, texture upload)
+  decode.rs  - Image decoding (raster via image crate, RAW via rawler, SVG via resvg)
+  collection.rs - Collection CRUD and JSON persistence
+  edit.rs    - Edit state, undo/redo, and CPU-side save pipeline
+  lens.rs    - Lensfun and EXIF metadata lookup
+  nav.rs     - Directory scanning and file navigation
 assets/
   shaders/
-    image.wgsl — Vertex/fragment shader for textured quad rendering
+    image.wgsl - Vertex/fragment shader for textured quad rendering
 docs/
-  ARCHITECTURE.md — Full architecture documentation
+  README.md - Docs index and entry point
+  architecture/
+    ARCHITECTURE.md - Main architecture narrative
+    decisions.md - Key architectural decisions
+    drift-log.md - Architecture drift history
+  devlog/
+    summary.md - Compact project summary
+    detailed/ - Dated detailed devlogs
+  learning/
+    lessons.md - Short maintained lessons
+  debugging/
+    template.md - Debugging session template
+  reviews/
+    README.md - Review artifacts and summaries
 ```
+
+The flat `docs/ARCHITECTURE.md`, `docs/devlog-summary.md`, and `docs/devlog-detailed.md` files are temporary compatibility shims for older references. New content belongs in the canonical paths above.
 
 ## License
 
