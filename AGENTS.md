@@ -1,6 +1,6 @@
 ## Core rules
 
-- Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus exclusively on gameplay experience and game mechanisms.
+- Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus exclusively on app experience and functionalities, not implementation details.
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
 - Use a subagent to implement the plan such that the tests pass. For example, if the tech stack uses node, it should make sure `npx vitest run`, `npx tsc --noEmit`, and `npx vite build` pass.
@@ -74,13 +74,9 @@
 - Keep `docs/devlog/summary.md` current after updating the detailed log. Always remove outdated info. Compact when it grows larger than 50 lines.
 - If a subagent handles summary work, it should extract facts only and avoid interpretation.
 
-## civ-engine
 
-- Record `civ-engine` weaknesses and misses in `docs/engine-feedback/current.md` as you work. Before you write to it, use a subagent to audit if its content is still valid and up to date. The addressed issued should be moved to `docs/engine-feedback/past.md`.
-- If a missing engine feature blocks the task, stop your work and report it to the user. But do not modify the `civ-engine` repo directly.
 
 ## Debugging
 
-- Read `docs/guides/debugging.md` in the `civ-engine` package if the bug seems engine related.
 - When debugging, use `docs/debugging/template.md` to record your process. Create a new file per debugging session and use it to iterate until you solve the problem.
 - Clean up the stackdump files created during debugging after you are done, but keep the `.md` files.
