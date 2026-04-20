@@ -73,6 +73,12 @@ pub struct AdjustmentUniforms {
     pub crop_overlay: Option<edit::CropRect>,
 }
 
+impl AdjustmentUniforms {
+    fn needs_blur(&self) -> bool {
+        self.clarity != 0.0 || self.dehaze != 0.0
+    }
+}
+
 impl Default for AdjustmentUniforms {
     fn default() -> Self {
         Self {
@@ -164,10 +170,12 @@ struct Uniforms {
     lens_tca_b_scale: f32,
     image_aspect: f32,
     rotation: f32,
+    // Explicit padding so crop uniforms stay 16-byte aligned like the WGSL struct.
+    _pad_before_crop_preview: f32,
     crop_preview: [f32; 4],
     crop_overlay: [f32; 4],
     crop_overlay_enabled: f32,
-    _pad2: [f32; 3],
+    _pad2: [f32; 7],
 }
 
 // ---------------------------------------------------------------------------
@@ -182,8 +190,11 @@ struct GpuResources {
     // Per-image state
     texture: Option<wgpu::Texture>,
     texture_view: Option<wgpu::TextureView>,
+    texture_size: [u32; 2],
     bind_group: Option<wgpu::BindGroup>,
     current_image_id: u64,
+    blur_image_id: u64,
+    placeholder_blur_view: wgpu::TextureView,
     blur_texture_view: Option<wgpu::TextureView>,
     // Blur pre-pass pipeline resources
     blur_pipeline: Option<wgpu::RenderPipeline>,
@@ -191,6 +202,31 @@ struct GpuResources {
     blur_uniform_buffer: Option<wgpu::Buffer>,
     // Widget bounds in physical pixels (for viewport in render pass)
     phys_bounds: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlurUpdatePlan {
+    reset_blur_cache: bool,
+    generate_blur: bool,
+    rebuild_bind_group: bool,
+}
+
+fn plan_blur_update(
+    image_changed: bool,
+    blur_needed: bool,
+    blur_image_id: u64,
+    image_id: u64,
+    has_bind_group: bool,
+) -> BlurUpdatePlan {
+    let reset_blur_cache = image_changed;
+    let generate_blur = blur_needed && (image_changed || blur_image_id != image_id);
+    let rebuild_bind_group = image_changed || !has_bind_group || generate_blur;
+
+    BlurUpdatePlan {
+        reset_blur_cache,
+        generate_blur,
+        rebuild_bind_group,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -810,9 +846,12 @@ impl shader::Primitive for ImagePrimitive {
                 uniform_buffer,
                 texture: None,
                 texture_view: None,
+                texture_size: [0; 2],
                 bind_group: None,
                 current_image_id: 0,
-                blur_texture_view: Some(placeholder_blur_view),
+                blur_image_id: 0,
+                placeholder_blur_view,
+                blur_texture_view: None,
                 blur_pipeline: Some(blur_pipeline),
                 blur_bind_group_layout: Some(blur_bgl),
                 blur_uniform_buffer: Some(blur_uniform_buffer),
@@ -829,10 +868,20 @@ impl shader::Primitive for ImagePrimitive {
             bounds.width * sf,
             bounds.height * sf,
         ];
+        let blur_needed = self.adjustments.needs_blur();
 
         // --- Upload texture when image changes ---
         if let Some(img) = &self.image {
-            if res.current_image_id != self.image_id || res.texture.is_none() {
+            let image_changed = res.current_image_id != self.image_id || res.texture.is_none();
+            let blur_plan = plan_blur_update(
+                image_changed,
+                blur_needed,
+                res.blur_image_id,
+                self.image_id,
+                res.bind_group.is_some(),
+            );
+
+            if image_changed {
                 let max_dim = device.limits().max_texture_dimension_2d;
                 let mut upload_w = img.width;
                 let mut upload_h = img.height;
@@ -897,12 +946,29 @@ impl shader::Primitive for ImagePrimitive {
 
                 let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-                // Generate blur texture for clarity/dehaze
-                if let (Some(blur_pipeline), Some(blur_bgl), Some(blur_ubuf)) = (
+                res.texture = Some(tex);
+                res.texture_view = Some(view);
+                res.texture_size = [upload_w, upload_h];
+                res.current_image_id = self.image_id;
+                if blur_plan.reset_blur_cache {
+                    res.blur_image_id = 0;
+                    res.blur_texture_view = None;
+                }
+            }
+
+            if blur_plan.generate_blur {
+                if let (
+                    Some(source_view),
+                    Some(blur_pipeline),
+                    Some(blur_bgl),
+                    Some(blur_ubuf),
+                ) = (
+                    res.texture_view.as_ref(),
                     &res.blur_pipeline,
                     &res.blur_bind_group_layout,
                     &res.blur_uniform_buffer,
                 ) {
+                    let [upload_w, upload_h] = res.texture_size;
                     let blur_w = (upload_w / 4).max(1);
                     let blur_h = (upload_h / 4).max(1);
 
@@ -959,7 +1025,7 @@ impl shader::Primitive for ImagePrimitive {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
-                                    resource: wgpu::BindingResource::TextureView(&view),
+                                    resource: wgpu::BindingResource::TextureView(source_view),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
@@ -1047,10 +1113,18 @@ impl shader::Primitive for ImagePrimitive {
                     }
 
                     res.blur_texture_view = Some(blur_final_view);
+                    res.blur_image_id = self.image_id;
                 }
+            }
 
-                // Create main bind group AFTER blur passes so it uses the
-                // real blur texture view instead of the placeholder.
+            if blur_plan.rebuild_bind_group {
+                let Some(view) = res.texture_view.as_ref() else {
+                    return;
+                };
+                let blur_view = res
+                    .blur_texture_view
+                    .as_ref()
+                    .unwrap_or(&res.placeholder_blur_view);
                 let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("photo_bg"),
                     layout: &res.bind_group_layout,
@@ -1061,7 +1135,7 @@ impl shader::Primitive for ImagePrimitive {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&view),
+                            resource: wgpu::BindingResource::TextureView(view),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -1069,23 +1143,20 @@ impl shader::Primitive for ImagePrimitive {
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: wgpu::BindingResource::TextureView(
-                                res.blur_texture_view.as_ref().unwrap(),
-                            ),
+                            resource: wgpu::BindingResource::TextureView(blur_view),
                         },
                     ],
                 });
-
-                res.texture = Some(tex);
-                res.texture_view = Some(view);
                 res.bind_group = Some(bg);
-                res.current_image_id = self.image_id;
             }
         } else {
             res.texture = None;
             res.texture_view = None;
+            res.texture_size = [0; 2];
             res.bind_group = None;
             res.current_image_id = 0;
+            res.blur_image_id = 0;
+            res.blur_texture_view = None;
         }
 
         // --- Update uniform buffer every frame ---
@@ -1136,6 +1207,7 @@ impl shader::Primitive for ImagePrimitive {
             },
             image_aspect: adj.image_aspect,
             rotation: adj.rotation.as_u8() as f32,
+            _pad_before_crop_preview: 0.0,
             crop_preview: [
                 adj.crop_preview.left,
                 adj.crop_preview.top,
@@ -1147,7 +1219,7 @@ impl shader::Primitive for ImagePrimitive {
                 .map(|rect| [rect.left, rect.top, rect.right, rect.bottom])
                 .unwrap_or([0.0, 0.0, 1.0, 1.0]),
             crop_overlay_enabled: if adj.crop_overlay.is_some() { 1.0 } else { 0.0 },
-            _pad2: [0.0; 3],
+            _pad2: [0.0; 7],
         };
         queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
@@ -1242,6 +1314,76 @@ mod tests {
             3 => [1.0 - uv[1], uv[0]],
             _ => uv,
         }
+    }
+
+    #[test]
+    fn blur_prepass_is_only_needed_for_clarity_or_dehaze() {
+        let default = AdjustmentUniforms::default();
+        assert!(!default.needs_blur());
+
+        let mut clarity = AdjustmentUniforms::default();
+        clarity.clarity = 1.0;
+        assert!(clarity.needs_blur());
+
+        let mut dehaze = AdjustmentUniforms::default();
+        dehaze.dehaze = -1.0;
+        assert!(dehaze.needs_blur());
+    }
+
+    #[test]
+    fn blur_update_plan_resets_cache_on_image_change_without_generating_blur() {
+        let plan = plan_blur_update(true, false, 7, 8, true);
+
+        assert_eq!(
+            plan,
+            BlurUpdatePlan {
+                reset_blur_cache: true,
+                generate_blur: false,
+                rebuild_bind_group: true,
+            }
+        );
+    }
+
+    #[test]
+    fn blur_update_plan_generates_blur_when_enabled_without_current_cache() {
+        let plan = plan_blur_update(false, true, 0, 8, true);
+
+        assert_eq!(
+            plan,
+            BlurUpdatePlan {
+                reset_blur_cache: false,
+                generate_blur: true,
+                rebuild_bind_group: true,
+            }
+        );
+    }
+
+    #[test]
+    fn blur_update_plan_skips_work_when_current_blur_and_bind_group_are_ready() {
+        let plan = plan_blur_update(false, true, 8, 8, true);
+
+        assert_eq!(
+            plan,
+            BlurUpdatePlan {
+                reset_blur_cache: false,
+                generate_blur: false,
+                rebuild_bind_group: false,
+            }
+        );
+    }
+
+    fn field_offset<T, U>(base: &T, field: &U) -> usize {
+        (field as *const U as usize) - (base as *const T as usize)
+    }
+
+    #[test]
+    fn uniforms_layout_matches_wgsl_uniform_buffer() {
+        let uniforms = Uniforms::zeroed();
+
+        assert_eq!(std::mem::size_of::<Uniforms>(), 240);
+        assert_eq!(field_offset(&uniforms, &uniforms.crop_preview), 176);
+        assert_eq!(field_offset(&uniforms, &uniforms.crop_overlay), 192);
+        assert_eq!(field_offset(&uniforms, &uniforms.crop_overlay_enabled), 208);
     }
 
     // -- compute_image_rect tests --

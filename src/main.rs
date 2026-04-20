@@ -48,6 +48,31 @@ const GRID_PADDING: f32 = 14.0;
 const GRID_CARD_PADDING: f32 = 6.0;
 const COLLECTION_SIDEBAR_WIDTH: f32 = 180.0;
 const COLLECTION_SIDEBAR_DIVIDER_WIDTH: f32 = 1.0;
+const ROTATE_COUNTERCLOCKWISE_ICON: &str = "↺";
+const ROTATE_CLOCKWISE_ICON: &str = "↻";
+const ROTATE_COUNTERCLOCKWISE_STEP_LABEL: &str = "-90°";
+const ROTATE_CLOCKWISE_STEP_LABEL: &str = "+90°";
+
+fn rotation_button(
+    icon: &'static str,
+    step_label: &'static str,
+    message: Message,
+) -> Element<'static, Message> {
+    button(
+        column![
+            text(icon).size(16).color(TEXT_PRIMARY),
+            text(step_label).size(10).color(TEXT_SECONDARY)
+        ]
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
+            .spacing(2),
+    )
+    .on_press(message)
+    .width(Length::Fill)
+    .padding([6, 10])
+    .style(toolbar_button_style)
+    .into()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ThumbnailGridLayout {
@@ -160,6 +185,13 @@ struct LibraryEntry {
     path: PathBuf,
     filename: String,
     thumbnail_handle: Option<ImageHandle>,
+}
+
+struct SaveRequest {
+    path: PathBuf,
+    image: Arc<ImageData>,
+    state: edit::EditState,
+    vig: [f32; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -630,37 +662,20 @@ impl App {
             }
 
             Message::SaveEdited => {
-                let Some(path) = self.current_image_path.clone() else {
+                let Some(request) = self.current_save_request() else {
                     return Task::none();
-                };
-                let Some(img) = self.image.clone() else {
-                    return Task::none();
-                };
-                let state = self
-                    .edit_histories
-                    .get(&path)
-                    .map(|h| h.current)
-                    .unwrap_or_default();
-                let vig = if state.lens_correction {
-                    self.current_lens_profile
-                        .as_ref()
-                        .and_then(|p| p.vignetting)
-                        .map(|v| [v.k1, v.k2, v.k3])
-                        .unwrap_or([0.0; 3])
-                } else {
-                    [0.0; 3]
                 };
                 self.save_status = Some("Saving...".to_string());
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
                             edit::save_edited_image(
-                                &path,
-                                &img.pixels,
-                                img.width,
-                                img.height,
-                                &state,
-                                vig,
+                                &request.path,
+                                &request.image.pixels,
+                                request.image.width,
+                                request.image.height,
+                                &request.state,
+                                request.vig,
                             )
                             .map(|p| p.to_string_lossy().into_owned())
                         })
@@ -971,7 +986,13 @@ impl App {
                     ..
                 }) = &self.context_menu
                 {
-                    if self.library_entry_by_path(photo_path).is_some() {
+                    if self
+                        .collection_store
+                        .collections
+                        .get(collection_index)
+                        .is_some()
+                        && self.library_entry_by_path(photo_path).is_some()
+                    {
                         self.collection_store
                             .add_photo(collection_index, photo_path);
                         self.collection_store.save();
@@ -987,7 +1008,13 @@ impl App {
                     ..
                 }) = &self.context_menu
                 {
-                    if self.library_entry_by_path(photo_path).is_some() {
+                    if self
+                        .collection_store
+                        .collections
+                        .get(collection_index)
+                        .is_some()
+                        && self.library_entry_by_path(photo_path).is_some()
+                    {
                         if self
                             .collection_store
                             .collections
@@ -1311,6 +1338,42 @@ impl App {
             }
         }
         self.rebuild_library_indices();
+    }
+
+    #[cfg(test)]
+    fn replace_library_entries(&mut self, entries: Vec<LibraryEntry>) {
+        self.library = entries;
+        self.rebuild_library_indices();
+        self.reset_library_navigation_state();
+        self.current_image_path = None;
+        self.image = None;
+    }
+
+    #[cfg(test)]
+    fn reset_library_navigation_state(&mut self) {
+        self.library_index = None;
+        self.collection_nav = None;
+        self.nav = None;
+    }
+
+    #[cfg(test)]
+    fn clear_library_entries(&mut self) {
+        self.replace_library_entries(Vec::new());
+    }
+
+    #[cfg(test)]
+    fn remove_library_entry(&mut self, index: usize) -> Option<LibraryEntry> {
+        if index >= self.library.len() {
+            return None;
+        }
+        let removed = self.library.remove(index);
+        self.rebuild_library_indices();
+        self.reset_library_navigation_state();
+        if self.current_image_path.as_ref() == Some(&removed.path) {
+            self.current_image_path = None;
+            self.image = None;
+        }
+        Some(removed)
     }
 
     fn rebuild_library_indices(&mut self) {
@@ -1881,6 +1944,44 @@ impl App {
             .and_then(|history| history.current.crop)
     }
 
+    fn visible_edit_state(&self) -> edit::EditState {
+        let mut state = self
+            .current_image_path
+            .as_ref()
+            .and_then(|path| self.edit_histories.get(path))
+            .map(|history| history.current)
+            .unwrap_or_default();
+        state.crop = self.visible_crop();
+        state
+    }
+
+    fn current_save_request(&self) -> Option<SaveRequest> {
+        if self.loading {
+            return None;
+        }
+        let path = self.current_image_path.clone()?;
+        let image = self.image.clone()?;
+        let state = self.visible_edit_state();
+        let vig = self.current_lens_vignetting(state.lens_correction);
+        Some(SaveRequest {
+            path,
+            image,
+            state,
+            vig,
+        })
+    }
+
+    fn current_lens_vignetting(&self, lens_correction_enabled: bool) -> [f32; 3] {
+        if !lens_correction_enabled {
+            return [0.0; 3];
+        }
+        self.current_lens_profile
+            .as_ref()
+            .and_then(|profile| profile.vignetting)
+            .map(|vignetting| [vignetting.k1, vignetting.k2, vignetting.k3])
+            .unwrap_or([0.0; 3])
+    }
+
     fn visible_crop(&self) -> Option<edit::CropRect> {
         if self.crop_mode {
             None
@@ -2076,16 +2177,19 @@ impl App {
             column![section_label("LENS"), lens_btn, lens_dropdown, lens_info,].spacing(4);
 
         let rotation_row = row![
-            button(text("Rotate CCW").size(11).color(TEXT_PRIMARY))
-                .on_press(Message::RotateCounterclockwise)
-                .padding([4, 8])
-                .style(toolbar_button_style),
-            button(text("Rotate CW").size(11).color(TEXT_PRIMARY))
-                .on_press(Message::RotateClockwise)
-                .padding([4, 8])
-                .style(toolbar_button_style),
+            rotation_button(
+                ROTATE_COUNTERCLOCKWISE_ICON,
+                ROTATE_COUNTERCLOCKWISE_STEP_LABEL,
+                Message::RotateCounterclockwise,
+            ),
+            rotation_button(
+                ROTATE_CLOCKWISE_ICON,
+                ROTATE_CLOCKWISE_STEP_LABEL,
+                Message::RotateClockwise,
+            ),
         ]
         .spacing(8);
+        let rotation_section = column![section_label("ROTATE"), rotation_row].spacing(4);
 
         let crop_mode_label = if self.crop_mode {
             "Finish Crop"
@@ -2111,6 +2215,7 @@ impl App {
         ]
         .spacing(8)
         .align_y(Alignment::Center);
+        let crop_section = column![section_label("CROP"), crop_row].spacing(4);
 
         // Reset button
         let reset_btn = button(text("Reset All").size(11).color(TEXT_PRIMARY))
@@ -2137,8 +2242,8 @@ impl App {
             section_divider(),
             lens_section,
             section_divider(),
-            rotation_row,
-            crop_row,
+            rotation_section,
+            crop_section,
             reset_btn,
             status_text,
         ]
@@ -2210,7 +2315,7 @@ impl App {
             match &self.current_lens_profile {
                 Some(p) => {
                     let dist = p.distortion.map(|d| [d.a, d.b, d.c]).unwrap_or([0.0; 3]);
-                    let vig = p.vignetting.map(|v| [v.k1, v.k2, v.k3]).unwrap_or([0.0; 3]);
+                    let vig = self.current_lens_vignetting(true);
                     let tca_r = p.tca.map(|t| t.vr).unwrap_or(1.0);
                     let tca_b = p.tca.map(|t| t.vb).unwrap_or(1.0);
                     (dist, vig, tca_r, tca_b)
@@ -2638,8 +2743,7 @@ mod tests {
     fn detail_app_with_image(path: &Path, width: u32, height: u32) -> App {
         let (mut app, _) = App::new();
         app.tab = Tab::Detail;
-        app.library.clear();
-        app.rebuild_library_indices();
+        app.clear_library_entries();
         app.collection_store = collection::CollectionStore::default();
         app.active_collection = None;
         app.context_menu = None;
@@ -2659,14 +2763,15 @@ mod tests {
         app.collection_store = collection::CollectionStore::default();
         app.active_collection = None;
         app.context_menu = None;
-        app.library = (0..count)
-            .map(|index| LibraryEntry {
-                path: PathBuf::from(format!("photo-{index}.png")),
-                filename: format!("photo-{index}.png"),
-                thumbnail_handle: None,
-            })
-            .collect();
-        app.rebuild_library_indices();
+        app.replace_library_entries(
+            (0..count)
+                .map(|index| LibraryEntry {
+                    path: PathBuf::from(format!("photo-{index}.png")),
+                    filename: format!("photo-{index}.png"),
+                    thumbnail_handle: None,
+                })
+                .collect(),
+        );
         app
     }
 
@@ -2854,8 +2959,7 @@ mod tests {
     fn stale_library_photo_context_menu_ignores_missing_target() {
         let mut app = library_app_with_entries(1);
         let photo_path = app.library[0].path.clone();
-        app.library.clear();
-        app.rebuild_library_indices();
+        app.clear_library_entries();
 
         assert!(app
             .library_photo_context_menu_actions(&photo_path)
@@ -3227,14 +3331,103 @@ mod tests {
         app.cursor_position = [150.0, 300.0];
 
         let _ = app.update(Message::LibraryPhotoRightClicked(1));
-        app.library.remove(0);
-        app.rebuild_library_indices();
+        let removed = app.remove_library_entry(0);
+        assert!(removed.is_some());
         let _ = app.update(Message::AddPhotoToCollection(0));
 
         assert_eq!(
             app.collection_store.collections[0].photos,
             vec![expected_path]
         );
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn stale_library_photo_add_action_ignores_removed_target() {
+        let mut app = library_app_with_entries(2);
+        app.collection_store.create("Favorites");
+        let target_path = app.library[1].path.clone();
+        app.cursor_position = [150.0, 300.0];
+
+        let _ = app.update(Message::LibraryPhotoRightClicked(1));
+        let removed = app.remove_library_entry(1);
+        assert_eq!(
+            removed.as_ref().map(|entry| &entry.path),
+            Some(&target_path)
+        );
+        let _ = app.update(Message::AddPhotoToCollection(0));
+
+        assert!(app.collection_store.collections[0].photos.is_empty());
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn stale_library_photo_toggle_action_ignores_removed_target() {
+        let mut app = library_app_with_entries(2);
+        app.collection_store.create("Favorites");
+        let target_path = app.library[1].path.clone();
+        app.collection_store.add_photo(0, &target_path);
+        app.cursor_position = [150.0, 300.0];
+
+        let _ = app.update(Message::LibraryPhotoRightClicked(1));
+        let removed = app.remove_library_entry(1);
+        assert_eq!(
+            removed.as_ref().map(|entry| &entry.path),
+            Some(&target_path)
+        );
+        let _ = app.update(Message::TogglePhotoInCollection(0));
+
+        assert_eq!(
+            app.collection_store.collections[0].photos,
+            vec![target_path]
+        );
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn stale_library_photo_add_action_ignores_removed_collection() {
+        let mut app = library_app_with_entries(2);
+        app.collection_store.create("Favorites");
+        app.cursor_position = [150.0, 300.0];
+
+        let _ = app.update(Message::LibraryPhotoRightClicked(1));
+        app.collection_store.delete(0);
+        let _ = app.update(Message::AddPhotoToCollection(0));
+
+        assert!(app.collection_store.collections.is_empty());
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn stale_library_photo_toggle_action_ignores_removed_collection() {
+        let mut app = library_app_with_entries(2);
+        app.collection_store.create("Favorites");
+        let target_path = app.library[1].path.clone();
+        app.collection_store.add_photo(0, &target_path);
+        app.cursor_position = [150.0, 300.0];
+
+        let _ = app.update(Message::LibraryPhotoRightClicked(1));
+        app.collection_store.delete(0);
+        let _ = app.update(Message::TogglePhotoInCollection(0));
+
+        assert!(app.collection_store.collections.is_empty());
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn toggle_photo_in_collection_targets_original_photo_after_library_reflow() {
+        let mut app = library_app_with_entries(3);
+        app.collection_store.create("Favorites");
+        let target_path = app.library[1].path.clone();
+        app.collection_store.add_photo(0, &target_path);
+        app.cursor_position = [150.0, 300.0];
+
+        let _ = app.update(Message::LibraryPhotoRightClicked(1));
+        let removed = app.remove_library_entry(0);
+        assert!(removed.is_some());
+        let _ = app.update(Message::TogglePhotoInCollection(0));
+
+        assert!(app.collection_store.collections[0].photos.is_empty());
         assert!(app.context_menu.is_none());
     }
 
@@ -3513,6 +3706,251 @@ mod tests {
             None,
         );
         assert!((app.zoom - expected_zoom).abs() < 0.01);
+    }
+
+    #[test]
+    fn save_uses_the_visible_crop_state() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let crop = edit::CropRect::new(0.5, 0.0, 1.0, 1.0);
+        let mut history = edit::UndoHistory::new();
+        history.current.exposure = 0.75;
+        history.current.crop = Some(crop);
+        history.commit();
+        app.edit_histories.insert(path, history);
+
+        let committed_state = app.visible_edit_state();
+        assert_eq!(committed_state.crop, Some(crop));
+        assert_eq!(committed_state.exposure, 0.75);
+
+        app.crop_mode = true;
+
+        let saving_state = app.visible_edit_state();
+        assert_eq!(saving_state.crop, None);
+        assert_eq!(saving_state.exposure, 0.75);
+    }
+
+    #[test]
+    fn save_request_exports_the_visible_full_image_in_crop_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let path = PathBuf::from("frame.png");
+        let pixels = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let mut app = detail_app_with_image(&path, 2, 1);
+        app.image = Some(Arc::new(decode::ImageData {
+            pixels: pixels.clone(),
+            width: 2,
+            height: 1,
+            file_size: 2,
+        }));
+
+        let mut history = edit::UndoHistory::new();
+        history.current.crop = Some(edit::CropRect::new(0.0, 0.0, 0.5, 1.0));
+        history.commit();
+        app.edit_histories.insert(path, history);
+        app.crop_mode = true;
+
+        let request = app.current_save_request().unwrap();
+        let out = edit::save_edited_image(
+            &original,
+            &request.image.pixels,
+            request.image.width,
+            request.image.height,
+            &request.state,
+            request.vig,
+        )
+        .unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 1);
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn rotation_controls_use_icon_buttons() {
+        use iced::advanced::widget::Tree;
+
+        let button_ref: Element<'static, Message> = button(text("x")).into();
+        let text_ref: Element<'static, Message> = text("x").into();
+        let column_ref: Element<'static, Message> =
+            column(vec![text("x").into(), text("y").into()]).into();
+        let container_ref: Element<'static, Message> = container(text("x")).into();
+        let row_ref: Element<'static, Message> = row(vec![button(text("x")).into(), button(text("y")).into()]).into();
+        let button_tag = Tree::new(&button_ref).tag;
+        let text_tag = Tree::new(&text_ref).tag;
+        let column_tag = Tree::new(&column_ref).tag;
+        let container_tag = Tree::new(&container_ref).tag;
+        let row_tag = Tree::new(&row_ref).tag;
+
+        assert_eq!(ROTATE_COUNTERCLOCKWISE_ICON, "↺");
+        assert_eq!(ROTATE_CLOCKWISE_ICON, "↻");
+        assert_eq!(ROTATE_COUNTERCLOCKWISE_STEP_LABEL, "-90°");
+        assert_eq!(ROTATE_CLOCKWISE_STEP_LABEL, "+90°");
+
+        fn assert_rotation_button_tree(
+            tree: &Tree,
+            button_tag: iced::advanced::widget::tree::Tag,
+            column_tag: iced::advanced::widget::tree::Tag,
+            text_tag: iced::advanced::widget::tree::Tag,
+        ) {
+            assert_eq!(tree.tag, button_tag);
+            assert_eq!(tree.children.len(), 1);
+            assert_eq!(tree.children[0].tag, column_tag);
+            assert_eq!(tree.children[0].children.len(), 2);
+            assert!(tree.children[0]
+                .children
+                .iter()
+                .all(|child| child.tag == text_tag));
+        }
+
+        let counterclockwise_button = rotation_button(
+            ROTATE_COUNTERCLOCKWISE_ICON,
+            ROTATE_COUNTERCLOCKWISE_STEP_LABEL,
+            Message::RotateCounterclockwise,
+        );
+        let counterclockwise_tree = Tree::new(&counterclockwise_button);
+        assert_rotation_button_tree(
+            &counterclockwise_tree,
+            button_tag,
+            column_tag,
+            text_tag,
+        );
+
+        let clockwise_button = rotation_button(
+            ROTATE_CLOCKWISE_ICON,
+            ROTATE_CLOCKWISE_STEP_LABEL,
+            Message::RotateClockwise,
+        );
+        let clockwise_tree = Tree::new(&clockwise_button);
+        assert_rotation_button_tree(
+            &clockwise_tree,
+            button_tag,
+            column_tag,
+            text_tag,
+        );
+
+        fn contains_rotation_section(
+            tree: &Tree,
+            column_tag: iced::advanced::widget::tree::Tag,
+            container_tag: iced::advanced::widget::tree::Tag,
+            row_tag: iced::advanced::widget::tree::Tag,
+            button_tag: iced::advanced::widget::tree::Tag,
+        ) -> bool {
+            (tree.tag == column_tag
+                && tree.children.len() == 2
+                && tree.children[0].tag == container_tag
+                && tree.children[1].tag == row_tag
+                && tree.children[1].children.len() == 2
+                && tree.children[1]
+                    .children
+                    .iter()
+                    .all(|child| child.tag == button_tag))
+                || tree
+                    .children
+                    .iter()
+                    .any(|child| contains_rotation_section(
+                        child,
+                        column_tag,
+                        container_tag,
+                        row_tag,
+                        button_tag,
+                    ))
+        }
+
+        let app = detail_app_with_image(Path::new("frame.png"), 200, 100);
+        let panel_element = app.edit_panel();
+        let panel_tree = Tree::new(&panel_element);
+        assert!(contains_rotation_section(
+            &panel_tree,
+            column_tag,
+            container_tag,
+            row_tag,
+            button_tag,
+        ));
+    }
+
+    #[test]
+    fn save_edited_is_a_no_op_without_a_current_image() {
+        let (mut app, _) = App::new();
+        app.collection_store = collection::CollectionStore::default();
+
+        let _ = app.update(Message::SaveEdited);
+        assert!(app.save_status.is_none());
+
+        app.current_image_path = Some(PathBuf::from("frame.png"));
+        let _ = app.update(Message::SaveEdited);
+        assert!(app.save_status.is_none());
+    }
+
+    #[test]
+    fn save_edited_is_a_no_op_while_loading() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 2, 1);
+        app.loading = true;
+
+        let _ = app.update(Message::SaveEdited);
+
+        assert!(app.save_status.is_none());
+    }
+
+    #[test]
+    fn save_edited_sets_saving_status_when_request_is_valid() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 2, 1);
+
+        let _ = app.update(Message::SaveEdited);
+
+        assert_eq!(app.save_status.as_deref(), Some("Saving..."));
+    }
+
+    #[test]
+    fn current_save_request_uses_enabled_lens_vignetting() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 2, 1);
+        app.current_lens_profile = Some(lens::LensProfile {
+            maker: "Acme".to_string(),
+            model: "Prime".to_string(),
+            mount: "X".to_string(),
+            distortion: None,
+            vignetting: Some(lens::VignetteCoeffs {
+                k1: 0.1,
+                k2: 0.2,
+                k3: 0.3,
+            }),
+            tca: None,
+        });
+
+        let mut history = edit::UndoHistory::new();
+        history.current.lens_correction = true;
+        history.commit();
+        app.edit_histories.insert(path, history);
+
+        let request = app.current_save_request().unwrap();
+        assert_eq!(request.vig, [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn current_save_request_zeroes_vignetting_without_active_correction() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 2, 1);
+        app.current_lens_profile = Some(lens::LensProfile {
+            maker: "Acme".to_string(),
+            model: "Prime".to_string(),
+            mount: "X".to_string(),
+            distortion: None,
+            vignetting: Some(lens::VignetteCoeffs {
+                k1: 0.1,
+                k2: 0.2,
+                k3: 0.3,
+            }),
+            tca: None,
+        });
+
+        let request = app.current_save_request().unwrap();
+        assert_eq!(request.vig, [0.0, 0.0, 0.0]);
     }
 
     #[test]
