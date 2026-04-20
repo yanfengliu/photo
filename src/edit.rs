@@ -497,7 +497,11 @@ pub fn edited_save_path(original: &Path) -> PathBuf {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("image");
-    let ext = original.extension().and_then(|e| e.to_str());
+    let ext = if crate::nav::is_raw_file(original) {
+        Some("png")
+    } else {
+        original.extension().and_then(|e| e.to_str())
+    };
     let new_name = match ext {
         Some(e) => format!("{stem}_edited.{e}"),
         None => format!("{stem}_edited"),
@@ -683,7 +687,10 @@ mod tests {
         // Highlights should brighten bright pixels
         let bright = [0.9, 0.9, 0.9];
         let out = apply_tone_zones(bright, 1.0, 0.0, 0.0, 0.0);
-        assert!(out[0] > bright[0], "highlights should brighten bright pixels");
+        assert!(
+            out[0] > bright[0],
+            "highlights should brighten bright pixels"
+        );
 
         // Highlights should minimally affect dark pixels
         let dark = [0.02, 0.02, 0.02];
@@ -769,8 +776,14 @@ mod tests {
         let highlight = [0.8, 0.8, 0.8];
         let out_s = apply_contrast(shadow, 0.5);
         let out_h = apply_contrast(highlight, 0.5);
-        assert!(out_s[0] < shadow[0], "positive contrast should darken shadows");
-        assert!(out_h[0] > highlight[0], "positive contrast should brighten highlights");
+        assert!(
+            out_s[0] < shadow[0],
+            "positive contrast should darken shadows"
+        );
+        assert!(
+            out_h[0] > highlight[0],
+            "positive contrast should brighten highlights"
+        );
     }
 
     #[test]
@@ -779,8 +792,14 @@ mod tests {
         let highlight = [0.8, 0.8, 0.8];
         let out_s = apply_contrast(shadow, -0.5);
         let out_h = apply_contrast(highlight, -0.5);
-        assert!(out_s[0] > shadow[0], "negative contrast should brighten shadows");
-        assert!(out_h[0] < highlight[0], "negative contrast should darken highlights");
+        assert!(
+            out_s[0] > shadow[0],
+            "negative contrast should brighten shadows"
+        );
+        assert!(
+            out_h[0] < highlight[0],
+            "negative contrast should darken highlights"
+        );
     }
 
     #[test]
@@ -839,6 +858,27 @@ mod tests {
         let p = PathBuf::from("/photos/image");
         let out = edited_save_path(&p);
         assert_eq!(out, PathBuf::from("/photos/image_edited"));
+    }
+
+    #[test]
+    fn save_path_converts_raw_inputs_to_png() {
+        use std::path::PathBuf;
+        let p = PathBuf::from("/photos/frame.CR3");
+        let out = edited_save_path(&p);
+        assert_eq!(out, PathBuf::from("/photos/frame_edited.png"));
+    }
+
+    #[test]
+    fn save_edited_raw_inputs_as_png_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.dng");
+        let pixels = [32, 64, 96, 255];
+
+        let out =
+            save_edited_image(&original, &pixels, 1, 1, &EditState::default(), [0.0; 3]).unwrap();
+
+        assert_eq!(out.extension().and_then(|ext| ext.to_str()), Some("png"));
+        assert!(out.exists());
     }
 
     #[test]
@@ -905,11 +945,9 @@ mod tests {
         let lum_v = luminance(vivid);
         let lum_m = luminance(muted);
         let chroma_orig_v = ((vivid[0] - lum_v).powi(2) + (vivid[1] - lum_v).powi(2)).sqrt();
-        let chroma_new_v =
-            ((out_vivid[0] - lum_v).powi(2) + (out_vivid[1] - lum_v).powi(2)).sqrt();
+        let chroma_new_v = ((out_vivid[0] - lum_v).powi(2) + (out_vivid[1] - lum_v).powi(2)).sqrt();
         let chroma_orig_m = ((muted[0] - lum_m).powi(2) + (muted[1] - lum_m).powi(2)).sqrt();
-        let chroma_new_m =
-            ((out_muted[0] - lum_m).powi(2) + (out_muted[1] - lum_m).powi(2)).sqrt();
+        let chroma_new_m = ((out_muted[0] - lum_m).powi(2) + (out_muted[1] - lum_m).powi(2)).sqrt();
 
         let reduction_vivid = 1.0 - chroma_new_v / chroma_orig_v;
         let reduction_muted = 1.0 - chroma_new_m / chroma_orig_m;
@@ -960,7 +998,7 @@ mod tests {
     fn vignetting_correction_brightens_corners() {
         let px = [0.5, 0.5, 0.5];
         let vig = [1.0, 0.5, 0.1]; // typical vignetting correction coefficients
-        // Center pixel: UV (0.5, 0.5) has r=0, correction=1.0 (no change)
+                                   // Center pixel: UV (0.5, 0.5) has r=0, correction=1.0 (no change)
         let center = apply_vignetting(px, [0.5, 0.5], vig);
         assert!(approx(center[0], px[0]));
         // Corner pixel: UV (0.0, 0.0) has r²=0.5, correction>1.0 (brightened)

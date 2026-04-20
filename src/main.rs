@@ -209,6 +209,10 @@ enum Message {
     ExitCollectionDetail,
 }
 
+fn path_filename_str(path: &Path) -> &str {
+    path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -303,7 +307,7 @@ impl App {
                 }
                 match &self.nav {
                     Some(nav) if !nav.current_filename().is_empty() => {
-                        format!("Photo - {}", nav.current_filename())
+                        format!("Photo - {}", path_filename_str(&nav.current_path()))
                     }
                     _ => "Photo".to_string(),
                 }
@@ -393,13 +397,7 @@ impl App {
             Message::AddFiles => Task::perform(
                 async {
                     rfd::AsyncFileDialog::new()
-                        .add_filter(
-                            "Images",
-                            &[
-                                "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg",
-                                "svgz", "ico", "tga", "qoi", "hdr", "exr",
-                            ],
-                        )
+                        .add_filter("Images", image_file_dialog_extensions())
                         .pick_files()
                         .await
                         .map(|files| files.into_iter().map(|f| f.path().to_path_buf()).collect())
@@ -448,15 +446,7 @@ impl App {
                 });
 
                 let now = Instant::now();
-                let is_double_click = self
-                    .last_thumb_click
-                    .map(|(prev_idx, prev_time)| {
-                        prev_idx == index && now.duration_since(prev_time).as_millis() < 400
-                    })
-                    .unwrap_or(false);
-
-                if is_double_click {
-                    self.last_thumb_click = None;
+                if Self::is_double_click_event(&mut self.last_thumb_click, index, now) {
                     if let Some(entry) = self.library.get(index) {
                         self.library_index = Some(index);
                         self.tab = Tab::Detail;
@@ -464,8 +454,6 @@ impl App {
                         self.current_image_path = Some(path.clone());
                         return self.start_load(path);
                     }
-                } else {
-                    self.last_thumb_click = Some((index, now));
                 }
                 Task::none()
             }
@@ -630,17 +618,16 @@ impl App {
             Message::LensProfileSelected(name) => {
                 if name == "Auto" {
                     self.lens_override_name = None;
-                    self.current_lens_profile =
-                        self.current_exif.as_ref().and_then(|exif_info| {
-                            let maker = if exif_info.lens_make.is_empty() {
-                                &exif_info.camera_make
-                            } else {
-                                &exif_info.lens_make
-                            };
-                            self.lens_db
-                                .find_lens(maker, &exif_info.lens_model)
-                                .cloned()
-                        });
+                    self.current_lens_profile = self.current_exif.as_ref().and_then(|exif_info| {
+                        let maker = if exif_info.lens_make.is_empty() {
+                            &exif_info.camera_make
+                        } else {
+                            &exif_info.lens_make
+                        };
+                        self.lens_db
+                            .find_lens(maker, &exif_info.lens_model)
+                            .cloned()
+                    });
                 } else if name == "None" {
                     self.lens_override_name = Some(name);
                     self.current_lens_profile = None;
@@ -697,14 +684,7 @@ impl App {
 
             Message::SidebarCollectionClicked(index) => {
                 let now = Instant::now();
-                let is_double_click = self
-                    .last_collection_click
-                    .map(|(prev_idx, prev_time)| {
-                        prev_idx == index && now.duration_since(prev_time).as_millis() < 400
-                    })
-                    .unwrap_or(false);
-                if is_double_click {
-                    self.last_collection_click = None;
+                if Self::is_double_click_event(&mut self.last_collection_click, index, now) {
                     self.active_collection = Some(index);
                 } else {
                     self.last_collection_click = Some((index, now));
@@ -784,8 +764,7 @@ impl App {
                 let is_double_click = self
                     .last_thumb_click
                     .map(|(prev_idx, prev_time)| {
-                        prev_idx == photo_index
-                            && now.duration_since(prev_time).as_millis() < 400
+                        prev_idx == photo_index && now.duration_since(prev_time).as_millis() < 400
                     })
                     .unwrap_or(false);
 
@@ -825,9 +804,7 @@ impl App {
                     }) => {
                         let photo_index = *photo_index;
                         if let Some(col_idx) = self.active_collection {
-                            if let Some(col) =
-                                self.collection_store.collections.get(col_idx)
-                            {
+                            if let Some(col) = self.collection_store.collections.get(col_idx) {
                                 if let Some(path) = col.photos.get(photo_index).cloned() {
                                     self.collection_store.remove_photo(col_idx, &path);
                                     self.collection_store.save();
@@ -842,9 +819,7 @@ impl App {
                         let photo_index = *photo_index;
                         if let Some(entry) = self.library.get(photo_index) {
                             let path = entry.path.clone();
-                            for (i, col) in
-                                self.collection_store.collections.iter().enumerate()
-                            {
+                            for (i, col) in self.collection_store.collections.iter().enumerate() {
                                 if col.photos.contains(&path) {
                                     self.collection_store.remove_photo(i, &path);
                                     break;
@@ -884,7 +859,8 @@ impl App {
                 }) = &self.context_menu
                 {
                     if let Some(entry) = self.library.get(*photo_index) {
-                        self.collection_store.add_photo(collection_index, &entry.path);
+                        self.collection_store
+                            .add_photo(collection_index, &entry.path);
                         self.collection_store.save();
                     }
                 }
@@ -988,9 +964,7 @@ impl App {
                 Task::none()
             }
 
-            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                Task::none()
-            }
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => Task::none(),
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(drag) = self.drag_state.take() {
                     if drag.active {
@@ -1163,15 +1137,31 @@ impl App {
     // Library helpers
     // ---------------------------------------------------------------------------
 
+    fn is_double_click_event(
+        last_click_state: &mut Option<(usize, Instant)>,
+        current_index: usize,
+        current_time: Instant,
+    ) -> bool {
+        let is_double_click = last_click_state
+            .map(|(prev_idx, prev_time)| {
+                prev_idx == current_index
+                    && current_time.duration_since(prev_time).as_millis() < 400
+            })
+            .unwrap_or(false);
+
+        if is_double_click {
+            *last_click_state = None;
+        } else {
+            *last_click_state = Some((current_index, current_time));
+        }
+        is_double_click
+    }
+
     fn add_library_entries(&mut self, paths: &[PathBuf]) {
         for path in paths {
             if !self.library.iter().any(|e| e.path == *path) {
                 self.library.push(LibraryEntry {
-                    filename: path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string(),
+                    filename: path_filename_str(path).to_string(),
                     path: path.clone(),
                     thumbnail_handle: None,
                 });
@@ -1200,13 +1190,7 @@ impl App {
         Task::perform(
             async {
                 rfd::AsyncFileDialog::new()
-                    .add_filter(
-                        "Images",
-                        &[
-                            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg",
-                            "svgz", "ico", "tga", "qoi", "hdr", "exr",
-                        ],
-                    )
+                    .add_filter("Images", image_file_dialog_extensions())
                     .pick_file()
                     .await
                     .map(|f| f.path().to_path_buf())
@@ -1242,8 +1226,8 @@ impl App {
         };
         let main = column![tab_bar, content];
 
-        let has_overlay = self.context_menu.is_some()
-            || self.drag_state.as_ref().is_some_and(|d| d.active);
+        let has_overlay =
+            self.context_menu.is_some() || self.drag_state.as_ref().is_some_and(|d| d.active);
 
         if has_overlay {
             let mut layers: Vec<Element<'_, Message>> = vec![main.into()];
@@ -1368,16 +1352,21 @@ impl App {
         ];
 
         let sidebar = self.collection_sidebar();
-        let divider = container(Space::with_width(1))
-            .height(Length::Fill)
-            .style(|_theme: &Theme| container::Style {
-                background: Some(Background::Color(DIVIDER)),
-                ..Default::default()
-            });
+        let divider =
+            container(Space::with_width(1))
+                .height(Length::Fill)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(Background::Color(DIVIDER)),
+                    ..Default::default()
+                });
 
-        container(row![sidebar, divider, container(grid_area).width(Length::Fill)])
-            .style(dark_bg_style)
-            .into()
+        container(row![
+            sidebar,
+            divider,
+            container(grid_area).width(Length::Fill)
+        ])
+        .style(dark_bg_style)
+        .into()
     }
 
     fn collection_sidebar(&self) -> Element<'_, Message> {
@@ -1402,10 +1391,7 @@ impl App {
                     .into()
             } else {
                 let label = format!("{} ({})", col.name, col.photos.len());
-                let is_drop_target = self
-                    .drag_state
-                    .as_ref()
-                    .is_some_and(|d| d.active)
+                let is_drop_target = self.drag_state.as_ref().is_some_and(|d| d.active)
                     && self.sidebar_hover_collection == Some(i);
                 let style_fn = if is_drop_target {
                     sidebar_item_drop_target_style
@@ -1463,8 +1449,7 @@ impl App {
         let cols = 6;
         let mut grid = column![].spacing(8);
 
-        let photo_entries: Vec<(usize, &PathBuf)> =
-            collection.photos.iter().enumerate().collect();
+        let photo_entries: Vec<(usize, &PathBuf)> = collection.photos.iter().enumerate().collect();
 
         for chunk in photo_entries.chunks(cols) {
             let mut r = row![].spacing(8);
@@ -1556,7 +1541,8 @@ impl App {
                 .into()
         };
 
-        let label = container(text(&entry.filename).size(10).color(TEXT_SECONDARY)).width(thumb_size);
+        let label =
+            container(text(&entry.filename).size(10).color(TEXT_SECONDARY)).width(thumb_size);
 
         let card = button(column![thumb, label].spacing(4).width(thumb_size))
             .on_press(Message::LibraryItemClicked(index))
@@ -1592,9 +1578,7 @@ impl App {
             let name = if self.collection_nav.is_some() {
                 self.current_image_path
                     .as_ref()
-                    .and_then(|p| {
-                        p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
-                    })
+                    .map(|p| path_filename_str(p).to_string())
                     .unwrap_or_default()
             } else if let Some(idx) = self.library_index {
                 self.library
@@ -1724,13 +1708,8 @@ impl App {
             .text_size(11)
             .width(Length::Fill);
 
-        let lens_section = column![
-            section_label("LENS"),
-            lens_btn,
-            lens_dropdown,
-            lens_info,
-        ]
-        .spacing(4);
+        let lens_section =
+            column![section_label("LENS"), lens_btn, lens_dropdown, lens_info,].spacing(4);
 
         // Reset button
         let reset_btn = button(text("Reset All").size(11).color(TEXT_PRIMARY))
@@ -1773,15 +1752,12 @@ impl App {
         let (min, max) = slider_range(kind);
         let step = slider_step(kind);
 
-        let label_el: Element<'_, Message> = button(
-            text(label.to_string())
-                .size(11)
-                .color(TEXT_SECONDARY),
-        )
-        .on_press(Message::ResetSlider(kind))
-        .padding(0)
-        .style(invisible_button_style)
-        .into();
+        let label_el: Element<'_, Message> =
+            button(text(label.to_string()).size(11).color(TEXT_SECONDARY))
+                .on_press(Message::ResetSlider(kind))
+                .padding(0)
+                .style(invisible_button_style)
+                .into();
 
         let value_el: Element<'_, Message> = if self.editing_slider == Some(kind) {
             text_input("", &self.slider_text_buf)
@@ -1791,15 +1767,11 @@ impl App {
                 .width(45)
                 .into()
         } else {
-            button(
-                text(format!("{:.1}", value))
-                    .size(11)
-                    .color(TEXT_PRIMARY),
-            )
-            .on_press(Message::SliderTextInput(kind))
-            .padding(0)
-            .style(invisible_button_style)
-            .into()
+            button(text(format!("{:.1}", value)).size(11).color(TEXT_PRIMARY))
+                .on_press(Message::SliderTextInput(kind))
+                .padding(0)
+                .style(invisible_button_style)
+                .into()
         };
 
         let slider_el = slider(min..=max, value, move |v| Message::SliderChanged(kind, v))
@@ -1941,7 +1913,7 @@ impl App {
     }
 
     // ---------------------------------------------------------------------------
-    // Drag overlay (stub — implemented in Task 8)
+    // Drag overlay
     // ---------------------------------------------------------------------------
 
     fn drag_overlay(&self, drag: &DragState) -> Element<'_, Message> {
@@ -1951,36 +1923,38 @@ impl App {
             .map(|e| e.filename.clone())
             .unwrap_or_default();
 
-        let thumb: Element<'_, Message> =
-            if let Some(Some(ref handle)) = self.library.get(drag.photo_index).map(|e| &e.thumbnail_handle) {
-                container(Image::new(handle.clone()).width(60).height(60))
-                    .width(60)
-                    .height(60)
-                    .center_x(Length::Shrink)
-                    .center_y(Length::Shrink)
-                    .into()
-            } else {
-                text(label.clone()).size(11).color(TEXT_PRIMARY).into()
-            };
+        let thumb: Element<'_, Message> = if let Some(Some(ref handle)) = self
+            .library
+            .get(drag.photo_index)
+            .map(|e| &e.thumbnail_handle)
+        {
+            container(Image::new(handle.clone()).width(60).height(60))
+                .width(60)
+                .height(60)
+                .center_x(Length::Shrink)
+                .center_y(Length::Shrink)
+                .into()
+        } else {
+            text(label.clone()).size(11).color(TEXT_PRIMARY).into()
+        };
 
-        let drag_widget = container(
-            column![thumb, text(label).size(10).color(TEXT_SECONDARY)].spacing(2),
-        )
-        .padding(4)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(Color {
-                r: 0.15,
-                g: 0.15,
-                b: 0.15,
-                a: 0.85,
-            })),
-            border: Border {
-                color: Color::from_rgb(0.3, 0.5, 0.7),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
-        });
+        let drag_widget =
+            container(column![thumb, text(label).size(10).color(TEXT_SECONDARY)].spacing(2))
+                .padding(4)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(Background::Color(Color {
+                        r: 0.15,
+                        g: 0.15,
+                        b: 0.15,
+                        a: 0.85,
+                    })),
+                    border: Border {
+                        color: Color::from_rgb(0.3, 0.5, 0.7),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                });
 
         let x = drag.current_pos[0] + 10.0;
         let y = drag.current_pos[1] + 10.0;
@@ -2248,23 +2222,12 @@ fn load_library() -> Vec<PathBuf> {
         .collect()
 }
 
+fn image_file_dialog_extensions() -> &'static [&'static str] {
+    nav::image_extensions()
+}
+
 pub fn scan_folder_for_images(folder: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(folder)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| nav::is_image_file(p))
-        .collect();
-
-    files.sort_by(|a, b| {
-        natord::compare(
-            a.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-            b.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-        )
-    });
-
-    files
+    nav::scan_images_in_directory(folder)
 }
 
 #[cfg(test)]
@@ -2287,6 +2250,18 @@ mod tests {
         let (dir, _) = setup_dir(&["photo.jpg", "notes.txt", "icon.png", "data.csv", "art.bmp"]);
         let results = scan_folder_for_images(dir.path());
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn scan_folder_finds_raw_images() {
+        let (dir, _) = setup_dir(&["photo.dng", "roll.cr3", "notes.txt"]);
+        let results = scan_folder_for_images(dir.path());
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn file_dialog_extensions_match_supported_image_extensions() {
+        assert_eq!(image_file_dialog_extensions(), nav::image_extensions());
     }
 
     #[test]

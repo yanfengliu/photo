@@ -24,7 +24,7 @@
 | `assets/shaders/image.wgsl` | Modify | Full adjustment pipeline in fragment shader |
 | `assets/shaders/blur.wgsl` | Create | Separable Gaussian blur shader |
 | `assets/lensfun/` | Create | Bundled Lensfun XML database files (~56 XML files) |
-| `docs/ARCHITECTURE.md` | Modify | Update component map, data flow, dependencies |
+| `docs/architecture/ARCHITECTURE.md` | Modify | Update component map, data flow, dependencies |
 
 ---
 
@@ -2348,11 +2348,11 @@ git commit -m "feat: add save edited image with Ctrl+S"
 ## Task 10: Update Architecture Docs
 
 **Files:**
-- Modify: `docs/ARCHITECTURE.md`
-- Modify: `docs/devlog-detailed.md`
-- Modify: `docs/devlog-summary.md`
+- Modify: `docs/architecture/ARCHITECTURE.md`
+- Modify: `docs/devlog/detailed/<active-log>.md`
+- Modify: `docs/devlog/summary.md`
 
-- [ ] **Step 1: Update ARCHITECTURE.md**
+- [ ] **Step 1: Update architecture/ARCHITECTURE.md**
 
 Add `edit.rs` and `lens.rs` to the Component Map. Add the edit data flow. Add `kamadak-exif`, `quick-xml` to Technology Map. Update the diagram. Add drift log entry.
 
@@ -2373,11 +2373,11 @@ Add to Boundaries:
 - Only `lens.rs` reads EXIF data and parses Lensfun XML. All Lensfun access is through this module.
 ```
 
-- [ ] **Step 2: Append to devlog-detailed.md**
+- [ ] **Step 2: Append to devlog/detailed/<active-log>.md**
 
 Use actual system time. Entry should cover the full image editing feature implementation.
 
-- [ ] **Step 3: Update devlog-summary.md**
+- [ ] **Step 3: Update devlog/summary.md**
 
 Add summary line for the editing feature.
 

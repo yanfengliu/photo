@@ -1,6 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use image25::DynamicImage as RawDynamicImage;
+use rawler::decoders::RawDecodeParams;
+use rawler::imgop::develop::RawDevelop;
+use rawler::rawsource::RawSource;
+
+use crate::nav;
+
 /// Decoded image in RGBA8 format ready for GPU upload.
 #[derive(Debug)]
 pub struct ImageData {
@@ -23,6 +30,7 @@ pub fn decode_image(path: &Path) -> Result<Arc<ImageData>, String> {
 
     let (pixels, width, height) = match ext.as_str() {
         "svg" | "svgz" => decode_svg(path)?,
+        _ if nav::is_raw_file(path) => decode_raw(path, MAX_TEXTURE_DIM, false)?,
         _ => decode_raster(path)?,
     };
 
@@ -97,6 +105,7 @@ pub fn decode_thumbnail(path: &Path, max_dim: u32) -> Result<Arc<ImageData>, Str
     let (pixels, w, h) = match ext.as_str() {
         "jpg" | "jpeg" => decode_jpeg_thumbnail(path, max_dim)?,
         "svg" | "svgz" => decode_svg_thumbnail(path, max_dim)?,
+        _ if nav::is_raw_file(path) => decode_raw(path, max_dim, true)?,
         _ => decode_raster_thumbnail(path, max_dim)?,
     };
 
@@ -209,10 +218,104 @@ fn decode_raster_thumbnail(path: &Path, max_dim: u32) -> Result<(Vec<u8>, u32, u
     Ok((resized.into_raw(), rw, rh))
 }
 
+fn decode_raw(
+    path: &Path,
+    max_dim: u32,
+    prefer_thumbnail: bool,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let rawfile = RawSource::new(path).map_err(|e| format!("Failed to open RAW container: {e}"))?;
+    let decoder = rawler::get_decoder(&rawfile)
+        .map_err(|e| format!("Failed to initialize RAW decoder: {e}"))?;
+    let params = RawDecodeParams::default();
+
+    let to_rgba = |image: RawDynamicImage| {
+        let image = image.thumbnail(max_dim, max_dim);
+        let rgba = image.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        (rgba.into_raw(), w, h)
+    };
+
+    let mut last_optional_error: Option<String> = None;
+
+    let mut take_optional_image = |label: &str, result| match result {
+        Ok(Some(image)) => Some(to_rgba(image)),
+        Ok(None) => None,
+        Err(e) => {
+            last_optional_error = Some(format!("Failed to extract RAW {label}: {e}"));
+            None
+        }
+    };
+
+    let format_error = |primary: String, optional: Option<String>| match optional {
+        Some(optional) => format!("{primary} (after {optional})"),
+        None => primary,
+    };
+
+    let decode_raw_pixels = || -> Result<(Vec<u8>, u32, u32), String> {
+        let rawimage = decoder
+            .raw_image(&rawfile, &params, false)
+            .map_err(|e| format!("Failed to read RAW pixel data: {e}"))?;
+        let image = RawDevelop::default()
+            .develop_intermediate(&rawimage)
+            .map_err(|e| format!("Failed to develop RAW pixel data: {e}"))?
+            .to_dynamic_image()
+            .ok_or_else(|| "Failed to convert RAW output to an image".to_string())?;
+
+        Ok(to_rgba(image))
+    };
+
+    if prefer_thumbnail {
+        if let Some(image) =
+            take_optional_image("thumbnail", decoder.thumbnail_image(&rawfile, &params))
+        {
+            return Ok(image);
+        }
+
+        if let Some(image) =
+            take_optional_image("preview", decoder.preview_image(&rawfile, &params))
+        {
+            return Ok(image);
+        }
+
+        if let Some(image) =
+            take_optional_image("full image", decoder.full_image(&rawfile, &params))
+        {
+            return Ok(image);
+        }
+
+        return decode_raw_pixels().map_err(|error| format_error(error, last_optional_error));
+    }
+
+    let raw_error = match decode_raw_pixels() {
+        Ok(image) => return Ok(image),
+        Err(error) => error,
+    };
+
+    if let Some(image) = take_optional_image("full image", decoder.full_image(&rawfile, &params)) {
+        return Ok(image);
+    }
+
+    if let Some(image) = take_optional_image("preview", decoder.preview_image(&rawfile, &params)) {
+        return Ok(image);
+    }
+
+    if let Some(image) =
+        take_optional_image("thumbnail", decoder.thumbnail_image(&rawfile, &params))
+    {
+        return Ok(image);
+    }
+
+    Err(format_error(raw_error, last_optional_error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::path::PathBuf;
+
+    use rawler::dng::writer::DngWriter;
+    use rawler::dng::{DngCompression, DNG_VERSION_V1_4};
 
     fn create_test_png(dir: &Path, name: &str, w: u32, h: u32) -> PathBuf {
         let path = dir.join(name);
@@ -221,6 +324,164 @@ mod tests {
         });
         img.save(&path).unwrap();
         path
+    }
+
+    fn create_test_raw_dng(dir: &Path, name: &str, w: u32, h: u32) -> PathBuf {
+        let path = dir.join(name);
+        let pixels: Vec<u8> = (0..(w * h))
+            .flat_map(|index| {
+                let value = (index % 255) as u8;
+                [value, value.saturating_add(16), value.saturating_add(32)]
+            })
+            .collect();
+
+        let file = File::create(&path).unwrap();
+        let mut dng = DngWriter::new(file, DNG_VERSION_V1_4).unwrap();
+        {
+            let mut raw = dng.subframe_on_root(0);
+            raw.rgb_image_u8(
+                &pixels,
+                w as usize,
+                h as usize,
+                DngCompression::Uncompressed,
+                1,
+            )
+            .unwrap();
+            raw.finalize().unwrap();
+        }
+        dng.close().unwrap();
+
+        path
+    }
+
+    fn create_test_raw_dng_with_full_image(
+        dir: &Path,
+        name: &str,
+        w: u32,
+        h: u32,
+        full_rgb: [u8; 3],
+    ) -> PathBuf {
+        let path = dir.join(name);
+        let pixels: Vec<u8> = std::iter::repeat(full_rgb)
+            .take((w * h) as usize)
+            .flat_map(|rgb| rgb)
+            .collect();
+
+        let file = File::create(&path).unwrap();
+        let mut dng = DngWriter::new(file, DNG_VERSION_V1_4).unwrap();
+        {
+            let mut raw = dng.subframe_on_root(0);
+            raw.rgb_image_u8(
+                &pixels,
+                w as usize,
+                h as usize,
+                DngCompression::Uncompressed,
+                1,
+            )
+            .unwrap();
+            raw.finalize().unwrap();
+        }
+        dng.close().unwrap();
+
+        path
+    }
+
+    fn create_test_raw_dng_with_preview(
+        dir: &Path,
+        name: &str,
+        w: u32,
+        h: u32,
+        raw_rgb: [u8; 3],
+        thumbnail_rgb: [u8; 3],
+        preview_rgb: [u8; 3],
+    ) -> PathBuf {
+        let path = dir.join(name);
+        let pixels: Vec<u8> = std::iter::repeat(raw_rgb)
+            .take((w * h) as usize)
+            .flat_map(|rgb| rgb)
+            .collect();
+        let thumbnail = RawDynamicImage::ImageRgb8(image25::RgbImage::from_pixel(
+            w,
+            h,
+            image25::Rgb(thumbnail_rgb),
+        ));
+        let preview = RawDynamicImage::ImageRgb8(image25::RgbImage::from_pixel(
+            w,
+            h,
+            image25::Rgb(preview_rgb),
+        ));
+
+        let file = File::create(&path).unwrap();
+        let mut dng = DngWriter::new(file, DNG_VERSION_V1_4).unwrap();
+        {
+            let mut raw = dng.subframe_on_root(0);
+            raw.rgb_image_u8(
+                &pixels,
+                w as usize,
+                h as usize,
+                DngCompression::Uncompressed,
+                1,
+            )
+            .unwrap();
+            raw.finalize().unwrap();
+        }
+        dng.thumbnail(&thumbnail).unwrap();
+        {
+            let mut preview_frame = dng.subframe(1);
+            preview_frame.preview(&preview, 1.0).unwrap();
+            preview_frame.finalize().unwrap();
+        }
+        dng.close().unwrap();
+
+        path
+    }
+
+    fn create_test_raw_dng_with_thumbnail(
+        dir: &Path,
+        name: &str,
+        w: u32,
+        h: u32,
+        raw_rgb: [u8; 3],
+        thumbnail_rgb: [u8; 3],
+    ) -> PathBuf {
+        let path = dir.join(name);
+        let pixels: Vec<u8> = std::iter::repeat(raw_rgb)
+            .take((w * h) as usize)
+            .flat_map(|rgb| rgb)
+            .collect();
+        let thumbnail = RawDynamicImage::ImageRgb8(image25::RgbImage::from_pixel(
+            w,
+            h,
+            image25::Rgb(thumbnail_rgb),
+        ));
+
+        let file = File::create(&path).unwrap();
+        let mut dng = DngWriter::new(file, DNG_VERSION_V1_4).unwrap();
+        {
+            let mut raw = dng.subframe_on_root(0);
+            raw.rgb_image_u8(
+                &pixels,
+                w as usize,
+                h as usize,
+                DngCompression::Uncompressed,
+                1,
+            )
+            .unwrap();
+            raw.finalize().unwrap();
+        }
+        dng.thumbnail(&thumbnail).unwrap();
+        dng.close().unwrap();
+
+        path
+    }
+
+    fn assert_rgb_close(actual: &[u8], expected: [u8; 3], tolerance: u8) {
+        for (channel, expected) in actual.iter().take(3).zip(expected) {
+            assert!(
+                (*channel as i16 - expected as i16).abs() <= tolerance as i16,
+                "expected {expected} +/- {tolerance}, got {channel}"
+            );
+        }
     }
 
     fn create_test_svg(dir: &Path, name: &str) -> PathBuf {
@@ -352,5 +613,125 @@ mod tests {
         let result = decode_thumbnail(&path, 100).unwrap();
         let actual_size = std::fs::metadata(&path).unwrap().len();
         assert_eq!(result.file_size, actual_size);
+    }
+
+    #[test]
+    fn decode_raw_dng_returns_rgba_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng(dir.path(), "test.dng", 24, 12);
+
+        let result = decode_image(&path).unwrap();
+        assert!(result.width > 0);
+        assert!(result.height > 0);
+        assert!(result.width <= MAX_TEXTURE_DIM);
+        assert!(result.height <= MAX_TEXTURE_DIM);
+        assert_eq!(
+            result.pixels.len(),
+            (result.width * result.height * 4) as usize
+        );
+    }
+
+    #[test]
+    fn decode_raw_dng_thumbnail_respects_max_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng(dir.path(), "thumb.dng", 24, 12);
+
+        let result = decode_thumbnail(&path, 10).unwrap();
+        assert!(result.width <= 10);
+        assert!(result.height <= 10);
+        assert_eq!(result.width, 10);
+        assert_eq!(result.height, 5);
+    }
+
+    #[test]
+    fn decode_raw_thumbnail_prefers_embedded_preview_when_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng_with_preview(
+            dir.path(),
+            "preview-thumb.dng",
+            24,
+            12,
+            [16, 96, 32],
+            [30, 180, 220],
+            [220, 40, 60],
+        );
+
+        let result = decode_thumbnail(&path, 10).unwrap();
+        assert_eq!(result.width, 10);
+        assert_eq!(result.height, 5);
+        assert_rgb_close(&result.pixels, [30, 180, 220], 12);
+    }
+
+    #[test]
+    fn decode_raw_image_falls_back_to_embedded_image_when_raw_pixels_are_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng_with_preview(
+            dir.path(),
+            "preview-full.dng",
+            24,
+            12,
+            [16, 96, 32],
+            [30, 180, 220],
+            [220, 40, 60],
+        );
+
+        let result = decode_image(&path).unwrap();
+        assert!(result.width > 0);
+        assert!(result.height > 0);
+        assert!(result.width <= MAX_TEXTURE_DIM);
+        assert!(result.height <= MAX_TEXTURE_DIM);
+        assert_rgb_close(&result.pixels, [220, 40, 60], 12);
+    }
+
+    #[test]
+    fn decode_raw_image_falls_back_to_full_image_when_raw_pixels_are_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng_with_full_image(
+            dir.path(),
+            "full-only.dng",
+            24,
+            12,
+            [90, 140, 210],
+        );
+
+        let result = decode_image(&path).unwrap();
+        assert!(result.width > 0);
+        assert!(result.height > 0);
+        assert!(result.width <= MAX_TEXTURE_DIM);
+        assert!(result.height <= MAX_TEXTURE_DIM);
+        assert_eq!(
+            result.pixels.len(),
+            (result.width * result.height * 4) as usize
+        );
+    }
+
+    #[test]
+    fn decode_raw_image_falls_back_to_embedded_thumbnail_when_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng_with_thumbnail(
+            dir.path(),
+            "thumb-only.dng",
+            24,
+            12,
+            [16, 96, 32],
+            [30, 180, 220],
+        );
+
+        let result = decode_image(&path).unwrap();
+        assert!(result.width > 0);
+        assert!(result.height > 0);
+        assert!(result.width <= MAX_TEXTURE_DIM);
+        assert!(result.height <= MAX_TEXTURE_DIM);
+        assert_rgb_close(&result.pixels, [30, 180, 220], 12);
+    }
+
+    #[test]
+    fn decode_malformed_raw_returns_contextual_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.dng");
+        std::fs::write(&path, b"not a real raw file").unwrap();
+
+        let error = decode_image(&path).unwrap_err();
+        assert!(error.contains("RAW"), "unexpected error: {error}");
     }
 }

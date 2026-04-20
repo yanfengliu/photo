@@ -1,6 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-const IMAGE_EXTENSIONS: &[&str] = &[
+pub const RAW_IMAGE_EXTENSIONS: &[&str] = &[
+    "dng", "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "raf", "rw2", "pef", "orf", "erf",
+    "3fr", "iiq", "crw", "mrw", "srw", "dcr", "kdc", "mos", "raw",
+];
+
+const RASTER_IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "svgz", "ico", "tga", "qoi",
     "hdr", "exr",
 ];
@@ -18,20 +24,7 @@ impl DirNav {
             path
         };
 
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| is_image_file(p))
-            .collect();
-
-        files.sort_by(|a, b| {
-            natord::compare(
-                a.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-                b.file_name().and_then(|n| n.to_str()).unwrap_or(""),
-            )
-        });
+        let files = scan_images_in_directory(dir);
 
         let index = files.iter().position(|p| p == path).unwrap_or(0);
 
@@ -74,13 +67,58 @@ impl DirNav {
     pub fn count(&self) -> usize {
         self.files.len()
     }
+
+    pub fn current_path(&self) -> PathBuf {
+        self.files.get(self.index).cloned().unwrap_or_default()
+    }
+}
+
+/// Scans the given directory for image files and returns a naturally sorted list of their paths.
+pub fn scan_images_in_directory(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| is_image_file(p))
+        .collect();
+
+    files.sort_by(|a, b| {
+        natord::compare(
+            a.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            b.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+        )
+    });
+
+    files
 }
 
 pub fn is_image_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .map(|e| image_extensions().contains(&e.to_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+pub fn is_raw_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| RAW_IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+pub fn image_extensions() -> &'static [&'static str] {
+    static IMAGE_EXTENSIONS: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+    IMAGE_EXTENSIONS
+        .get_or_init(|| {
+            RASTER_IMAGE_EXTENSIONS
+                .iter()
+                .chain(RAW_IMAGE_EXTENSIONS.iter())
+                .copied()
+                .collect()
+        })
+        .as_slice()
 }
 
 #[cfg(test)]
@@ -174,5 +212,16 @@ mod tests {
 
         let nav = DirNav::new(&dir.path().join("photo.JPG"));
         assert_eq!(nav.count(), 2);
+    }
+
+    #[test]
+    fn raw_extensions_are_treated_as_images() {
+        for ext in RAW_IMAGE_EXTENSIONS {
+            let name = format!("sample.{ext}");
+            assert!(
+                is_image_file(Path::new(&name)),
+                "{name} should be treated as an image"
+            );
+        }
     }
 }
