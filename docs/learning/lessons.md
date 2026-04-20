@@ -3,6 +3,7 @@
 Keep this file short, current, and actionable.
 
 ## Active Lessons
+- 2026-04-20 - If full-quality RAW Detail decoding is expensive, choose the load plan up front, model the staged Detail-load state explicitly, show a fast embedded RAW preview first when available, keep the preview-to-full swap on the user's existing zoom/pan instead of inventing a resolution-based zoom correction, and gate save until the full image plus any required auto lens metadata are ready.
 - 2026-04-20 - Keep Rust and WGSL uniform-buffer layouts locked together with explicit padding and a focused size/offset regression test whenever shader fields change; otherwise the first render can fail only at runtime with a fatal `wgpu` validation panic.
 - 2026-04-20 - Do not build expensive GPU pre-pass resources on image open unless the current edit state actually needs them; lazy generation reduces default first-open GPU work and makes release-only render failures easier to reason about.
 - 2026-04-20 - Build save requests from the image state users are currently seeing, and fail collection actions closed when the destination collection may have disappeared before the action runs.

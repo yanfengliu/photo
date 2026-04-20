@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use image25::DynamicImage as RawDynamicImage;
-use rawler::decoders::RawDecodeParams;
+use rawler::decoders::{Decoder, RawDecodeParams};
 use rawler::imgop::develop::RawDevelop;
 use rawler::rawsource::RawSource;
 
@@ -18,6 +18,61 @@ pub struct ImageData {
 }
 
 const MAX_TEXTURE_DIM: u32 = 16384;
+
+#[derive(Clone, Copy)]
+enum EmbeddedImageKind {
+    Thumbnail,
+    Preview,
+    FullImage,
+}
+
+impl EmbeddedImageKind {
+    fn label(self) -> &'static str {
+        match self {
+            EmbeddedImageKind::Thumbnail => "thumbnail",
+            EmbeddedImageKind::Preview => "preview",
+            EmbeddedImageKind::FullImage => "full image",
+        }
+    }
+}
+
+fn raw_dynamic_image_to_rgba(image: RawDynamicImage, max_dim: u32) -> (Vec<u8>, u32, u32) {
+    let image = image.thumbnail(max_dim, max_dim);
+    let rgba = image.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    (rgba.into_raw(), w, h)
+}
+
+fn with_raw_decoder<T>(
+    path: &Path,
+    f: impl FnOnce(&RawSource, &dyn Decoder, &RawDecodeParams) -> Result<T, String>,
+) -> Result<T, String> {
+    let rawfile = RawSource::new(path).map_err(|e| format!("Failed to open RAW container: {e}"))?;
+    let decoder =
+        rawler::get_decoder(&rawfile).map_err(|e| format!("Failed to initialize RAW decoder: {e}"))?;
+    let params = RawDecodeParams::default();
+    f(&rawfile, decoder.as_ref(), &params)
+}
+
+fn decode_embedded_image_kind(
+    decoder: &dyn Decoder,
+    rawfile: &RawSource,
+    params: &RawDecodeParams,
+    max_dim: u32,
+    kind: EmbeddedImageKind,
+) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
+    let result = match kind {
+        EmbeddedImageKind::Thumbnail => decoder.thumbnail_image(rawfile, params),
+        EmbeddedImageKind::Preview => decoder.preview_image(rawfile, params),
+        EmbeddedImageKind::FullImage => decoder.full_image(rawfile, params),
+    };
+
+    match result {
+        Ok(Some(image)) => Ok(Some(raw_dynamic_image_to_rgba(image, max_dim))),
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("Failed to extract RAW {}: {e}", kind.label())),
+    }
+}
 
 pub fn decode_image(path: &Path) -> Result<Arc<ImageData>, String> {
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -40,6 +95,24 @@ pub fn decode_image(path: &Path) -> Result<Arc<ImageData>, String> {
         height,
         file_size,
     }))
+}
+
+pub fn decode_embedded_preview(path: &Path) -> Result<Option<Arc<ImageData>>, String> {
+    if !nav::is_raw_file(path) {
+        return Ok(None);
+    }
+
+    let Some((pixels, width, height)) = decode_raw_embedded_preview(path, MAX_TEXTURE_DIM)? else {
+        return Ok(None);
+    };
+
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    Ok(Some(Arc::new(ImageData {
+        pixels,
+        width,
+        height,
+        file_size,
+    })))
 }
 
 fn decode_raster(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
@@ -223,89 +296,101 @@ fn decode_raw(
     max_dim: u32,
     prefer_thumbnail: bool,
 ) -> Result<(Vec<u8>, u32, u32), String> {
-    let rawfile = RawSource::new(path).map_err(|e| format!("Failed to open RAW container: {e}"))?;
-    let decoder = rawler::get_decoder(&rawfile)
-        .map_err(|e| format!("Failed to initialize RAW decoder: {e}"))?;
-    let params = RawDecodeParams::default();
+    with_raw_decoder(path, |rawfile, decoder, params| {
+        let mut last_optional_error: Option<String> = None;
 
-    let to_rgba = |image: RawDynamicImage| {
-        let image = image.thumbnail(max_dim, max_dim);
-        let rgba = image.to_rgba8();
-        let (w, h) = rgba.dimensions();
-        (rgba.into_raw(), w, h)
-    };
+        let mut take_embedded_image = |kind| {
+            match decode_embedded_image_kind(decoder, rawfile, params, max_dim, kind) {
+                Ok(Some(image)) => Some(image),
+                Ok(None) => None,
+                Err(e) => {
+                    last_optional_error = Some(e);
+                    None
+                }
+            }
+        };
 
-    let mut last_optional_error: Option<String> = None;
+        let format_error = |primary: String, optional: Option<String>| match optional {
+            Some(optional) => format!("{primary} (after {optional})"),
+            None => primary,
+        };
 
-    let mut take_optional_image = |label: &str, result| match result {
-        Ok(Some(image)) => Some(to_rgba(image)),
-        Ok(None) => None,
-        Err(e) => {
-            last_optional_error = Some(format!("Failed to extract RAW {label}: {e}"));
-            None
-        }
-    };
+        let decode_raw_pixels = || -> Result<(Vec<u8>, u32, u32), String> {
+            let rawimage = decoder
+                .raw_image(rawfile, params, false)
+                .map_err(|e| format!("Failed to read RAW pixel data: {e}"))?;
+            let image = RawDevelop::default()
+                .develop_intermediate(&rawimage)
+                .map_err(|e| format!("Failed to develop RAW pixel data: {e}"))?
+                .to_dynamic_image()
+                .ok_or_else(|| "Failed to convert RAW output to an image".to_string())?;
 
-    let format_error = |primary: String, optional: Option<String>| match optional {
-        Some(optional) => format!("{primary} (after {optional})"),
-        None => primary,
-    };
+            Ok(raw_dynamic_image_to_rgba(image, max_dim))
+        };
 
-    let decode_raw_pixels = || -> Result<(Vec<u8>, u32, u32), String> {
-        let rawimage = decoder
-            .raw_image(&rawfile, &params, false)
-            .map_err(|e| format!("Failed to read RAW pixel data: {e}"))?;
-        let image = RawDevelop::default()
-            .develop_intermediate(&rawimage)
-            .map_err(|e| format!("Failed to develop RAW pixel data: {e}"))?
-            .to_dynamic_image()
-            .ok_or_else(|| "Failed to convert RAW output to an image".to_string())?;
+        let embedded_kinds = if prefer_thumbnail {
+            [
+                EmbeddedImageKind::Thumbnail,
+                EmbeddedImageKind::Preview,
+                EmbeddedImageKind::FullImage,
+            ]
+        } else {
+            [
+                EmbeddedImageKind::FullImage,
+                EmbeddedImageKind::Preview,
+                EmbeddedImageKind::Thumbnail,
+            ]
+        };
 
-        Ok(to_rgba(image))
-    };
+        if prefer_thumbnail {
+            for kind in embedded_kinds {
+                if let Some(image) = take_embedded_image(kind) {
+                    return Ok(image);
+                }
+            }
 
-    if prefer_thumbnail {
-        if let Some(image) =
-            take_optional_image("thumbnail", decoder.thumbnail_image(&rawfile, &params))
-        {
-            return Ok(image);
-        }
-
-        if let Some(image) =
-            take_optional_image("preview", decoder.preview_image(&rawfile, &params))
-        {
-            return Ok(image);
-        }
-
-        if let Some(image) =
-            take_optional_image("full image", decoder.full_image(&rawfile, &params))
-        {
-            return Ok(image);
+            return decode_raw_pixels().map_err(|error| format_error(error, last_optional_error));
         }
 
-        return decode_raw_pixels().map_err(|error| format_error(error, last_optional_error));
-    }
+        let raw_error = match decode_raw_pixels() {
+            Ok(image) => return Ok(image),
+            Err(error) => error,
+        };
 
-    let raw_error = match decode_raw_pixels() {
-        Ok(image) => return Ok(image),
-        Err(error) => error,
-    };
+        for kind in embedded_kinds {
+            if let Some(image) = take_embedded_image(kind) {
+                return Ok(image);
+            }
+        }
 
-    if let Some(image) = take_optional_image("full image", decoder.full_image(&rawfile, &params)) {
-        return Ok(image);
-    }
+        Err(format_error(raw_error, last_optional_error))
+    })
+}
 
-    if let Some(image) = take_optional_image("preview", decoder.preview_image(&rawfile, &params)) {
-        return Ok(image);
-    }
+fn decode_raw_embedded_preview(
+    path: &Path,
+    max_dim: u32,
+) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
+    with_raw_decoder(path, |rawfile, decoder, params| {
+        let mut last_error: Option<String> = None;
 
-    if let Some(image) =
-        take_optional_image("thumbnail", decoder.thumbnail_image(&rawfile, &params))
-    {
-        return Ok(image);
-    }
+        for kind in [
+            EmbeddedImageKind::FullImage,
+            EmbeddedImageKind::Preview,
+            EmbeddedImageKind::Thumbnail,
+        ] {
+            match decode_embedded_image_kind(decoder, rawfile, params, max_dim, kind) {
+                Ok(Some(image)) => return Ok(Some(image)),
+                Ok(None) => {}
+                Err(e) => last_error = Some(e),
+            }
+        }
 
-    Err(format_error(raw_error, last_optional_error))
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -723,6 +808,44 @@ mod tests {
         assert!(result.width <= MAX_TEXTURE_DIM);
         assert!(result.height <= MAX_TEXTURE_DIM);
         assert_rgb_close(&result.pixels, [30, 180, 220], 12);
+    }
+
+    #[test]
+    fn decode_embedded_preview_returns_none_when_raw_has_no_embedded_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng(dir.path(), "raw-only.dng", 6, 4);
+
+        let result = decode_embedded_preview(&path).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn decode_embedded_preview_falls_back_to_preview_then_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let preview_path = create_test_raw_dng_with_preview(
+            dir.path(),
+            "preview-only.dng",
+            8,
+            4,
+            [1, 2, 3],
+            [10, 20, 30],
+            [200, 150, 100],
+        );
+        let thumbnail_path = create_test_raw_dng_with_thumbnail(
+            dir.path(),
+            "thumbnail-only.dng",
+            5,
+            5,
+            [1, 2, 3],
+            [90, 45, 180],
+        );
+
+        let preview = decode_embedded_preview(&preview_path).unwrap().unwrap();
+        let thumbnail = decode_embedded_preview(&thumbnail_path).unwrap().unwrap();
+
+        assert_rgb_close(&preview.pixels, [200, 150, 100], 2);
+        assert_rgb_close(&thumbnail.pixels, [90, 45, 180], 2);
     }
 
     #[test]

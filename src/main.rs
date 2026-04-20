@@ -63,9 +63,9 @@ fn rotation_button(
             text(icon).size(16).color(TEXT_PRIMARY),
             text(step_label).size(10).color(TEXT_SECONDARY)
         ]
-            .width(Length::Fill)
-            .align_x(Alignment::Center)
-            .spacing(2),
+        .width(Length::Fill)
+        .align_x(Alignment::Center)
+        .spacing(2),
     )
     .on_press(message)
     .width(Length::Fill)
@@ -198,6 +198,83 @@ struct SaveRequest {
 // Application state
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DetailLoadStage {
+    #[default]
+    Idle,
+    Loading,
+    PreviewWhileLoading,
+    PreviewOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DetailLoadState {
+    request_id: u64,
+    stage: DetailLoadStage,
+    exif_loading: bool,
+}
+
+impl DetailLoadState {
+    fn begin_request(&mut self) -> u64 {
+        self.request_id += 1;
+        self.stage = DetailLoadStage::Loading;
+        self.exif_loading = true;
+        self.request_id
+    }
+
+    fn is_current_request(&self, request_id: u64) -> bool {
+        request_id == self.request_id
+    }
+
+    fn is_loading(&self) -> bool {
+        matches!(
+            self.stage,
+            DetailLoadStage::Loading | DetailLoadStage::PreviewWhileLoading
+        )
+    }
+
+    fn shows_embedded_preview(&self) -> bool {
+        matches!(
+            self.stage,
+            DetailLoadStage::PreviewWhileLoading | DetailLoadStage::PreviewOnly
+        )
+    }
+
+    fn on_preview_loaded(&mut self) {
+        self.stage = DetailLoadStage::PreviewWhileLoading;
+    }
+
+    fn on_full_image_loaded(&mut self) -> bool {
+        let reset_view = matches!(self.stage, DetailLoadStage::Loading);
+        self.stage = DetailLoadStage::Idle;
+        reset_view
+    }
+
+    fn on_full_image_failed(&mut self) {
+        self.stage = if self.shows_embedded_preview() {
+            DetailLoadStage::PreviewOnly
+        } else {
+            DetailLoadStage::Idle
+        };
+    }
+
+    fn finish_exif(&mut self) {
+        self.exif_loading = false;
+    }
+
+    fn load_suffix(&self) -> &'static str {
+        match self.stage {
+            DetailLoadStage::PreviewWhileLoading => "  •  Loading full resolution…",
+            DetailLoadStage::PreviewOnly => "  •  Embedded preview",
+            DetailLoadStage::Idle | DetailLoadStage::Loading => "",
+        }
+    }
+
+    fn blocks_save(&self) -> bool {
+        self.is_loading() || self.shows_embedded_preview()
+    }
+}
+
 struct App {
     tab: Tab,
     library: Vec<LibraryEntry>,
@@ -210,7 +287,7 @@ struct App {
     canvas_size_cache: Arc<Mutex<[f32; 2]>>,
     nav: Option<DirNav>,
     library_index: Option<usize>,
-    loading: bool,
+    detail_load: DetailLoadState,
     error: Option<String>,
     edit_histories: std::collections::HashMap<PathBuf, edit::UndoHistory>,
     current_image_path: Option<PathBuf>,
@@ -248,7 +325,19 @@ struct App {
 enum Message {
     OpenFile,
     FileSelected(Option<PathBuf>),
-    ImageLoaded(Result<Arc<ImageData>, String>),
+    ImagePreviewLoaded {
+        request_id: u64,
+        path: PathBuf,
+        result: Result<Option<Arc<ImageData>>, String>,
+    },
+    ImageLoaded {
+        request_id: u64,
+        result: Result<Arc<ImageData>, String>,
+    },
+    ExifLoaded {
+        request_id: u64,
+        exif: Option<lens::ExifInfo>,
+    },
     Viewer(ViewerEvent),
     Event(iced::Event),
     SwitchTab(Tab),
@@ -324,7 +413,7 @@ impl App {
             canvas_size_cache,
             nav: None,
             library_index: None,
-            loading: false,
+            detail_load: DetailLoadState::default(),
             error: None,
             edit_histories: std::collections::HashMap::new(),
             current_image_path: None,
@@ -364,19 +453,7 @@ impl App {
             if path.exists() {
                 app.tab = Tab::Detail;
                 app.nav = Some(DirNav::new(&path));
-                app.current_image_path = Some(path.clone());
-                app.loading = true;
-                let load_path = path;
-                Task::perform(
-                    async move {
-                        let result: Result<Arc<ImageData>, String> =
-                            tokio::task::spawn_blocking(move || decode::decode_image(&load_path))
-                                .await
-                                .map_err(|e| e.to_string())?;
-                        result
-                    },
-                    Message::ImageLoaded,
-                )
+                app.start_load(path)
             } else {
                 Task::none()
             }
@@ -435,41 +512,64 @@ impl App {
                 self.nav = Some(DirNav::new(&path));
                 self.library_index = None;
                 self.tab = Tab::Detail;
-                self.current_image_path = Some(path.clone());
                 self.start_load(path)
             }
             Message::FileSelected(None) => Task::none(),
 
-            Message::ImageLoaded(Ok(data)) => {
-                self.image = Some(data);
-                self.image_id += 1;
-                self.zoom = 1.0;
-                self.offset = [0.0, 0.0];
-                self.crop_mode = false;
-                self.loading = false;
-                self.error = None;
-                if let Some(path) = &self.current_image_path {
-                    self.current_exif = lens::read_exif(path);
-                    if self.lens_override_name.is_none() {
-                        self.current_lens_profile =
-                            self.current_exif.as_ref().and_then(|exif_info| {
-                                let maker = if exif_info.lens_make.is_empty() {
-                                    &exif_info.camera_make
-                                } else {
-                                    &exif_info.lens_make
-                                };
-                                self.lens_db
-                                    .find_lens(maker, &exif_info.lens_model)
-                                    .cloned()
-                            });
+            Message::ImagePreviewLoaded {
+                request_id,
+                path,
+                result,
+            } => {
+                if !self.detail_load.is_current_request(request_id) || !self.detail_load.is_loading() {
+                    return Task::none();
+                }
+
+                match result {
+                    Ok(Some(data)) => {
+                        self.apply_loaded_image(data, true);
+                        self.detail_load.on_preview_loaded();
+                    }
+                    Err(e) => {
+                        log::warn!("Embedded preview load failed for {}: {}", path.display(), e);
+                    }
+                    Ok(None) => {}
+                }
+
+                self.start_follow_up_load(path, request_id)
+            }
+            Message::ImageLoaded { request_id, result } => {
+                if !self.detail_load.is_current_request(request_id) {
+                    return Task::none();
+                }
+
+                match result {
+                    Ok(data) => {
+                        let reset_view = self.detail_load.on_full_image_loaded();
+                        self.apply_loaded_image(data, reset_view);
+                    }
+                    Err(e) => {
+                        let had_preview = self.detail_load.shows_embedded_preview();
+                        self.detail_load.on_full_image_failed();
+                        if had_preview {
+                            self.save_status = Some(
+                                "Full-resolution load failed; showing embedded preview".to_string(),
+                            );
+                        } else {
+                            self.error = Some(e);
+                        }
                     }
                 }
                 Task::none()
             }
-            Message::ImageLoaded(Err(e)) => {
-                self.image = None;
-                self.loading = false;
-                self.error = Some(e);
+            Message::ExifLoaded { request_id, exif } => {
+                if !self.detail_load.is_current_request(request_id) {
+                    return Task::none();
+                }
+
+                self.detail_load.finish_exif();
+                self.current_exif = exif;
+                self.refresh_auto_lens_profile();
                 Task::none()
             }
 
@@ -552,7 +652,6 @@ impl App {
                         self.library_index = Some(index);
                         self.tab = Tab::Detail;
                         let path = entry.path.clone();
-                        self.current_image_path = Some(path.clone());
                         return self.start_load(path);
                     }
                 }
@@ -757,16 +856,7 @@ impl App {
             Message::LensProfileSelected(name) => {
                 if name == "Auto" {
                     self.lens_override_name = None;
-                    self.current_lens_profile = self.current_exif.as_ref().and_then(|exif_info| {
-                        let maker = if exif_info.lens_make.is_empty() {
-                            &exif_info.camera_make
-                        } else {
-                            &exif_info.lens_make
-                        };
-                        self.lens_db
-                            .find_lens(maker, &exif_info.lens_model)
-                            .cloned()
-                    });
+                    self.refresh_auto_lens_profile();
                 } else if name == "None" {
                     self.lens_override_name = Some(name);
                     self.current_lens_profile = None;
@@ -916,7 +1006,6 @@ impl App {
                                 self.library_index = None;
                                 self.tab = Tab::Detail;
                                 let path = photo_path.clone();
-                                self.current_image_path = Some(path.clone());
                                 return self.start_load(path);
                             }
                         }
@@ -1099,7 +1188,6 @@ impl App {
                 self.nav = Some(DirNav::new(&path));
                 self.library_index = None;
                 self.tab = Tab::Detail;
-                self.current_image_path = Some(path.clone());
                 self.start_load(path)
             }
 
@@ -1178,7 +1266,6 @@ impl App {
                                     Self::step_wrapped_index(current, col.photos.len(), true);
                                 self.collection_nav = Some((col_idx, next));
                                 let path = col.photos[next].clone();
-                                self.current_image_path = Some(path.clone());
                                 return self.start_load(path);
                             }
                         }
@@ -1187,12 +1274,10 @@ impl App {
                             let next = Self::step_wrapped_index(current, self.library.len(), true);
                             self.library_index = Some(next);
                             let path = self.library[next].path.clone();
-                            self.current_image_path = Some(path.clone());
                             return self.start_load(path);
                         }
                     } else if let Some(nav) = &mut self.nav {
                         if let Some(p) = nav.next() {
-                            self.current_image_path = Some(p.clone());
                             return self.start_load(p);
                         }
                     }
@@ -1211,7 +1296,6 @@ impl App {
                                     Self::step_wrapped_index(current, col.photos.len(), false);
                                 self.collection_nav = Some((col_idx, previous));
                                 let path = col.photos[previous].clone();
-                                self.current_image_path = Some(path.clone());
                                 return self.start_load(path);
                             }
                         }
@@ -1221,12 +1305,10 @@ impl App {
                                 Self::step_wrapped_index(current, self.library.len(), false);
                             self.library_index = Some(previous);
                             let path = self.library[previous].path.clone();
-                            self.current_image_path = Some(path.clone());
                             return self.start_load(path);
                         }
                     } else if let Some(nav) = &mut self.nav {
                         if let Some(p) = nav.prev() {
-                            self.current_image_path = Some(p.clone());
                             return self.start_load(p);
                         }
                     }
@@ -1415,9 +1497,57 @@ impl App {
         )
     }
 
-    fn start_load(&mut self, path: PathBuf) -> Task<Message> {
-        self.loading = true;
+    fn lens_profile_for_exif(&self, exif_info: &lens::ExifInfo) -> Option<lens::LensProfile> {
+        let maker = if exif_info.lens_make.is_empty() {
+            &exif_info.camera_make
+        } else {
+            &exif_info.lens_make
+        };
+        self.lens_db
+            .find_lens(maker, &exif_info.lens_model)
+            .cloned()
+    }
+
+    fn refresh_auto_lens_profile(&mut self) {
+        if self.lens_override_name.is_none() {
+            self.current_lens_profile = self
+                .current_exif
+                .as_ref()
+                .and_then(|exif_info| self.lens_profile_for_exif(exif_info));
+        }
+    }
+
+    fn apply_loaded_image(&mut self, data: Arc<ImageData>, reset_view: bool) {
+        self.image = Some(data);
+        self.image_id += 1;
+        if reset_view {
+            self.zoom = 1.0;
+            self.offset = [0.0, 0.0];
+            self.crop_mode = false;
+        }
         self.error = None;
+    }
+
+    fn preview_load_task(path: PathBuf, request_id: u64) -> Task<Message> {
+        let task_path = path.clone();
+        let message_path = path.clone();
+        Task::perform(
+            async move {
+                let result: Result<Option<Arc<ImageData>>, String> =
+                    tokio::task::spawn_blocking(move || decode::decode_embedded_preview(&task_path))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                result
+            },
+            move |result| Message::ImagePreviewLoaded {
+                request_id,
+                path: message_path.clone(),
+                result,
+            },
+        )
+    }
+
+    fn full_image_load_task(path: PathBuf, request_id: u64) -> Task<Message> {
         Task::perform(
             async move {
                 let result: Result<Arc<ImageData>, String> =
@@ -1426,8 +1556,47 @@ impl App {
                         .map_err(|e| e.to_string())?;
                 result
             },
-            Message::ImageLoaded,
+            move |result| Message::ImageLoaded { request_id, result },
         )
+    }
+
+    fn exif_load_task(path: PathBuf, request_id: u64) -> Task<Message> {
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || lens::read_exif(&path))
+                    .await
+                    .unwrap_or(None)
+            },
+            move |exif| Message::ExifLoaded { request_id, exif },
+        )
+    }
+
+    fn start_follow_up_load(&self, path: PathBuf, request_id: u64) -> Task<Message> {
+        Task::batch([
+            Self::full_image_load_task(path.clone(), request_id),
+            Self::exif_load_task(path, request_id),
+        ])
+    }
+
+    fn start_load(&mut self, path: PathBuf) -> Task<Message> {
+        let request_id = self.detail_load.begin_request();
+        self.current_image_path = Some(path.clone());
+        self.error = None;
+        self.save_status = None;
+        self.image = None;
+        self.current_exif = None;
+        if self.lens_override_name.is_none() {
+            self.current_lens_profile = None;
+        }
+
+        if nav::is_raw_file(&path) {
+            Self::preview_load_task(path, request_id)
+        } else {
+            Task::batch([
+                Self::full_image_load_task(path.clone(), request_id),
+                Self::exif_load_task(path, request_id),
+            ])
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -1496,10 +1665,16 @@ impl App {
                     .padding([4, 12])
                     .style(toolbar_button_style);
 
-                let save_btn = button(text("Save").size(11).color(TEXT_PRIMARY))
-                    .on_press(Message::SaveEdited)
-                    .padding([5, 12])
-                    .style(toolbar_button_style);
+                let save_btn = {
+                    let btn = button(text("Save").size(11).color(TEXT_PRIMARY))
+                        .padding([5, 12])
+                        .style(toolbar_button_style);
+                    if self.current_save_request().is_some() {
+                        btn.on_press(Message::SaveEdited)
+                    } else {
+                        btn
+                    }
+                };
 
                 row![back_btn, horizontal_space(), save_btn]
                     .spacing(6)
@@ -1914,13 +2089,14 @@ impl App {
             let zoom_pct = (self.zoom * 100.0) as u32;
             let mb = img.file_size as f64 / 1_048_576.0;
             let (display_w, display_h) = self.current_display_dimensions(img);
+            let load_suffix = self.detail_load.load_suffix();
 
             format!(
-                "  {name}  \u{2022}  {w}\u{00d7}{h}  \u{2022}  {mb:.1} MB  \u{2022}  {zoom_pct}%{pos}",
+                "  {name}  \u{2022}  {w}\u{00d7}{h}  \u{2022}  {mb:.1} MB  \u{2022}  {zoom_pct}%{pos}{load_suffix}",
                 w = display_w,
                 h = display_h,
             )
-        } else if self.loading {
+        } else if self.detail_load.is_loading() {
             "  Loading\u{2026}".to_string()
         } else if let Some(e) = &self.error {
             format!("  Error: {e}")
@@ -1956,12 +2132,18 @@ impl App {
     }
 
     fn current_save_request(&self) -> Option<SaveRequest> {
-        if self.loading {
+        if self.detail_load.blocks_save() {
             return None;
         }
         let path = self.current_image_path.clone()?;
         let image = self.image.clone()?;
         let state = self.visible_edit_state();
+        if state.lens_correction
+            && self.lens_override_name.is_none()
+            && self.detail_load.exif_loading
+        {
+            return None;
+        }
         let vig = self.current_lens_vignetting(state.lens_correction);
         Some(SaveRequest {
             path,
@@ -2148,17 +2330,23 @@ impl App {
             .padding([4, 8])
             .style(toolbar_button_style);
 
-        let lens_info: Element<'_, Message> = if let Some(profile) = &self.current_lens_profile {
+        let lens_info: Element<'_, Message> =
+            if self.detail_load.exif_loading && self.lens_override_name.is_none() {
+                text("Loading lens metadata…")
+                    .size(10)
+                    .color(TEXT_DIM)
+                    .into()
+            } else if let Some(profile) = &self.current_lens_profile {
             text(format!("{} {}", profile.maker, profile.model))
                 .size(10)
                 .color(TEXT_SECONDARY)
                 .into()
-        } else {
-            text("No lens profile matched")
-                .size(10)
-                .color(TEXT_DIM)
-                .into()
-        };
+            } else {
+                text("No lens profile matched")
+                    .size(10)
+                    .color(TEXT_DIM)
+                    .into()
+            };
 
         // Lens profile dropdown
         let mut lens_options: Vec<String> = vec!["Auto".to_string(), "None".to_string()];
@@ -2755,6 +2943,15 @@ mod tests {
         }));
         app.current_image_path = Some(path.to_path_buf());
         app
+    }
+
+    fn test_image(width: u32, height: u32) -> Arc<decode::ImageData> {
+        Arc::new(decode::ImageData {
+            pixels: vec![0, 0, 0, 255],
+            width,
+            height,
+            file_size: 2_000_000,
+        })
     }
 
     fn library_app_with_entries(count: usize) -> App {
@@ -3778,7 +3975,8 @@ mod tests {
         let column_ref: Element<'static, Message> =
             column(vec![text("x").into(), text("y").into()]).into();
         let container_ref: Element<'static, Message> = container(text("x")).into();
-        let row_ref: Element<'static, Message> = row(vec![button(text("x")).into(), button(text("y")).into()]).into();
+        let row_ref: Element<'static, Message> =
+            row(vec![button(text("x")).into(), button(text("y")).into()]).into();
         let button_tag = Tree::new(&button_ref).tag;
         let text_tag = Tree::new(&text_ref).tag;
         let column_tag = Tree::new(&column_ref).tag;
@@ -3812,12 +4010,7 @@ mod tests {
             Message::RotateCounterclockwise,
         );
         let counterclockwise_tree = Tree::new(&counterclockwise_button);
-        assert_rotation_button_tree(
-            &counterclockwise_tree,
-            button_tag,
-            column_tag,
-            text_tag,
-        );
+        assert_rotation_button_tree(&counterclockwise_tree, button_tag, column_tag, text_tag);
 
         let clockwise_button = rotation_button(
             ROTATE_CLOCKWISE_ICON,
@@ -3825,12 +4018,7 @@ mod tests {
             Message::RotateClockwise,
         );
         let clockwise_tree = Tree::new(&clockwise_button);
-        assert_rotation_button_tree(
-            &clockwise_tree,
-            button_tag,
-            column_tag,
-            text_tag,
-        );
+        assert_rotation_button_tree(&clockwise_tree, button_tag, column_tag, text_tag);
 
         fn contains_rotation_section(
             tree: &Tree,
@@ -3848,16 +4036,9 @@ mod tests {
                     .children
                     .iter()
                     .all(|child| child.tag == button_tag))
-                || tree
-                    .children
-                    .iter()
-                    .any(|child| contains_rotation_section(
-                        child,
-                        column_tag,
-                        container_tag,
-                        row_tag,
-                        button_tag,
-                    ))
+                || tree.children.iter().any(|child| {
+                    contains_rotation_section(child, column_tag, container_tag, row_tag, button_tag)
+                })
         }
 
         let app = detail_app_with_image(Path::new("frame.png"), 200, 100);
@@ -3889,11 +4070,162 @@ mod tests {
     fn save_edited_is_a_no_op_while_loading() {
         let path = PathBuf::from("frame.png");
         let mut app = detail_app_with_image(&path, 2, 1);
-        app.loading = true;
+        app.detail_load.stage = DetailLoadStage::Loading;
 
         let _ = app.update(Message::SaveEdited);
 
         assert!(app.save_status.is_none());
+    }
+
+    #[test]
+    fn raw_preview_load_keeps_image_visible_while_full_resolution_finishes() {
+        let path = PathBuf::from("frame.arw");
+        let mut app = detail_app_with_image(&path, 200, 100);
+        app.update_canvas_size([400.0, 200.0]);
+
+        let _ = app.start_load(path);
+        let request_id = app.detail_load.request_id;
+
+        let _ = app.update(Message::ImagePreviewLoaded {
+            request_id,
+            path: PathBuf::from("frame.arw"),
+            result: Ok(Some(test_image(400, 200))),
+        });
+        assert!(app.detail_load.is_loading());
+        assert!(app.detail_load.shows_embedded_preview());
+        assert!(app.current_save_request().is_none());
+
+        app.zoom = 2.5;
+        app.offset = [18.0, -9.0];
+        let preview_rect = viewer::compute_image_rect(
+            400.0,
+            200.0,
+            400.0,
+            200.0,
+            app.zoom,
+            app.offset,
+            app.current_rotation(),
+        );
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id,
+            result: Ok(test_image(6000, 3000)),
+        });
+
+        assert!(!app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert_eq!(app.image.as_ref().unwrap().width, 6000);
+        assert_eq!(app.image.as_ref().unwrap().height, 3000);
+        assert_eq!(app.zoom, 2.5);
+        assert_eq!(app.offset, [18.0, -9.0]);
+        let full_rect = viewer::compute_image_rect(
+            6000.0,
+            3000.0,
+            400.0,
+            200.0,
+            app.zoom,
+            app.offset,
+            app.current_rotation(),
+        );
+        assert_eq!(preview_rect, full_rect);
+        assert!(app.current_save_request().is_some());
+    }
+
+    #[test]
+    fn raw_without_embedded_preview_still_finishes_full_resolution_load() {
+        let path = PathBuf::from("frame.arw");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let _ = app.start_load(path);
+        let request_id = app.detail_load.request_id;
+
+        let _ = app.update(Message::ImagePreviewLoaded {
+            request_id,
+            path: PathBuf::from("frame.arw"),
+            result: Ok(None),
+        });
+
+        assert!(app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert_eq!(app.status_bar_text(), "  Loading…");
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id,
+            result: Ok(test_image(6000, 4000)),
+        });
+
+        assert!(!app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert_eq!(app.image.as_ref().unwrap().width, 6000);
+        assert!(app.current_save_request().is_some());
+    }
+
+    #[test]
+    fn preview_only_mode_keeps_embedded_preview_visible_when_full_load_fails() {
+        let path = PathBuf::from("frame.arw");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let _ = app.start_load(path);
+        let request_id = app.detail_load.request_id;
+
+        let _ = app.update(Message::ImagePreviewLoaded {
+            request_id,
+            path: PathBuf::from("frame.arw"),
+            result: Ok(Some(test_image(400, 200))),
+        });
+        let _ = app.update(Message::ImageLoaded {
+            request_id,
+            result: Err("full decode failed".to_string()),
+        });
+
+        assert!(!app.detail_load.is_loading());
+        assert!(app.detail_load.shows_embedded_preview());
+        assert_eq!(app.image.as_ref().unwrap().width, 400);
+        assert_eq!(
+            app.save_status.as_deref(),
+            Some("Full-resolution load failed; showing embedded preview")
+        );
+        assert!(app.status_bar_text().contains("Embedded preview"));
+        assert!(app.current_save_request().is_none());
+    }
+
+    #[test]
+    fn stale_preview_and_full_results_are_ignored_after_a_newer_load_starts() {
+        let first_path = PathBuf::from("first.arw");
+        let second_path = PathBuf::from("second.arw");
+        let mut app = detail_app_with_image(&first_path, 200, 100);
+
+        let _ = app.start_load(first_path);
+        let first_request_id = app.detail_load.request_id;
+
+        let _ = app.start_load(second_path.clone());
+        let second_request_id = app.detail_load.request_id;
+
+        let _ = app.update(Message::ImagePreviewLoaded {
+            request_id: first_request_id,
+            path: PathBuf::from("first.arw"),
+            result: Ok(Some(test_image(320, 160))),
+        });
+        let _ = app.update(Message::ImageLoaded {
+            request_id: first_request_id,
+            result: Ok(test_image(640, 320)),
+        });
+
+        assert!(app.image.is_none());
+        assert!(app.detail_load.is_loading());
+        assert_eq!(
+            app.current_image_path.as_deref(),
+            Some(second_path.as_path())
+        );
+
+        let _ = app.update(Message::ImagePreviewLoaded {
+            request_id: second_request_id,
+            path: PathBuf::from("second.arw"),
+            result: Ok(Some(test_image(500, 250))),
+        });
+
+        assert_eq!(app.image.as_ref().unwrap().width, 500);
+        assert!(app.detail_load.shows_embedded_preview());
     }
 
     #[test]
@@ -3904,6 +4236,85 @@ mod tests {
         let _ = app.update(Message::SaveEdited);
 
         assert_eq!(app.save_status.as_deref(), Some("Saving..."));
+    }
+
+    #[test]
+    fn current_save_request_waits_for_auto_lens_metadata_when_needed() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 2, 1);
+
+        let mut history = edit::UndoHistory::new();
+        history.current.lens_correction = true;
+        history.commit();
+        app.edit_histories.insert(path, history);
+        app.detail_load.exif_loading = true;
+        app.current_exif = None;
+        app.lens_override_name = None;
+
+        assert!(app.current_save_request().is_none());
+    }
+
+    #[test]
+    fn current_save_request_allows_auto_lens_when_exif_finishes_without_metadata() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 2, 1);
+
+        let mut history = edit::UndoHistory::new();
+        history.current.lens_correction = true;
+        history.commit();
+        app.edit_histories.insert(path.clone(), history);
+        app.current_image_path = Some(path);
+        app.detail_load.exif_loading = true;
+        app.lens_override_name = None;
+
+        assert!(app.current_save_request().is_none());
+
+        let _ = app.update(Message::ExifLoaded {
+            request_id: app.detail_load.request_id,
+            exif: None,
+        });
+
+        assert!(!app.detail_load.exif_loading);
+        assert!(app.current_save_request().is_some());
+    }
+
+    #[test]
+    fn stale_exif_results_are_ignored_after_a_newer_load_starts() {
+        let first_path = PathBuf::from("first.arw");
+        let second_path = PathBuf::from("second.arw");
+        let mut app = detail_app_with_image(&first_path, 2, 1);
+
+        let _ = app.start_load(first_path);
+        let first_request_id = app.detail_load.request_id;
+
+        let _ = app.start_load(second_path.clone());
+        let second_request_id = app.detail_load.request_id;
+
+        let mut history = edit::UndoHistory::new();
+        history.current.lens_correction = true;
+        history.commit();
+        app.edit_histories.insert(second_path.clone(), history);
+        app.current_image_path = Some(second_path);
+        app.image = Some(test_image(2, 1));
+        app.detail_load.stage = DetailLoadStage::Idle;
+        app.detail_load.exif_loading = true;
+        app.lens_override_name = None;
+
+        let _ = app.update(Message::ExifLoaded {
+            request_id: first_request_id,
+            exif: Some(lens::ExifInfo::default()),
+        });
+
+        assert!(app.current_exif.is_none());
+        assert!(app.current_save_request().is_none());
+
+        let _ = app.update(Message::ExifLoaded {
+            request_id: second_request_id,
+            exif: None,
+        });
+
+        assert!(!app.detail_load.exif_loading);
+        assert!(app.current_save_request().is_some());
     }
 
     #[test]
@@ -3927,6 +4338,7 @@ mod tests {
         history.current.lens_correction = true;
         history.commit();
         app.edit_histories.insert(path, history);
+        app.current_exif = Some(lens::ExifInfo::default());
 
         let request = app.current_save_request().unwrap();
         assert_eq!(request.vig, [0.1, 0.2, 0.3]);

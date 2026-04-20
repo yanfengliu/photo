@@ -12,3 +12,4 @@
 | Async decoding | `tokio::task::spawn_blocking` | Keeps the UI responsive; iced's tokio feature provides the runtime | 2026-03-29 |
 | GPU texture limit | Runtime query in `prepare()`, downscale if exceeded | The limit varies by GPU and cannot be hardcoded | 2026-03-30 |
 | RAW decoding | `rawler` with thumbnail/preview-first library decoding and raw-pixel-first detail decoding with embedded-image fallback | Adds broad camera RAW support while keeping the viewer and thumbnail contracts unchanged | 2026-04-19 |
+| RAW detail loading | Supersede the earlier raw-pixel-first Detail choice with staged RAW Detail loading: embedded preview first when available, then background full-resolution upgrade plus async EXIF | Improves time-to-first-image in Detail without giving up the higher-quality final RAW path | 2026-04-20 |

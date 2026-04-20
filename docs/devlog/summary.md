@@ -5,13 +5,15 @@
 - GPU shader pipeline supports 12 real-time adjustments and Lensfun-based lens corrections.
 - Library browsing, Detail viewing, collection management, common camera RAW viewing, and Detail-view crop plus icon-based rotation controls are in place.
 - Detail save-as-copy now follows the visible crop state, becomes a safe no-op while a new image is still loading, and collection actions fail closed if their destination collection disappears.
+- RAW Detail view now uses an explicit staged-load state: non-RAW files still go straight to full decode, RAW files show an embedded preview first when available, only the still-current request launches the heavier follow-up work, and EXIF/lens autodetection no longer sits on the UI completion path.
 - Detail-view shader uniforms now explicitly match the WGSL layout, so first renders no longer hit the crop-uniform `wgpu` validation panic that previously killed the app on open.
 - Detail view now skips the blur pre-pass on first open unless clarity or dehaze is active, which reduces unnecessary GPU work in the release click-to-open path.
 - Library and collection thumbnail grids now reflow from the latest window width, including after resizing while Detail view is open.
 - Docs now use the directory layout expected by AGENTS.md.
-- 195 unit tests currently pass.
+- 204 unit tests currently pass.
 
 ## Recent milestones
+- Detail-load speedup: add embedded RAW preview decoding, choose RAW vs. non-RAW load plans up front, show RAW previews immediately in Detail while only the still-current request launches the heavier follow-up work, centralize that staged lifecycle in `DetailLoadState`, move EXIF loading off the UI completion path, keep the preview-to-full upgrade on the user's existing zoom/pan, and guard save until the full image plus required auto lens metadata are ready.
 - Detail-open crash fix: reproduce the first-render `wgpu` panic locally, trace it to a Rust/WGSL uniform-buffer layout mismatch around crop fields, add an explicit layout regression test, and restore both debug and release builds so they stay alive when opened directly into `test.jpg` and persisted `.ARW` files.
 - Release click crash follow-up: make the viewer blur pre-pass lazy so first-open Detail renders only build blur resources when clarity or dehaze is active, reset blur bindings back to the placeholder on image changes, add lazy-blur state-transition coverage, and record the remaining manual-release-verification risk in the debugging note.
 - Crash hardening follow-up: add/toggle photo-in-collection actions now verify their destination collection still exists, save-as-copy uses the visible crop state, loading-time save attempts no-op safely, and regression coverage locks down save status plus collection/save edge cases.

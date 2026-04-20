@@ -5,15 +5,15 @@
 
 ## System Overview
 
-Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats. Edits are non-destructive with undo/redo and save-as-copy.
+Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats, and RAW Detail view uses a staged load that shows an embedded preview first when available before upgrading to the fully developed image. Edits are non-destructive with undo/redo and save-as-copy.
 
 ## Component Map
 
-- `src/main.rs`: iced application state, message loop, tab routing, keyboard/event handling, Detail-view crop/rotation tool wiring, view composition, and collection sidebar wiring.
+- `src/main.rs`: iced application state, message loop, tab routing, keyboard/event handling, `DetailLoadState`-based staged Detail-load orchestration, crop/rotation tool wiring, view composition, and collection sidebar wiring.
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
 - `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
 - `assets/shaders/blur.wgsl`: 9-tap separable Gaussian blur pre-pass for clarity/dehaze.
-- `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, raw-pixel-first detail decoding, embedded-image fallback for detail loads, and thumbnail loading.
+- `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, and thumbnail loading.
 - `src/edit.rs`: edit state, undo/redo, CPU-side adjustment math, and save pipeline.
 - `src/lens.rs`: Lensfun XML parsing, EXIF reading, and lens profile lookup.
 - `src/collection.rs`: collection CRUD and JSON persistence.
@@ -23,12 +23,14 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 
 ### Image Loading
 1. The user triggers image load from the CLI, file dialog, drag-and-drop, library click, or arrow keys.
-2. `App::start_load()` spawns `tokio::task::spawn_blocking` and calls `decode::decode_image()`.
-3. `decode_image()` reads the file, decodes raster or SVG content directly, or develops RAW pixel data first and only falls back to embedded full images or previews if the higher-quality path is unavailable.
-4. `Message::ImageLoaded` arrives in `App::update()`.
-5. The app stores the image, updates `image_id`, and passes the data into the viewer on the next render.
-6. `prepare()` checks the runtime GPU texture limit and uploads the texture.
-7. `render()` draws the textured quad with zoom/pan uniforms.
+2. `App::start_load()` advances `DetailLoadState`, clears stale image/metadata state, and chooses the load plan up front.
+3. Raster and SVG files go straight to blocking `decode::decode_image()` plus async EXIF loading.
+4. RAW files start with `decode::decode_embedded_preview()` so Detail can show an embedded image quickly; only the still-current request then launches the heavier full-resolution decode plus EXIF follow-up work.
+5. `Message::ImagePreviewLoaded`, `Message::ImageLoaded`, and `Message::ExifLoaded` arrive in `App::update()`, each tagged with the active request id so stale async completions are ignored.
+6. The app can display the embedded RAW preview immediately, then replace it in place with the full developed image without resetting the user's zoom/pan state.
+7. EXIF and lens-profile lookup complete asynchronously and can update the viewer after the image is already visible.
+8. `prepare()` checks the runtime GPU texture limit and uploads the current image texture.
+9. `render()` draws the textured quad with zoom/pan uniforms.
 
 ### Thumbnail Loading
 1. The user picks a folder or files with `rfd`.
@@ -72,7 +74,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 | GPU | wgpu | 0.19 | Via iced re-export |
 | Shader | WGSL | - | `assets/shaders/image.wgsl` |
 | Image decode | image crate | 0.24 | Raster decoding |
-| RAW decode | rawler | 0.7 | Embedded preview extraction with raw-pixel development fallback |
+| RAW decode | rawler | 0.7 | Embedded preview extraction plus staged full-resolution RAW development |
 | JPEG thumbnails | jpeg-decoder | 0.3 | Fast thumbnail downscaling |
 | SVG | resvg | 0.44 | CPU rasterization before upload |
 | File dialogs | rfd | 0.15 | Async file/folder pickers |
@@ -102,6 +104,7 @@ flowchart TD
 
     subgraph Decode[decode.rs]
         Full[Full-res decode]
+        Preview[Embedded preview decode]
         Thumb[Thumbnail decode]
     end
 
@@ -139,19 +142,23 @@ flowchart TD
     App -->|tab routing| Detail
     App -->|scan files| DirNav
     Library -->|load thumbnails| Thumb
-    Detail -->|load full image| Full
+    Detail -->|load preview/full image| Preview
+    Detail -->|load preview/full image| Full
     Library -->|click to open| Detail
     Thumb --> ImageCrate
     Thumb --> Resvg
+    Preview --> ImageCrate
     Full --> ImageCrate
     Full --> Resvg
     Thumb -.-> Tokio
+    Preview -.-> Tokio
     Full -.-> Tokio
     App -->|slider values| EditState
     EditState -->|uniforms| Prepare
     App -->|image load| EXIF
     EXIF -->|lens match| LensDB
     LensDB -->|coefficients| Prepare
+    Preview -->|RGBA pixels| Prepare
     Full -->|RGBA pixels| Prepare
     Prepare -->|GPU texture| Blur
     Blur -->|blur texture| Render
