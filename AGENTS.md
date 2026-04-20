@@ -19,12 +19,12 @@
 - CRITICAL: Each round of review should be done by a new subagent in series. This means 5 steps * 2 reviewers = 10 reviews. Reviews might take a long time depending on the amount of changes you made. Be patient and wait for the result.
 - After addressing review comments, ask the reviewer to verify that you have successfully done so. This is basically a second round of full review.
 - Example commands to use Codex for code review:
-  - `codex exec "Review my code for bugs and security issues"`
-  - `codex exec review uncommitted`
-  - `codex exec review base-branch main`
-  - `codex exec review commit <sha>`
+  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral "Review my code for bugs and security issues but do not make any edits"`
+  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral review uncommitted`
+  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral review base-branch main`
+  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral review commit <sha>`
 - Example commands to use Gemini for code review:
-  - `git diff [branch] | gemini -p "@src [instruction]" --model gemini-3-pro --thinking high` (Use the @ symbol within the prompt to include directory context for the best reasoning results).
+  - `git diff [branch] | gemini -p "@src Review my code for bugs and security issues but do not make any edits" --model gemini-3-pro --thinking high` (Use the @ symbol within the prompt to include directory context for the best reasoning results).
 - The reviewers should check `docs/learning/lessons.md`.
 - Prefer small functions and files, reusable utilities, composition over inheritance, and dead-code cleanup.
 - Do not change game mechanics or behavior unless explicitly asked.
@@ -73,8 +73,6 @@
   - notes
 - Keep `docs/devlog/summary.md` current after updating the detailed log. Always remove outdated info. Compact when it grows larger than 50 lines.
 - If a subagent handles summary work, it should extract facts only and avoid interpretation.
-
-
 
 ## Debugging
 
