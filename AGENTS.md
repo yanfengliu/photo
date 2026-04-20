@@ -20,9 +20,6 @@
 - After addressing review comments, ask the reviewer to verify that you have successfully done so. This is basically a second round of full review.
 - Example commands to use Codex for code review:
   - `codex exec --sandbox read-only --ask-for-approval never --ephemeral "Review my code for bugs and security issues but do not make any edits"`
-  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral review uncommitted`
-  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral review base-branch main`
-  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral review commit <sha>`
 - Example commands to use Gemini for code review:
   - `git diff [branch] | gemini -p "@src Review my code for bugs and security issues but do not make any edits" --model gemini-3-pro --thinking high` (Use the @ symbol within the prompt to include directory context for the best reasoning results).
 - The reviewers should check `docs/learning/lessons.md`.
