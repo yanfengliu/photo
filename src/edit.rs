@@ -4,6 +4,91 @@
 
 // -- Data model --
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QuarterTurns(u8);
+
+impl QuarterTurns {
+    pub fn new(turns: u8) -> Self {
+        Self(turns % 4)
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self.0
+    }
+
+    pub fn clockwise(self) -> Self {
+        Self::new(self.0.wrapping_add(1))
+    }
+
+    pub fn counterclockwise(self) -> Self {
+        Self::new(self.0.wrapping_add(3))
+    }
+
+    pub fn swaps_aspect(self) -> bool {
+        matches!(self.0, 1 | 3)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CropRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl CropRect {
+    pub const FULL: Self = Self {
+        left: 0.0,
+        top: 0.0,
+        right: 1.0,
+        bottom: 1.0,
+    };
+
+    pub fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
+        let left = left.clamp(0.0, 1.0);
+        let top = top.clamp(0.0, 1.0);
+        let right = right.clamp(0.0, 1.0);
+        let bottom = bottom.clamp(0.0, 1.0);
+        Self {
+            left: left.min(right),
+            top: top.min(bottom),
+            right: left.max(right),
+            bottom: top.max(bottom),
+        }
+    }
+
+    pub fn width(self) -> f32 {
+        (self.right - self.left).clamp(0.0, 1.0)
+    }
+
+    pub fn height(self) -> f32 {
+        (self.bottom - self.top).clamp(0.0, 1.0)
+    }
+
+    pub fn snap_to_pixels(self, width: u32, height: u32) -> Self {
+        if width == 0 || height == 0 {
+            return Self::FULL;
+        }
+
+        let (x0, y0, x1, y1) = self.pixel_bounds(width, height);
+        Self {
+            left: x0 as f32 / width as f32,
+            top: y0 as f32 / height as f32,
+            right: x1 as f32 / width as f32,
+            bottom: y1 as f32 / height as f32,
+        }
+    }
+
+    pub fn pixel_bounds(self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let x0 = (self.left * width as f32).floor() as u32;
+        let y0 = (self.top * height as f32).floor() as u32;
+        let x1 = (self.right * width as f32).ceil() as u32;
+        let y1 = (self.bottom * height as f32).ceil() as u32;
+        (x0.min(width), y0.min(height), x1.min(width), y1.min(height))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EditState {
     pub exposure: f32,    // -3.0 to +3.0 (stops)
@@ -19,6 +104,8 @@ pub struct EditState {
     pub clarity: f32,     // -50 to +50
     pub dehaze: f32,      // -50 to +50
     pub lens_correction: bool,
+    pub rotation: QuarterTurns,
+    pub crop: Option<CropRect>,
 }
 
 impl EditState {
@@ -27,6 +114,30 @@ impl EditState {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
+
+    pub fn rotate_clockwise(&mut self) {
+        self.rotation = self.rotation.clockwise();
+    }
+
+    pub fn rotate_counterclockwise(&mut self) {
+        self.rotation = self.rotation.counterclockwise();
+    }
+}
+
+pub fn rotated_dimensions<T: Copy>(width: T, height: T, rotation: QuarterTurns) -> (T, T) {
+    if rotation.swaps_aspect() {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+
+pub fn cropped_dimensions(width: u32, height: u32, crop: Option<CropRect>) -> (u32, u32) {
+    let Some(crop) = crop else {
+        return (width, height);
+    };
+    let (x0, y0, x1, y1) = crop.pixel_bounds(width, height);
+    (x1.saturating_sub(x0).max(1), y1.saturating_sub(y0).max(1))
 }
 
 #[derive(Debug)]
@@ -106,6 +217,7 @@ impl UndoHistory {
     }
 }
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 // -- sRGB <-> linear conversion --
@@ -414,6 +526,37 @@ pub fn apply_all(
     [r, g, b, srgb[3]]
 }
 
+fn rotate_rgba_pixels(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    rotation: QuarterTurns,
+) -> (Cow<'_, [u8]>, u32, u32) {
+    let (out_w, out_h) = rotated_dimensions(width, height, rotation);
+    let rotation = rotation.as_u8();
+    if rotation == 0 {
+        return (Cow::Borrowed(pixels), width, height);
+    }
+
+    let mut rotated = vec![0u8; (out_w * out_h * 4) as usize];
+
+    for y in 0..height {
+        for x in 0..width {
+            let src_idx = ((y * width + x) * 4) as usize;
+            let (dst_x, dst_y) = match rotation {
+                1 => (height - 1 - y, x),
+                2 => (width - 1 - x, height - 1 - y),
+                3 => (y, width - 1 - x),
+                _ => unreachable!(),
+            };
+            let dst_idx = ((dst_y * out_w + dst_x) * 4) as usize;
+            rotated[dst_idx..dst_idx + 4].copy_from_slice(&pixels[src_idx..src_idx + 4]);
+        }
+    }
+
+    (Cow::Owned(rotated), out_w, out_h)
+}
+
 // -- Save --
 
 /// Apply all edits and save to disk. Returns the output path on success.
@@ -427,23 +570,33 @@ pub fn save_edited_image(
     vig: [f32; 3],
 ) -> Result<PathBuf, String> {
     let temp_matrix = temperature_tint_matrix(state.temperature, state.tint);
-    let blur = generate_cpu_blur(pixels, width, height);
+    let (rotated_pixels, rotated_width, rotated_height) =
+        rotate_rgba_pixels(pixels, width, height, state.rotation);
+    let rotated_pixels = rotated_pixels.as_ref();
+    let blur = generate_cpu_blur(rotated_pixels, rotated_width, rotated_height);
+    let crop = state
+        .crop
+        .map(|crop| crop.snap_to_pixels(rotated_width, rotated_height))
+        .unwrap_or(CropRect::FULL);
+    let (x0, y0, x1, y1) = crop.pixel_bounds(rotated_width, rotated_height);
+    let cropped_width = x1.saturating_sub(x0).max(1);
+    let cropped_height = y1.saturating_sub(y0).max(1);
 
-    let mut output = Vec::with_capacity(pixels.len());
-    let w_f = width as f32;
-    let h_f = height as f32;
-    for y in 0..height {
-        for x in 0..width {
-            let idx = ((y * width + x) * 4) as usize;
+    let mut output = Vec::with_capacity((cropped_width * cropped_height * 4) as usize);
+    let w_f = rotated_width as f32;
+    let h_f = rotated_height as f32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let idx = ((y * rotated_width + x) * 4) as usize;
             let srgb = [
-                pixels[idx],
-                pixels[idx + 1],
-                pixels[idx + 2],
-                pixels[idx + 3],
+                rotated_pixels[idx],
+                rotated_pixels[idx + 1],
+                rotated_pixels[idx + 2],
+                rotated_pixels[idx + 3],
             ];
-            let bx = (x / 4).min((width / 4).saturating_sub(1));
-            let by = (y / 4).min((height / 4).saturating_sub(1));
-            let bw = (width / 4).max(1);
+            let bx = (x / 4).min((rotated_width / 4).saturating_sub(1));
+            let by = (y / 4).min((rotated_height / 4).saturating_sub(1));
+            let bw = (rotated_width / 4).max(1);
             let bidx = ((by * bw + bx) * 3) as usize;
             let blurred = [blur[bidx], blur[bidx + 1], blur[bidx + 2]];
             let uv = [(x as f32 + 0.5) / w_f, (y as f32 + 0.5) / h_f];
@@ -453,7 +606,7 @@ pub fn save_edited_image(
     }
 
     let save_path = edited_save_path(original_path);
-    let img = image::RgbaImage::from_raw(width, height, output)
+    let img = image::RgbaImage::from_raw(cropped_width, cropped_height, output)
         .ok_or_else(|| "Failed to create output image".to_string())?;
     img.save(&save_path)
         .map_err(|e| format!("Failed to save: {e}"))?;
@@ -529,6 +682,7 @@ mod tests {
         assert_eq!(s.clarity, 0.0);
         assert_eq!(s.dehaze, 0.0);
         assert!(!s.lens_correction);
+        assert_eq!(s.rotation, QuarterTurns::default());
         assert!(s.is_default());
     }
 
@@ -539,6 +693,60 @@ mod tests {
             ..EditState::default()
         };
         assert!(!s.is_default());
+    }
+
+    #[test]
+    fn rotation_wraps_and_is_part_of_default_state() {
+        let mut state = EditState::default();
+        assert_eq!(state.rotation, QuarterTurns::default());
+        assert!(state.is_default());
+
+        state.rotate_clockwise();
+        assert_eq!(state.rotation, QuarterTurns::new(1));
+        assert!(!state.is_default());
+
+        state.rotate_counterclockwise();
+        assert_eq!(state.rotation, QuarterTurns::default());
+        assert!(state.is_default());
+    }
+
+    #[test]
+    fn crop_rect_snaps_to_pixel_grid_for_preview_and_save_parity() {
+        let crop = CropRect::new(0.25, 0.25, 0.75, 0.75);
+
+        assert_eq!(crop.snap_to_pixels(2, 2), CropRect::FULL);
+        assert_eq!(
+            CropRect::new(0.5, 0.0, 1.0, 1.0).snap_to_pixels(2, 2),
+            CropRect::new(0.5, 0.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn rotated_dimensions_swap_axes_for_odd_quarter_turns() {
+        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(0)), (200, 100));
+        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(1)), (100, 200));
+        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(2)), (200, 100));
+        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(3)), (100, 200));
+        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(5)), (100, 200));
+    }
+
+    #[test]
+    fn undo_redo_preserves_crop_changes() {
+        let mut h = UndoHistory::new();
+
+        h.current.crop = Some(CropRect::new(0.25, 0.0, 0.75, 1.0));
+        h.commit();
+        assert_eq!(h.current.crop, Some(CropRect::new(0.25, 0.0, 0.75, 1.0)));
+
+        h.current.crop = Some(CropRect::new(0.0, 0.0, 0.5, 0.5));
+        h.commit();
+        assert_eq!(h.current.crop, Some(CropRect::new(0.0, 0.0, 0.5, 0.5)));
+
+        assert!(h.undo());
+        assert_eq!(h.current.crop, Some(CropRect::new(0.25, 0.0, 0.75, 1.0)));
+
+        assert!(h.redo());
+        assert_eq!(h.current.crop, Some(CropRect::new(0.0, 0.0, 0.5, 0.5)));
     }
 
     #[test]
@@ -566,6 +774,25 @@ mod tests {
         // Redo — should restore contrast=50
         assert!(h.redo());
         assert_eq!(h.current.contrast, 50.0);
+    }
+
+    #[test]
+    fn undo_redo_preserves_rotation_changes() {
+        let mut h = UndoHistory::new();
+
+        h.current.rotate_clockwise();
+        h.commit();
+        assert_eq!(h.current.rotation, QuarterTurns::new(1));
+
+        h.current.rotate_clockwise();
+        h.commit();
+        assert_eq!(h.current.rotation, QuarterTurns::new(2));
+
+        assert!(h.undo());
+        assert_eq!(h.current.rotation, QuarterTurns::new(1));
+
+        assert!(h.redo());
+        assert_eq!(h.current.rotation, QuarterTurns::new(2));
     }
 
     #[test]
@@ -603,16 +830,19 @@ mod tests {
         let mut h = UndoHistory::new();
         h.current.exposure = 2.5;
         h.current.contrast = -30.0;
+        h.current.rotate_clockwise();
         h.commit();
 
         h.reset_all();
         assert!(h.current.is_default());
+        assert_eq!(h.current.rotation, QuarterTurns::default());
         assert!(h.can_undo());
 
         // Undo the reset
         h.undo();
         assert_eq!(h.current.exposure, 2.5);
         assert_eq!(h.current.contrast, -30.0);
+        assert_eq!(h.current.rotation, QuarterTurns::new(1));
     }
 
     // -- CPU adjustment math tests --
@@ -879,6 +1109,115 @@ mod tests {
 
         assert_eq!(out.extension().and_then(|ext| ext.to_str()), Some("png"));
         assert!(out.exists());
+    }
+
+    #[test]
+    fn save_edited_image_rotates_clockwise_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let mut state = EditState::default();
+        state.rotate_clockwise();
+
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 1);
+        assert_eq!(img.height(), 2);
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(0, 1).0, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn save_edited_image_rotates_counterclockwise_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let mut state = EditState::default();
+        state.rotate_counterclockwise();
+
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 1);
+        assert_eq!(img.height(), 2);
+        assert_eq!(img.get_pixel(0, 0).0, [0, 255, 0, 255]);
+        assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn save_edited_image_rotates_half_turn_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let mut state = EditState::default();
+        state.rotate_clockwise();
+        state.rotate_clockwise();
+
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 1);
+        assert_eq!(img.get_pixel(0, 0).0, [0, 255, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn save_edited_image_crops_freeform_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+        let state = EditState {
+            crop: Some(CropRect::new(0.5, 0.0, 1.0, 1.0)),
+            ..EditState::default()
+        };
+
+        let out = save_edited_image(&original, &pixels, 2, 2, &state, [0.0; 3]).unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 1);
+        assert_eq!(img.height(), 2);
+        assert_eq!(img.get_pixel(0, 0).0, [0, 255, 0, 255]);
+        assert_eq!(img.get_pixel(0, 1).0, [255, 255, 0, 255]);
+    }
+
+    #[test]
+    fn save_edited_image_crops_after_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let mut state = EditState::default();
+        state.rotate_clockwise();
+        state.crop = Some(CropRect::new(0.0, 0.0, 1.0, 0.5));
+
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 1);
+        assert_eq!(img.height(), 1);
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn save_edited_image_normalizes_wraparound_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let state = EditState {
+            rotation: QuarterTurns::new(4),
+            ..EditState::default()
+        };
+
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 1);
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 255, 0, 255]);
     }
 
     #[test]

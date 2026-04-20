@@ -32,8 +32,11 @@ struct Uniforms {
     lens_tca_r_scale: f32,
     lens_tca_b_scale: f32,
     image_aspect: f32,         // width / height for lens correction coords
-    _pad2: f32,
-    _pad3: f32,
+    rotation: f32,             // clockwise quarter turns, 0..3
+    crop_preview: vec4<f32>,
+    crop_overlay: vec4<f32>,
+    crop_overlay_enabled: f32,
+    _pad2: vec3<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -122,6 +125,30 @@ fn apply_vignette(px: vec3<f32>, uv: vec2<f32>, center: vec2<f32>) -> vec3<f32> 
     return px * correction;
 }
 
+fn rotate_uv(uv: vec2<f32>) -> vec2<f32> {
+    // Must stay aligned with the clockwise quarter-turn convention used by
+    // edit.rs for saved-image rotation and viewer layout.
+    let rot = i32(round(u.rotation)) % 4;
+    if rot == 1 {
+        return vec2(uv.y, 1.0 - uv.x);
+    }
+    if rot == 2 {
+        return vec2(1.0 - uv.x, 1.0 - uv.y);
+    }
+    if rot == 3 {
+        return vec2(1.0 - uv.y, uv.x);
+    }
+    return uv;
+}
+
+fn viewport_uv_to_tex_uv(viewport_uv: vec2<f32>, rect: vec4<f32>) -> vec2<f32> {
+    let display_uv = (viewport_uv - rect.xy) / (rect.zw - rect.xy);
+    // `crop_preview` is the committed crop used for actual sampling; the
+    // separate overlay path only dims the preview while the user is redefining it.
+    let preview_uv = mix(u.crop_preview.xy, u.crop_preview.zw, display_uv);
+    return rotate_uv(preview_uv);
+}
+
 // -- Fragment shader --
 
 @fragment
@@ -134,8 +161,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return u.bg_color;
     }
 
+    let display_uv = (uv - rect.xy) / (rect.zw - rect.xy);
+
     // Map viewport UV to texture UV
-    var tex_uv = (uv - rect.xy) / (rect.zw - rect.xy);
+    var tex_uv = viewport_uv_to_tex_uv(uv, rect);
     let center = vec2(0.5, 0.5);
 
     // Lens distortion (UV remapping)
@@ -226,7 +255,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Clarity (local contrast from blur texture)
     if u.clarity != 0.0 {
-        let blur_uv = (uv - rect.xy) / (rect.zw - rect.xy);
+        let blur_uv = viewport_uv_to_tex_uv(uv, rect);
         let blur_sample = textureSample(blur_tex, img_sampler, blur_uv).rgb;
         let blur_lin = vec3(srgb_to_linear(blur_sample.r), srgb_to_linear(blur_sample.g), srgb_to_linear(blur_sample.b));
         let lc = lum(px);
@@ -236,7 +265,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Dehaze
     if u.dehaze != 0.0 {
-        let blur_uv2 = (uv - rect.xy) / (rect.zw - rect.xy);
+        let blur_uv2 = viewport_uv_to_tex_uv(uv, rect);
         let blur_s = textureSample(blur_tex, img_sampler, blur_uv2).rgb;
         let blur_l = vec3(srgb_to_linear(blur_s.r), srgb_to_linear(blur_s.g), srgb_to_linear(blur_s.b));
         let atmos = max(max(blur_l.r, blur_l.g), max(blur_l.b, 0.01));
@@ -251,6 +280,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Clamp and gamma encode
     px = clamp(px, vec3(0.0), vec3(1.0));
     let srgb = vec3(linear_to_srgb(px.r), linear_to_srgb(px.g), linear_to_srgb(px.b));
+    var out_rgb = srgb;
+
+    if u.crop_overlay_enabled > 0.5 {
+        let inside = display_uv.x >= u.crop_overlay.x
+            && display_uv.x <= u.crop_overlay.z
+            && display_uv.y >= u.crop_overlay.y
+            && display_uv.y <= u.crop_overlay.w;
+        if !inside {
+            out_rgb = mix(out_rgb, vec3(0.05), 0.6);
+        }
+    }
 
     // Alpha compositing (checkerboard for transparency)
     if alpha < 1.0 {
@@ -259,8 +299,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let checker = select(0.18, 0.25,
             (floor(pos.x / checker_size) + floor(pos.y / checker_size)) % 2.0 < 1.0);
         let bg = vec3(checker);
-        return vec4(mix(bg, srgb, alpha), 1.0);
+        return vec4(mix(bg, out_rgb, alpha), 1.0);
     }
 
-    return vec4(srgb, 1.0);
+    return vec4(out_rgb, 1.0);
 }

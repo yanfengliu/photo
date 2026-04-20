@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 use iced::event;
@@ -7,7 +7,7 @@ use iced::widget::shader;
 use iced::widget::shader::wgpu;
 use iced::{Point, Rectangle};
 
-use crate::decode::ImageData;
+use crate::{decode::ImageData, edit};
 
 // ---------------------------------------------------------------------------
 // Messages emitted by the viewer shader widget
@@ -27,6 +27,9 @@ pub enum ViewerEvent {
     DoubleClick {
         canvas_size: [f32; 2],
     },
+    CropCommitted {
+        rect: edit::CropRect,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -38,6 +41,10 @@ pub struct ImageCanvas {
     pub image_id: u64,
     pub zoom: f32,
     pub offset: [f32; 2],
+    pub canvas_size_cache: Arc<Mutex<[f32; 2]>>,
+    pub crop: Option<edit::CropRect>,
+    pub crop_mode: bool,
+    pub crop_aspect_ratio: Option<f32>,
     pub adjustments: AdjustmentUniforms,
 }
 
@@ -61,6 +68,9 @@ pub struct AdjustmentUniforms {
     pub lens_tca_r: f32,
     pub lens_tca_b: f32,
     pub image_aspect: f32,
+    pub rotation: crate::edit::QuarterTurns,
+    pub crop_preview: edit::CropRect,
+    pub crop_overlay: Option<edit::CropRect>,
 }
 
 impl Default for AdjustmentUniforms {
@@ -83,6 +93,9 @@ impl Default for AdjustmentUniforms {
             lens_tca_r: 0.0,
             lens_tca_b: 0.0,
             image_aspect: 0.0,
+            rotation: crate::edit::QuarterTurns::default(),
+            crop_preview: edit::CropRect::FULL,
+            crop_overlay: None,
         }
     }
 }
@@ -95,6 +108,9 @@ impl Default for AdjustmentUniforms {
 pub struct ViewerState {
     dragging: bool,
     last_pos: Option<Point>,
+    crop_dragging: bool,
+    crop_start: Option<Point>,
+    crop_current: Option<Point>,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,8 +163,11 @@ struct Uniforms {
     lens_tca_r_scale: f32,
     lens_tca_b_scale: f32,
     image_aspect: f32,
-    _pad2: f32,
-    _pad3: f32,
+    rotation: f32,
+    crop_preview: [f32; 4],
+    crop_overlay: [f32; 4],
+    crop_overlay_enabled: f32,
+    _pad2: [f32; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +205,9 @@ pub fn compute_image_rect(
     viewport_h: f32,
     zoom: f32,
     offset: [f32; 2],
+    rotation: crate::edit::QuarterTurns,
 ) -> [f32; 4] {
+    let (image_w, image_h) = edit::rotated_dimensions(image_w, image_h, rotation);
     let fit = (viewport_w / image_w).min(viewport_h / image_h);
     let scale = fit * zoom;
     let dw = image_w * scale;
@@ -201,6 +222,102 @@ pub fn compute_image_rect(
     ]
 }
 
+fn cropped_image_size(
+    image_w: f32,
+    image_h: f32,
+    rotation: edit::QuarterTurns,
+    crop: Option<edit::CropRect>,
+) -> (f32, f32) {
+    let (rotated_w, rotated_h) = edit::rotated_dimensions(image_w, image_h, rotation);
+    let crop = crop.unwrap_or(edit::CropRect::FULL);
+    (rotated_w * crop.width(), rotated_h * crop.height())
+}
+
+fn image_rect_from_normalized(bounds: Rectangle, rect: [f32; 4]) -> Rectangle {
+    Rectangle {
+        x: bounds.x + rect[0] * bounds.width,
+        y: bounds.y + rect[1] * bounds.height,
+        width: (rect[2] - rect[0]) * bounds.width,
+        height: (rect[3] - rect[1]) * bounds.height,
+    }
+}
+
+fn clamp_point_to_rect(point: Point, rect: Rectangle) -> Point {
+    Point::new(
+        point.x.clamp(rect.x, rect.x + rect.width),
+        point.y.clamp(rect.y, rect.y + rect.height),
+    )
+}
+
+pub fn crop_rect_from_drag(
+    start: Point,
+    current: Point,
+    image_rect: Rectangle,
+    aspect_ratio: Option<f32>,
+) -> Option<edit::CropRect> {
+    if image_rect.width <= 0.0 || image_rect.height <= 0.0 {
+        return None;
+    }
+
+    let start = clamp_point_to_rect(start, image_rect);
+    let current = clamp_point_to_rect(current, image_rect);
+    let mut dx = current.x - start.x;
+    let mut dy = current.y - start.y;
+
+    if let Some(aspect_ratio) = aspect_ratio.filter(|ratio| *ratio > 0.0) {
+        let max_w = if dx >= 0.0 {
+            image_rect.x + image_rect.width - start.x
+        } else {
+            start.x - image_rect.x
+        };
+        let max_h = if dy >= 0.0 {
+            image_rect.y + image_rect.height - start.y
+        } else {
+            start.y - image_rect.y
+        };
+        let height = dy
+            .abs()
+            .min(dx.abs() / aspect_ratio)
+            .min(max_h)
+            .min(max_w / aspect_ratio);
+        let width = height * aspect_ratio;
+        dx = width * dx.signum();
+        dy = height * dy.signum();
+    }
+
+    if dx.abs() < f32::EPSILON || dy.abs() < f32::EPSILON {
+        return None;
+    }
+
+    let left = (start.x + dx.min(0.0) - image_rect.x) / image_rect.width;
+    let top = (start.y + dy.min(0.0) - image_rect.y) / image_rect.height;
+    let right = (start.x + dx.max(0.0) - image_rect.x) / image_rect.width;
+    let bottom = (start.y + dy.max(0.0) - image_rect.y) / image_rect.height;
+
+    Some(edit::CropRect::new(left, top, right, bottom))
+}
+
+pub fn image_can_pan(
+    image_w: f32,
+    image_h: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+    zoom: f32,
+    offset: [f32; 2],
+    rotation: edit::QuarterTurns,
+) -> bool {
+    const PIXEL_EPSILON: f32 = 0.5;
+    if offset[0].abs() > PIXEL_EPSILON || offset[1].abs() > PIXEL_EPSILON {
+        return true;
+    }
+
+    let (image_w, image_h) = edit::rotated_dimensions(image_w, image_h, rotation);
+    let fit = (viewport_w / image_w).min(viewport_h / image_h);
+    let scale = fit * zoom;
+
+    image_w * scale > viewport_w + PIXEL_EPSILON || image_h * scale > viewport_h + PIXEL_EPSILON
+}
+
 /// Compute new zoom and offset for a zoom-at-cursor operation.
 /// Returns (new_zoom, new_offset).
 pub fn zoom_at_cursor(
@@ -212,11 +329,12 @@ pub fn zoom_at_cursor(
 ) -> (f32, [f32; 2]) {
     let dx = cursor[0] - canvas_size[0] / 2.0;
     let dy = cursor[1] - canvas_size[1] / 2.0;
-    let new_offset = [
-        dx * (1.0 - factor) + offset[0] * factor,
-        dy * (1.0 - factor) + offset[1] * factor,
-    ];
     let new_zoom = (zoom * factor).clamp(0.01, 200.0);
+    let effective_factor = new_zoom / zoom;
+    let new_offset = [
+        dx * (1.0 - effective_factor) + offset[0] * effective_factor,
+        dy * (1.0 - effective_factor) + offset[1] * effective_factor,
+    ];
     (new_zoom, new_offset)
 }
 
@@ -225,16 +343,69 @@ pub fn zoom_at_cursor(
 // ---------------------------------------------------------------------------
 
 impl ImageCanvas {
+    fn snap_crop_to_image_pixels(&self, crop: edit::CropRect) -> edit::CropRect {
+        let Some(img) = &self.image else {
+            return crop;
+        };
+        let (width, height) =
+            edit::rotated_dimensions(img.width, img.height, self.adjustments.rotation);
+        crop.snap_to_pixels(width, height)
+    }
+
+    fn preview_crop(&self) -> Option<edit::CropRect> {
+        if self.crop_mode {
+            None
+        } else {
+            self.crop.map(|crop| self.snap_crop_to_image_pixels(crop))
+        }
+    }
+
+    fn image_bounds(&self, bounds: Rectangle) -> Rectangle {
+        image_rect_from_normalized(bounds, self.compute_rect(bounds))
+    }
+
+    fn overlay_crop(
+        &self,
+        state: &ViewerState,
+        bounds: Rectangle,
+    ) -> Option<edit::CropRect> {
+        if !self.crop_mode {
+            return None;
+        }
+
+        let image_rect = self.image_bounds(bounds);
+        if state.crop_dragging {
+            let start = state.crop_start?;
+            let current = state.crop_current.unwrap_or(start);
+            crop_rect_from_drag(start, current, image_rect, self.crop_aspect_ratio)
+                .map(|crop| self.snap_crop_to_image_pixels(crop))
+        } else {
+            self.crop.map(|crop| self.snap_crop_to_image_pixels(crop))
+        }
+    }
+
     fn compute_rect(&self, bounds: Rectangle) -> [f32; 4] {
+        if let Ok(mut canvas_size) = self.canvas_size_cache.lock() {
+            *canvas_size = [bounds.width, bounds.height];
+        }
         match &self.image {
-            Some(img) => compute_image_rect(
-                img.width as f32,
-                img.height as f32,
-                bounds.width,
-                bounds.height,
-                self.zoom,
-                self.offset,
-            ),
+            Some(img) => {
+                let (display_w, display_h) = cropped_image_size(
+                    img.width as f32,
+                    img.height as f32,
+                    self.adjustments.rotation,
+                    self.preview_crop(),
+                );
+                compute_image_rect(
+                    display_w,
+                    display_h,
+                    bounds.width,
+                    bounds.height,
+                    self.zoom,
+                    self.offset,
+                    edit::QuarterTurns::default(),
+                )
+            }
             None => [0.0; 4],
         }
     }
@@ -273,17 +444,46 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
                 }
             }
 
-            // ---- Pan: drag start ----
             shader::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if cursor.is_over(bounds) {
+                if self.crop_mode {
+                    let image_rect = self.image_bounds(bounds);
+                    if let Some(pos) = cursor.position_in(bounds) {
+                        let abs_pos = Point::new(pos.x + bounds.x, pos.y + bounds.y);
+                        let clamped = clamp_point_to_rect(abs_pos, image_rect);
+                        if (clamped.x - abs_pos.x).abs() < f32::EPSILON
+                            && (clamped.y - abs_pos.y).abs() < f32::EPSILON
+                        {
+                            state.crop_dragging = true;
+                            state.crop_start = Some(abs_pos);
+                            state.crop_current = Some(abs_pos);
+                            return (event::Status::Captured, None);
+                        }
+                    }
+                } else if cursor.is_over(bounds) && self.can_pan(bounds) {
                     state.dragging = true;
                     state.last_pos = cursor.position_in(bounds);
                     return (event::Status::Captured, None);
                 }
             }
 
-            // ---- Pan: drag end ----
             shader::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if state.crop_dragging {
+                    state.crop_dragging = false;
+                    let image_rect = self.image_bounds(bounds);
+                    let start = state.crop_start.take();
+                    let current = state.crop_current.take();
+                    if let (Some(start), Some(current)) = (start, current) {
+                        if let Some(rect) =
+                            crop_rect_from_drag(start, current, image_rect, self.crop_aspect_ratio)
+                        {
+                            return (
+                                event::Status::Captured,
+                                Some(ViewerEvent::CropCommitted { rect }),
+                            );
+                        }
+                    }
+                    return (event::Status::Captured, None);
+                }
                 if state.dragging {
                     state.dragging = false;
                     state.last_pos = None;
@@ -291,9 +491,14 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
                 }
             }
 
-            // ---- Pan: drag move ----
             shader::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                if state.dragging {
+                if state.crop_dragging {
+                    if let Some(pos) = cursor.position_in(bounds) {
+                        let abs_pos = Point::new(pos.x + bounds.x, pos.y + bounds.y);
+                        state.crop_current = Some(abs_pos);
+                        return (event::Status::Captured, None);
+                    }
+                } else if state.dragging {
                     if let Some(pos) = cursor.position_in(bounds) {
                         if let Some(last) = state.last_pos {
                             let dx = pos.x - last.x;
@@ -305,6 +510,8 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
                             );
                         }
                         state.last_pos = Some(pos);
+                    } else {
+                        state.last_pos = None;
                     }
                 }
             }
@@ -316,7 +523,7 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
 
     fn draw(
         &self,
-        _state: &ViewerState,
+        state: &ViewerState,
         _cursor: mouse::Cursor,
         bounds: Rectangle,
     ) -> ImagePrimitive {
@@ -324,7 +531,11 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
             image: self.image.clone(),
             image_id: self.image_id,
             rect: self.compute_rect(bounds),
-            adjustments: self.adjustments,
+            adjustments: AdjustmentUniforms {
+                crop_preview: self.preview_crop().unwrap_or(edit::CropRect::FULL),
+                crop_overlay: self.overlay_crop(state, bounds),
+                ..self.adjustments
+            },
         }
     }
 
@@ -334,13 +545,32 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if state.dragging {
+        if state.crop_dragging || (self.crop_mode && cursor.is_over(bounds)) {
+            mouse::Interaction::Crosshair
+        } else if state.dragging {
             mouse::Interaction::Grabbing
-        } else if self.image.is_some() && cursor.is_over(bounds) {
+        } else if self.can_pan(bounds) && cursor.is_over(bounds) {
             mouse::Interaction::Grab
         } else {
             mouse::Interaction::default()
         }
+    }
+}
+
+impl ImageCanvas {
+    fn can_pan(&self, bounds: Rectangle) -> bool {
+        let Some(img) = &self.image else {
+            return false;
+        };
+        image_can_pan(
+            img.width as f32,
+            img.height as f32,
+            bounds.width,
+            bounds.height,
+            self.zoom,
+            self.offset,
+            self.adjustments.rotation,
+        )
     }
 }
 
@@ -909,8 +1139,19 @@ impl shader::Primitive for ImagePrimitive {
                 adj.lens_tca_b
             },
             image_aspect: adj.image_aspect,
-            _pad2: 0.0,
-            _pad3: 0.0,
+            rotation: adj.rotation.as_u8() as f32,
+            crop_preview: [
+                adj.crop_preview.left,
+                adj.crop_preview.top,
+                adj.crop_preview.right,
+                adj.crop_preview.bottom,
+            ],
+            crop_overlay: adj
+                .crop_overlay
+                .map(|rect| [rect.left, rect.top, rect.right, rect.bottom])
+                .unwrap_or([0.0, 0.0, 1.0, 1.0]),
+            crop_overlay_enabled: if adj.crop_overlay.is_some() { 1.0 } else { 0.0 },
+            _pad2: [0.0; 3],
         };
         queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
@@ -962,6 +1203,34 @@ impl shader::Primitive for ImagePrimitive {
 mod tests {
     use super::*;
 
+    fn test_canvas(image_w: u32, image_h: u32, zoom: f32) -> ImageCanvas {
+        ImageCanvas {
+            image: Some(Arc::new(ImageData {
+                pixels: vec![0, 0, 0, 255],
+                width: image_w,
+                height: image_h,
+                file_size: 1,
+            })),
+            image_id: 1,
+            zoom,
+            offset: [0.0, 0.0],
+            canvas_size_cache: Arc::new(Mutex::new([400.0, 200.0])),
+            crop: None,
+            crop_mode: false,
+            crop_aspect_ratio: None,
+            adjustments: AdjustmentUniforms::default(),
+        }
+    }
+
+    fn test_bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        }
+    }
+
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-3 // f32 precision across chained multiply/add
     }
@@ -970,19 +1239,44 @@ mod tests {
         a.iter().zip(b.iter()).all(|(x, y)| approx_eq(*x, *y))
     }
 
+    fn rotated_texture_uv(uv: [f32; 2], rotation: edit::QuarterTurns) -> [f32; 2] {
+        match rotation.as_u8() {
+            1 => [uv[1], 1.0 - uv[0]],
+            2 => [1.0 - uv[0], 1.0 - uv[1]],
+            3 => [1.0 - uv[1], uv[0]],
+            _ => uv,
+        }
+    }
+
     // -- compute_image_rect tests --
 
     #[test]
     fn fit_square_image_in_square_viewport() {
         // 100x100 image in 100x100 viewport, zoom=1 → fills exactly
-        let r = compute_image_rect(100.0, 100.0, 100.0, 100.0, 1.0, [0.0, 0.0]);
+        let r = compute_image_rect(
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            1.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        );
         assert!(rect_approx_eq(r, [0.0, 0.0, 1.0, 1.0]));
     }
 
     #[test]
     fn fit_wide_image_in_square_viewport() {
         // 200x100 image in 200x200 viewport → letterboxed (bars top/bottom)
-        let r = compute_image_rect(200.0, 100.0, 200.0, 200.0, 1.0, [0.0, 0.0]);
+        let r = compute_image_rect(
+            200.0,
+            100.0,
+            200.0,
+            200.0,
+            1.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        );
         // fit = min(200/200, 200/100) = 1.0; dw=200, dh=100
         // left=0, top=50 → UV: [0, 0.25, 1.0, 0.75]
         assert!(rect_approx_eq(r, [0.0, 0.25, 1.0, 0.75]));
@@ -991,7 +1285,15 @@ mod tests {
     #[test]
     fn fit_tall_image_in_square_viewport() {
         // 100x200 image in 200x200 viewport → pillarboxed (bars left/right)
-        let r = compute_image_rect(100.0, 200.0, 200.0, 200.0, 1.0, [0.0, 0.0]);
+        let r = compute_image_rect(
+            100.0,
+            200.0,
+            200.0,
+            200.0,
+            1.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        );
         // fit = min(200/100, 200/200) = 1.0; dw=100, dh=200
         // left=50, top=0 → UV: [0.25, 0, 0.75, 1.0]
         assert!(rect_approx_eq(r, [0.25, 0.0, 0.75, 1.0]));
@@ -999,7 +1301,15 @@ mod tests {
 
     #[test]
     fn zoom_2x_doubles_image_rect() {
-        let r = compute_image_rect(100.0, 100.0, 100.0, 100.0, 2.0, [0.0, 0.0]);
+        let r = compute_image_rect(
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            2.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        );
         // scale = 1.0 * 2.0 = 2.0; dw=200, dh=200; centered at (50,50)
         // left = (100-200)/2 = -50; top = -50
         // UV: [-0.5, -0.5, 1.5, 1.5]
@@ -1009,15 +1319,374 @@ mod tests {
     #[test]
     fn pan_offset_shifts_rect() {
         // 100x100 in 100x100, zoom=1, pan right 20px
-        let r = compute_image_rect(100.0, 100.0, 100.0, 100.0, 1.0, [20.0, 0.0]);
+        let r = compute_image_rect(
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            1.0,
+            [20.0, 0.0],
+            edit::QuarterTurns::default(),
+        );
         // left = 0 + 20 = 20, UV: [0.2, 0, 1.2, 1.0]
         assert!(rect_approx_eq(r, [0.2, 0.0, 1.2, 1.0]));
     }
 
     #[test]
+    fn image_can_pan_only_when_the_image_exceeds_the_viewport() {
+        assert!(!image_can_pan(
+            200.0,
+            100.0,
+            400.0,
+            200.0,
+            1.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        ));
+
+        assert!(image_can_pan(
+            200.0,
+            100.0,
+            400.0,
+            200.0,
+            1.1,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        ));
+
+        assert!(!image_can_pan(
+            200.0,
+            100.0,
+            200.0,
+            400.0,
+            1.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::new(1),
+        ));
+
+        assert!(image_can_pan(
+            200.0,
+            100.0,
+            200.0,
+            400.0,
+            1.1,
+            [0.0, 0.0],
+            edit::QuarterTurns::new(1),
+        ));
+    }
+
+    #[test]
+    fn image_can_pan_when_fit_to_view_is_offset_off_center() {
+        assert!(image_can_pan(
+            200.0,
+            100.0,
+            400.0,
+            200.0,
+            1.0,
+            [18.0, -9.0],
+            edit::QuarterTurns::default(),
+        ));
+    }
+
+    #[test]
+    fn image_can_pan_for_small_visible_offsets_and_zoom_overflow() {
+        assert!(image_can_pan(
+            200.0,
+            100.0,
+            400.0,
+            200.0,
+            1.0,
+            [1.0, 0.0],
+            edit::QuarterTurns::default(),
+        ));
+
+        assert!(image_can_pan(
+            200.0,
+            100.0,
+            400.0,
+            200.0,
+            1.003,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        ));
+    }
+
+    #[test]
+    fn crop_rect_from_drag_allows_freeform_selection() {
+        let image_rect = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        };
+
+        let rect = crop_rect_from_drag(
+            Point::new(50.0, 50.0),
+            Point::new(180.0, 140.0),
+            image_rect,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(rect, edit::CropRect::new(0.25, 0.25, 0.9, 0.7));
+    }
+
+    #[test]
+    fn crop_rect_from_drag_constrains_fixed_aspect_inside_the_image() {
+        let image_rect = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        };
+
+        let rect = crop_rect_from_drag(
+            Point::new(50.0, 50.0),
+            Point::new(180.0, 140.0),
+            image_rect,
+            Some(1.0),
+        )
+        .unwrap();
+
+        assert_eq!(rect, edit::CropRect::new(0.25, 0.25, 0.7, 0.7));
+    }
+
+    #[test]
+    fn draw_frames_rotated_cropped_preview_using_visible_dimensions() {
+        let mut canvas = test_canvas(200, 100, 1.0);
+        canvas.crop = Some(edit::CropRect::new(0.0, 0.0, 1.0, 0.5));
+        canvas.adjustments.rotation = edit::QuarterTurns::new(1);
+
+        let primitive = <ImageCanvas as shader::Program<ViewerEvent>>::draw(
+            &canvas,
+            &ViewerState::default(),
+            mouse::Cursor::Unavailable,
+            test_bounds(),
+        );
+
+        assert!(rect_approx_eq(primitive.rect, [0.25, 0.0, 0.75, 1.0]));
+        assert_eq!(
+            primitive.adjustments.crop_preview,
+            edit::CropRect::new(0.0, 0.0, 1.0, 0.5)
+        );
+    }
+
+    #[test]
+    fn mouse_interaction_is_default_when_image_fits_the_viewport() {
+        let canvas = test_canvas(200, 100, 1.0);
+        let state = ViewerState::default();
+        let bounds = test_bounds();
+        let cursor = mouse::Cursor::Available(Point::new(50.0, 50.0));
+
+        let interaction = <ImageCanvas as shader::Program<ViewerEvent>>::mouse_interaction(
+            &canvas, &state, bounds, cursor,
+        );
+
+        assert!(matches!(interaction, mouse::Interaction::None));
+    }
+
+    #[test]
+    fn mouse_interaction_shows_grab_when_image_can_pan() {
+        let canvas = test_canvas(200, 100, 1.2);
+        let state = ViewerState::default();
+        let bounds = test_bounds();
+        let cursor = mouse::Cursor::Available(Point::new(50.0, 50.0));
+
+        let interaction = <ImageCanvas as shader::Program<ViewerEvent>>::mouse_interaction(
+            &canvas, &state, bounds, cursor,
+        );
+
+        assert!(matches!(interaction, mouse::Interaction::Grab));
+    }
+
+    #[test]
+    fn mouse_interaction_stays_grabbable_for_an_off_center_fit_image() {
+        let mut canvas = test_canvas(200, 100, 1.0);
+        canvas.offset = [18.0, -9.0];
+        let state = ViewerState::default();
+        let bounds = test_bounds();
+        let cursor = mouse::Cursor::Available(Point::new(50.0, 50.0));
+
+        let interaction = <ImageCanvas as shader::Program<ViewerEvent>>::mouse_interaction(
+            &canvas, &state, bounds, cursor,
+        );
+
+        assert!(matches!(interaction, mouse::Interaction::Grab));
+    }
+
+    #[test]
+    fn update_does_not_start_dragging_for_a_fit_image() {
+        let canvas = test_canvas(200, 100, 1.0);
+        let mut state = ViewerState::default();
+        let bounds = test_bounds();
+        let mut messages = Vec::new();
+        let mut shell = iced::advanced::Shell::new(&mut messages);
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(50.0, 50.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Ignored));
+        assert!(event.is_none());
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(70.0, 60.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(70.0, 60.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Ignored));
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn update_emits_pan_events_for_zoomed_or_off_center_images() {
+        let mut canvas = test_canvas(200, 100, 1.2);
+        let mut state = ViewerState::default();
+        let bounds = test_bounds();
+        let mut messages = Vec::new();
+        let mut shell = iced::advanced::Shell::new(&mut messages);
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(50.0, 50.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Captured));
+        assert!(event.is_none());
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(70.0, 60.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(70.0, 60.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Captured));
+        assert!(matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 20.0) && approx_eq(delta[1], 10.0)));
+
+        canvas.zoom = 1.0;
+        canvas.offset = [18.0, -9.0];
+        let mut state = ViewerState::default();
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(50.0, 50.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Captured));
+        assert!(event.is_none());
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(70.0, 60.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(70.0, 60.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Captured));
+        assert!(matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 20.0) && approx_eq(delta[1], 10.0)));
+    }
+
+    #[test]
+    fn update_reentry_after_leaving_bounds_does_not_jump() {
+        let canvas = test_canvas(200, 100, 1.2);
+        let mut state = ViewerState::default();
+        let bounds = test_bounds();
+        let mut messages = Vec::new();
+        let mut shell = iced::advanced::Shell::new(&mut messages);
+
+        let _ = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(50.0, 50.0)),
+            &mut shell,
+        );
+
+        let _ = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(60.0, 60.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(60.0, 60.0)),
+            &mut shell,
+        );
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(500.0, 500.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(500.0, 500.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Ignored));
+        assert!(event.is_none());
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(70.0, 70.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(70.0, 70.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Ignored));
+        assert!(event.is_none());
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(80.0, 90.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(80.0, 90.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Captured));
+        assert!(matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 10.0) && approx_eq(delta[1], 20.0)));
+    }
+
+    #[test]
     fn image_rect_centered_for_different_aspect_ratios() {
         // 1920x1080 image in 800x600 viewport
-        let r = compute_image_rect(1920.0, 1080.0, 800.0, 600.0, 1.0, [0.0, 0.0]);
+        let r = compute_image_rect(
+            1920.0,
+            1080.0,
+            800.0,
+            600.0,
+            1.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::default(),
+        );
         // fit = min(800/1920, 600/1080) = min(0.4167, 0.5556) = 0.4167
         // dw = 1920 * 0.4167 = 800, dh = 1080 * 0.4167 = 450
         // left = 0, top = (600-450)/2 = 75
@@ -1027,6 +1696,44 @@ mod tests {
         assert!(r[1] > 0.0); // top margin
         assert!(r[3] < 1.0); // bottom margin
         assert!(approx_eq(r[1], 1.0 - r[3])); // symmetric
+    }
+
+    #[test]
+    fn rotated_image_rect_swaps_aspect_for_quarter_turns() {
+        let r = compute_image_rect(
+            200.0,
+            100.0,
+            200.0,
+            200.0,
+            1.0,
+            [0.0, 0.0],
+            edit::QuarterTurns::new(1),
+        );
+        assert!(rect_approx_eq(r, [0.25, 0.0, 0.75, 1.0]));
+    }
+
+    #[test]
+    fn rotated_texture_uv_preserves_clockwise_direction() {
+        let uv = [0.25, 0.75];
+        let cw = rotated_texture_uv(uv, edit::QuarterTurns::new(1));
+        let ccw = rotated_texture_uv(uv, edit::QuarterTurns::new(3));
+
+        assert!(approx_eq(cw[0], 0.75));
+        assert!(approx_eq(cw[1], 0.75));
+        assert!(approx_eq(ccw[0], 0.25));
+        assert!(approx_eq(ccw[1], 0.25));
+    }
+
+    #[test]
+    fn rotated_texture_uv_wraps_back_to_identity() {
+        let uv = [0.2, 0.8];
+        let wrapped = rotated_texture_uv(uv, edit::QuarterTurns::new(4));
+        let half_turn = rotated_texture_uv(uv, edit::QuarterTurns::new(2));
+
+        assert!(approx_eq(wrapped[0], uv[0]));
+        assert!(approx_eq(wrapped[1], uv[1]));
+        assert!(approx_eq(half_turn[0], 0.8));
+        assert!(approx_eq(half_turn[1], 0.2));
     }
 
     // -- zoom_at_cursor tests --
@@ -1085,5 +1792,14 @@ mod tests {
 
         let (z, _) = zoom_at_cursor(150.0, [0.0, 0.0], 2.0, [0.0, 0.0], [800.0, 600.0]);
         assert!(approx_eq(z, 200.0)); // max clamp
+    }
+
+    #[test]
+    fn zoom_at_cursor_uses_the_clamped_zoom_factor_for_offset() {
+        let (z, o) = zoom_at_cursor(150.0, [0.0, 0.0], 2.0, [0.0, 0.0], [800.0, 600.0]);
+
+        assert!(approx_eq(z, 200.0));
+        assert!(approx_eq(o[0], 133.33333));
+        assert!(approx_eq(o[1], 100.0));
     }
 }

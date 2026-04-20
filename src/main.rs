@@ -8,7 +8,7 @@ mod nav;
 mod viewer;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use iced::widget::image::Handle as ImageHandle;
@@ -40,6 +40,33 @@ const TEXT_PRIMARY: Color = Color::from_rgb(0.82, 0.82, 0.82);
 const TEXT_SECONDARY: Color = Color::from_rgb(0.55, 0.55, 0.55);
 const TEXT_DIM: Color = Color::from_rgb(0.40, 0.40, 0.40);
 const DIVIDER: Color = Color::from_rgb(0.22, 0.22, 0.22);
+const DEFAULT_CANVAS_SIZE: [f32; 2] = [1200.0, 780.0];
+const DEFAULT_WINDOW_SIZE: Size = Size::new(1200.0, 800.0);
+const GRID_THUMB_SIZE: f32 = 150.0;
+const GRID_SPACING: f32 = 8.0;
+const GRID_PADDING: f32 = 14.0;
+const GRID_CARD_PADDING: f32 = 6.0;
+const COLLECTION_SIDEBAR_WIDTH: f32 = 180.0;
+const COLLECTION_SIDEBAR_DIVIDER_WIDTH: f32 = 1.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ThumbnailGridLayout {
+    thumb_size: f32,
+    columns: usize,
+}
+
+impl ThumbnailGridLayout {
+    fn new(content_width: f32) -> Self {
+        let card_width = GRID_THUMB_SIZE + GRID_CARD_PADDING * 2.0;
+        let usable_width = (content_width - GRID_PADDING * 2.0).max(card_width);
+        let columns =
+            ((usable_width + GRID_SPACING) / (card_width + GRID_SPACING)).floor() as usize;
+        Self {
+            thumb_size: GRID_THUMB_SIZE,
+            columns: columns.max(1),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -82,6 +109,30 @@ enum SliderKind {
     Dehaze,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CropAspect {
+    Freeform,
+    Square,
+}
+
+impl CropAspect {
+    fn ratio(self) -> Option<f32> {
+        match self {
+            Self::Freeform => None,
+            Self::Square => Some(1.0),
+        }
+    }
+}
+
+impl std::fmt::Display for CropAspect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Freeform => write!(f, "Freeform"),
+            Self::Square => write!(f, "Square"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum ContextMenuKind {
@@ -118,11 +169,13 @@ struct LibraryEntry {
 struct App {
     tab: Tab,
     library: Vec<LibraryEntry>,
+    library_indices_by_path: std::collections::HashMap<PathBuf, usize>,
     image: Option<Arc<ImageData>>,
     image_id: u64,
     zoom: f32,
     offset: [f32; 2],
-    canvas_size: [f32; 2],
+    window_size: Size,
+    canvas_size_cache: Arc<Mutex<[f32; 2]>>,
     nav: Option<DirNav>,
     library_index: Option<usize>,
     loading: bool,
@@ -133,6 +186,8 @@ struct App {
     current_lens_profile: Option<lens::LensProfile>,
     current_exif: Option<lens::ExifInfo>,
     save_status: Option<String>,
+    crop_mode: bool,
+    crop_aspect: CropAspect,
     editing_slider: Option<SliderKind>,
     slider_text_buf: String,
     last_thumb_click: Option<(usize, Instant)>,
@@ -177,7 +232,12 @@ enum Message {
     ResetAll,
     SaveEdited,
     SaveCompleted(Result<String, String>),
+    ToggleCropMode,
+    CropAspectSelected(CropAspect),
+    ClearCrop,
     ToggleLensCorrection,
+    RotateClockwise,
+    RotateCounterclockwise,
     SliderTextInput(SliderKind),
     SliderTextChanged(String),
     SliderTextSubmit(SliderKind),
@@ -219,14 +279,17 @@ fn path_filename_str(path: &Path) -> &str {
 
 impl App {
     fn new() -> (Self, Task<Message>) {
+        let canvas_size_cache = Arc::new(Mutex::new(DEFAULT_CANVAS_SIZE));
         let mut app = App {
             tab: Tab::Library,
             library: Vec::new(),
+            library_indices_by_path: std::collections::HashMap::new(),
             image: None,
             image_id: 0,
             zoom: 1.0,
             offset: [0.0, 0.0],
-            canvas_size: [1200.0, 780.0],
+            window_size: DEFAULT_WINDOW_SIZE,
+            canvas_size_cache,
             nav: None,
             library_index: None,
             loading: false,
@@ -237,6 +300,8 @@ impl App {
             current_lens_profile: None,
             current_exif: None,
             save_status: None,
+            crop_mode: false,
+            crop_aspect: CropAspect::Freeform,
             editing_slider: None,
             slider_text_buf: String::new(),
             last_thumb_click: None,
@@ -345,6 +410,7 @@ impl App {
                 self.image_id += 1;
                 self.zoom = 1.0;
                 self.offset = [0.0, 0.0];
+                self.crop_mode = false;
                 self.loading = false;
                 self.error = None;
                 if let Some(path) = &self.current_image_path {
@@ -517,10 +583,13 @@ impl App {
             }
 
             Message::ResetAll => {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
                 if let Some(path) = &self.current_image_path {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.reset_all();
                 }
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 Task::none()
             }
 
@@ -530,6 +599,30 @@ impl App {
                     history.current.lens_correction = !history.current.lens_correction;
                     history.commit();
                 }
+                Task::none()
+            }
+
+            Message::RotateClockwise => {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    history.current.rotate_clockwise();
+                    history.commit();
+                }
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
+                Task::none()
+            }
+
+            Message::RotateCounterclockwise => {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    history.current.rotate_counterclockwise();
+                    history.commit();
+                }
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 Task::none()
             }
 
@@ -580,6 +673,34 @@ impl App {
                     Ok(path) => format!("Saved: {path}"),
                     Err(e) => format!("Save failed: {e}"),
                 });
+                Task::none()
+            }
+
+            Message::ToggleCropMode => {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
+                self.crop_mode = !self.crop_mode;
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
+                Task::none()
+            }
+
+            Message::CropAspectSelected(aspect) => {
+                self.crop_aspect = aspect;
+                Task::none()
+            }
+
+            Message::ClearCrop => {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    if history.current.crop.is_some() {
+                        history.current.crop = None;
+                        history.commit();
+                    }
+                }
+                self.crop_mode = false;
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 Task::none()
             }
 
@@ -906,7 +1027,7 @@ impl App {
                 cursor,
                 canvas_size,
             } => {
-                self.canvas_size = canvas_size;
+                self.update_canvas_size(canvas_size);
                 let (z, o) = zoom_at_cursor(self.zoom, self.offset, factor, cursor, canvas_size);
                 self.zoom = z;
                 self.offset = o;
@@ -916,17 +1037,27 @@ impl App {
                 self.offset[1] += delta[1];
             }
             ViewerEvent::DoubleClick { canvas_size } => {
-                self.canvas_size = canvas_size;
+                self.update_canvas_size(canvas_size);
                 if (self.zoom - 1.0).abs() < 0.01 && self.offset == [0.0, 0.0] {
                     if let Some(img) = &self.image {
-                        let fit = (canvas_size[0] / img.width as f32)
-                            .min(canvas_size[1] / img.height as f32);
-                        self.zoom = 1.0 / fit;
+                        self.zoom =
+                            self.actual_size_zoom_for_rotation(canvas_size, img, self.current_rotation());
                     }
                 } else {
                     self.zoom = 1.0;
                     self.offset = [0.0, 0.0];
                 }
+            }
+            ViewerEvent::CropCommitted { rect } => {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
+                if let Some(path) = &self.current_image_path {
+                    let history = self.edit_histories.entry(path.clone()).or_default();
+                    history.current.crop = Some(rect);
+                    history.commit();
+                }
+                self.crop_mode = false;
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
             }
         }
     }
@@ -947,6 +1078,11 @@ impl App {
                 self.tab = Tab::Detail;
                 self.current_image_path = Some(path.clone());
                 self.start_load(path)
+            }
+
+            iced::Event::Window(window::Event::Resized(size)) => {
+                self.window_size = size;
+                Task::none()
             }
 
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
@@ -1073,11 +1209,14 @@ impl App {
 
             // Undo
             Key::Character(ref c) if c.as_str() == "z" && mods.command() && !mods.shift() => {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
                 if let Some(path) = &self.current_image_path {
                     if let Some(history) = self.edit_histories.get_mut(path) {
                         history.undo();
                     }
                 }
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 return Task::none();
             }
             // Redo
@@ -1085,11 +1224,14 @@ impl App {
                 if (c.as_str() == "z" && mods.command() && mods.shift())
                     || (c.as_str() == "y" && mods.command()) =>
             {
+                let previous_rotation = self.current_rotation();
+                let previous_crop = self.visible_crop();
                 if let Some(path) = &self.current_image_path {
                     if let Some(history) = self.edit_histories.get_mut(path) {
                         history.redo();
                     }
                 }
+                self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 return Task::none();
             }
             // Save
@@ -1116,9 +1258,11 @@ impl App {
                 }
                 "1" => {
                     if let Some(img) = &self.image {
-                        let cs = self.canvas_size;
-                        let fit = (cs[0] / img.width as f32).min(cs[1] / img.height as f32);
-                        self.zoom = 1.0 / fit;
+                        self.zoom = self.actual_size_zoom_for_rotation(
+                            self.current_canvas_size(),
+                            img,
+                            self.current_rotation(),
+                        );
                         self.offset = [0.0, 0.0];
                     }
                 }
@@ -1167,6 +1311,16 @@ impl App {
                 });
             }
         }
+        self.rebuild_library_indices();
+    }
+
+    fn rebuild_library_indices(&mut self) {
+        self.library_indices_by_path = self
+            .library
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.path.clone(), index))
+            .collect();
     }
 
     fn load_thumbnails(paths: &[PathBuf]) -> Task<Message> {
@@ -1322,19 +1476,11 @@ impl App {
             .into();
         }
 
-        let thumb_size: f32 = 150.0;
-        let cols = 6;
-
-        let entries: Vec<(usize, &LibraryEntry)> = self.library.iter().enumerate().collect();
-        let mut grid = column![].spacing(8);
-
-        for chunk in entries.chunks(cols) {
-            let mut r = row![].spacing(8);
-            for &(idx, entry) in chunk {
-                r = r.push(self.thumbnail_card(entry, idx, thumb_size));
-            }
-            grid = grid.push(r);
-        }
+        let layout = self.library_grid_layout();
+        let grid = self.build_thumbnail_grid(self.library.len(), layout, |idx, thumb_size| {
+            let entry = &self.library[idx];
+            self.thumbnail_card(entry, idx, thumb_size)
+        });
 
         let status_text = format!(
             "{} images  \u{2022}  Double-click to open",
@@ -1345,7 +1491,8 @@ impl App {
             .padding([6, 14]);
 
         let grid_area = column![
-            scrollable(container(grid).padding(14).width(Length::Fill)).height(Length::Fill),
+            scrollable(container(grid).padding(GRID_PADDING).width(Length::Fill))
+                .height(Length::Fill),
             container(status)
                 .width(Length::Fill)
                 .style(toolbar_container_style),
@@ -1353,7 +1500,7 @@ impl App {
 
         let sidebar = self.collection_sidebar();
         let divider =
-            container(Space::with_width(1))
+            container(Space::with_width(COLLECTION_SIDEBAR_DIVIDER_WIDTH))
                 .height(Length::Fill)
                 .style(|_theme: &Theme| container::Style {
                     background: Some(Background::Color(DIVIDER)),
@@ -1418,7 +1565,7 @@ impl App {
                 .spacing(6)
                 .padding(8),
         )
-        .width(180)
+        .width(COLLECTION_SIDEBAR_WIDTH)
         .height(Length::Fill)
         .style(panel_container_style)
         .into()
@@ -1445,59 +1592,30 @@ impl App {
         .width(Length::Fill)
         .style(toolbar_container_style);
 
-        let thumb_size: f32 = 150.0;
-        let cols = 6;
-        let mut grid = column![].spacing(8);
-
-        let photo_entries: Vec<(usize, &PathBuf)> = collection.photos.iter().enumerate().collect();
-
-        for chunk in photo_entries.chunks(cols) {
-            let mut r = row![].spacing(8);
-            for &(photo_idx, photo_path) in chunk {
-                let lib_entry = self.library.iter().find(|e| &e.path == photo_path);
+        let layout = self.collection_grid_layout();
+        let grid =
+            self.build_thumbnail_grid(collection.photos.len(), layout, |photo_idx, thumb_size| {
+                let photo_path = &collection.photos[photo_idx];
+                let lib_entry = self.library_entry_by_path(photo_path);
                 let filename = photo_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();
 
-                let thumb: Element<'_, Message> =
-                    if let Some(Some(ref handle)) = lib_entry.map(|e| &e.thumbnail_handle) {
-                        container(
-                            Image::new(handle.clone())
-                                .width(thumb_size)
-                                .height(thumb_size),
-                        )
-                        .width(thumb_size)
-                        .height(thumb_size)
-                        .center_x(Length::Shrink)
-                        .center_y(Length::Shrink)
-                        .into()
-                    } else {
-                        container(text("...").size(24).color(TEXT_DIM))
-                            .width(thumb_size)
-                            .height(thumb_size)
-                            .center_x(Length::Shrink)
-                            .center_y(Length::Shrink)
-                            .into()
-                    };
+                let card = button(self.thumbnail_card_content(
+                    lib_entry.and_then(|entry| entry.thumbnail_handle.as_ref()),
+                    filename,
+                    thumb_size,
+                ))
+                .on_press(Message::CollectionPhotoClicked(photo_idx))
+                .padding(GRID_CARD_PADDING)
+                .style(card_button_style);
 
-                let label =
-                    container(text(filename).size(10).color(TEXT_SECONDARY)).width(thumb_size);
-
-                let card = button(column![thumb, label].spacing(4).width(thumb_size))
-                    .on_press(Message::CollectionPhotoClicked(photo_idx))
-                    .padding(6)
-                    .style(card_button_style);
-
-                let card_with_menu: Element<'_, Message> = MouseArea::new(card)
+                MouseArea::new(card)
                     .on_right_press(Message::CollectionPhotoRightClicked(photo_idx))
-                    .into();
-
-                r = r.push(card_with_menu);
-            }
-            grid = grid.push(r);
-        }
+                    .into()
+            });
 
         let status_text = format!("{} photos", collection.photos.len());
         let status = container(text(status_text).size(11).color(TEXT_DIM))
@@ -1506,7 +1624,8 @@ impl App {
 
         container(column![
             top_bar,
-            scrollable(container(grid).padding(14).width(Length::Fill)).height(Length::Fill),
+            scrollable(container(grid).padding(GRID_PADDING).width(Length::Fill))
+                .height(Length::Fill),
             container(status)
                 .width(Length::Fill)
                 .style(toolbar_container_style),
@@ -1521,7 +1640,29 @@ impl App {
         index: usize,
         thumb_size: f32,
     ) -> Element<'a, Message> {
-        let thumb: Element<'_, Message> = if let Some(ref handle) = entry.thumbnail_handle {
+        let card = button(self.thumbnail_card_content(
+            entry.thumbnail_handle.as_ref(),
+            entry.filename.clone(),
+            thumb_size,
+        ))
+        .on_press(Message::LibraryItemClicked(index))
+        .padding(GRID_CARD_PADDING)
+        .style(card_button_style);
+
+        MouseArea::new(card)
+            .on_right_press(Message::LibraryPhotoRightClicked(index))
+            .on_enter(Message::ThumbnailHovered(Some(index)))
+            .on_exit(Message::ThumbnailHovered(None))
+            .into()
+    }
+
+    fn thumbnail_card_content(
+        &self,
+        handle: Option<&ImageHandle>,
+        label_text: String,
+        thumb_size: f32,
+    ) -> Element<'static, Message> {
+        let thumb: Element<'static, Message> = if let Some(handle) = handle {
             container(
                 Image::new(handle.clone())
                     .width(thumb_size)
@@ -1541,19 +1682,48 @@ impl App {
                 .into()
         };
 
-        let label =
-            container(text(&entry.filename).size(10).color(TEXT_SECONDARY)).width(thumb_size);
+        let label = container(text(label_text).size(10).color(TEXT_SECONDARY)).width(thumb_size);
 
-        let card = button(column![thumb, label].spacing(4).width(thumb_size))
-            .on_press(Message::LibraryItemClicked(index))
-            .padding(6)
-            .style(card_button_style);
+        column![thumb, label].spacing(4).width(thumb_size).into()
+    }
 
-        MouseArea::new(card)
-            .on_right_press(Message::LibraryPhotoRightClicked(index))
-            .on_enter(Message::ThumbnailHovered(Some(index)))
-            .on_exit(Message::ThumbnailHovered(None))
-            .into()
+    fn build_thumbnail_grid<'a, F>(
+        &'a self,
+        item_count: usize,
+        layout: ThumbnailGridLayout,
+        mut build_card: F,
+    ) -> iced::widget::Column<'a, Message>
+    where
+        F: FnMut(usize, f32) -> Element<'a, Message>,
+    {
+        let mut grid = column![].spacing(GRID_SPACING);
+
+        for row_start in (0..item_count).step_by(layout.columns) {
+            let mut r = row![].spacing(GRID_SPACING);
+            let row_end = (row_start + layout.columns).min(item_count);
+            for item_index in row_start..row_end {
+                r = r.push(build_card(item_index, layout.thumb_size));
+            }
+            grid = grid.push(r);
+        }
+
+        grid
+    }
+
+    fn library_entry_by_path(&self, path: &Path) -> Option<&LibraryEntry> {
+        self.library_indices_by_path
+            .get(path)
+            .and_then(|&index| self.library.get(index))
+    }
+
+    fn library_grid_layout(&self) -> ThumbnailGridLayout {
+        let grid_width =
+            self.window_size.width - COLLECTION_SIDEBAR_WIDTH - COLLECTION_SIDEBAR_DIVIDER_WIDTH;
+        ThumbnailGridLayout::new(grid_width)
+    }
+
+    fn collection_grid_layout(&self) -> ThumbnailGridLayout {
+        ThumbnailGridLayout::new(self.window_size.width)
     }
 
     fn detail_view(&self) -> Element<'_, Message> {
@@ -1562,6 +1732,10 @@ impl App {
             image_id: self.image_id,
             zoom: self.zoom,
             offset: self.offset,
+            canvas_size_cache: Arc::clone(&self.canvas_size_cache),
+            crop: self.current_crop(),
+            crop_mode: self.crop_mode,
+            crop_aspect_ratio: self.crop_aspect.ratio(),
             adjustments: self.build_adjustment_uniforms(),
         })
         .width(Length::Fill)
@@ -1573,8 +1747,8 @@ impl App {
         row![viewer_with_status.width(Length::Fill), self.edit_panel()].into()
     }
 
-    fn status_bar(&self) -> Element<'_, Message> {
-        let s = if let Some(img) = &self.image {
+    fn status_bar_text(&self) -> String {
+        if let Some(img) = &self.image {
             let name = if self.collection_nav.is_some() {
                 self.current_image_path
                     .as_ref()
@@ -1610,10 +1784,12 @@ impl App {
 
             let zoom_pct = (self.zoom * 100.0) as u32;
             let mb = img.file_size as f64 / 1_048_576.0;
+            let (display_w, display_h) = self.current_display_dimensions(img);
+
             format!(
                 "  {name}  \u{2022}  {w}\u{00d7}{h}  \u{2022}  {mb:.1} MB  \u{2022}  {zoom_pct}%{pos}",
-                w = img.width,
-                h = img.height,
+                w = display_w,
+                h = display_h,
             )
         } else if self.loading {
             "  Loading\u{2026}".to_string()
@@ -1621,7 +1797,125 @@ impl App {
             format!("  Error: {e}")
         } else {
             "  Ctrl+O to open  \u{2022}  Drag & drop  \u{2022}  Arrow keys to navigate".to_string()
+        }
+    }
+
+    fn current_rotation(&self) -> edit::QuarterTurns {
+        self.current_image_path
+            .as_ref()
+            .and_then(|path| self.edit_histories.get(path))
+            .map(|history| history.current.rotation)
+            .unwrap_or_default()
+    }
+
+    fn current_crop(&self) -> Option<edit::CropRect> {
+        self.current_image_path
+            .as_ref()
+            .and_then(|path| self.edit_histories.get(path))
+            .and_then(|history| history.current.crop)
+    }
+
+    fn visible_crop(&self) -> Option<edit::CropRect> {
+        if self.crop_mode {
+            None
+        } else {
+            self.current_crop()
+        }
+    }
+
+    fn current_display_dimensions(&self, img: &decode::ImageData) -> (u32, u32) {
+        let (display_w, display_h) =
+            edit::rotated_dimensions(img.width, img.height, self.current_rotation());
+        edit::cropped_dimensions(display_w, display_h, self.visible_crop())
+    }
+
+    fn current_canvas_size(&self) -> [f32; 2] {
+        self.canvas_size_cache
+            .lock()
+            .map(|canvas_size| *canvas_size)
+            .unwrap_or(DEFAULT_CANVAS_SIZE)
+    }
+
+    fn update_canvas_size(&mut self, canvas_size: [f32; 2]) {
+        if let Ok(mut cached_size) = self.canvas_size_cache.lock() {
+            *cached_size = canvas_size;
+        }
+    }
+
+    fn fit_scale_for_rotation_and_crop(
+        &self,
+        canvas_size: [f32; 2],
+        img: &decode::ImageData,
+        rotation: edit::QuarterTurns,
+        crop: Option<edit::CropRect>,
+    ) -> f32 {
+        let (rotated_w, rotated_h) = edit::rotated_dimensions(img.width, img.height, rotation);
+        let snapped_crop = crop.map(|crop| crop.snap_to_pixels(rotated_w, rotated_h));
+        let (display_w, display_h) = edit::cropped_dimensions(rotated_w, rotated_h, snapped_crop);
+        (canvas_size[0] / display_w as f32).min(canvas_size[1] / display_h as f32)
+    }
+
+    fn actual_size_zoom_for_rotation(
+        &self,
+        canvas_size: [f32; 2],
+        img: &decode::ImageData,
+        rotation: edit::QuarterTurns,
+    ) -> f32 {
+        self.actual_size_zoom_for_rotation_and_crop(canvas_size, img, rotation, self.visible_crop())
+    }
+
+    fn actual_size_zoom_for_rotation_and_crop(
+        &self,
+        canvas_size: [f32; 2],
+        img: &decode::ImageData,
+        rotation: edit::QuarterTurns,
+        crop: Option<edit::CropRect>,
+    ) -> f32 {
+        1.0 / self.fit_scale_for_rotation_and_crop(canvas_size, img, rotation, crop)
+    }
+
+    fn is_at_actual_size_for_rotation_and_crop(
+        &self,
+        canvas_size: [f32; 2],
+        img: &decode::ImageData,
+        rotation: edit::QuarterTurns,
+        crop: Option<edit::CropRect>,
+    ) -> bool {
+        (self.zoom - self.actual_size_zoom_for_rotation_and_crop(canvas_size, img, rotation, crop))
+            .abs()
+            < 0.01
+    }
+
+    fn preserve_actual_size_after_display_change(
+        &mut self,
+        previous_rotation: edit::QuarterTurns,
+        previous_crop: Option<edit::CropRect>,
+    ) {
+        let Some(img) = &self.image else {
+            return;
         };
+        let canvas_size = self.current_canvas_size();
+        if !self.is_at_actual_size_for_rotation_and_crop(
+            canvas_size,
+            img,
+            previous_rotation,
+            previous_crop,
+        ) {
+            return;
+        }
+
+        let current_rotation = self.current_rotation();
+        let current_crop = self.visible_crop();
+        if current_rotation == previous_rotation && current_crop == previous_crop {
+            return;
+        }
+
+        self.zoom =
+            self.actual_size_zoom_for_rotation_and_crop(canvas_size, img, current_rotation, current_crop);
+    }
+
+    fn status_bar(&self) -> Element<'_, Message> {
+        let s = self.status_bar_text();
 
         container(text(s).size(11).color(TEXT_DIM))
             .width(Length::Fill)
@@ -1711,6 +2005,39 @@ impl App {
         let lens_section =
             column![section_label("LENS"), lens_btn, lens_dropdown, lens_info,].spacing(4);
 
+        let rotation_row = row![
+            button(text("Rotate CCW").size(11).color(TEXT_PRIMARY))
+                .on_press(Message::RotateCounterclockwise)
+                .padding([4, 8])
+                .style(toolbar_button_style),
+            button(text("Rotate CW").size(11).color(TEXT_PRIMARY))
+                .on_press(Message::RotateClockwise)
+                .padding([4, 8])
+                .style(toolbar_button_style),
+        ]
+        .spacing(8);
+
+        let crop_mode_label = if self.crop_mode { "Finish Crop" } else { "Crop" };
+        let crop_row = row![
+            button(text(crop_mode_label).size(11).color(TEXT_PRIMARY))
+                .on_press(Message::ToggleCropMode)
+                .padding([4, 8])
+                .style(toolbar_button_style),
+            pick_list(
+                vec![CropAspect::Freeform, CropAspect::Square],
+                Some(self.crop_aspect),
+                Message::CropAspectSelected,
+            )
+            .text_size(11)
+            .width(110),
+            button(text("Clear").size(11).color(TEXT_PRIMARY))
+                .on_press(Message::ClearCrop)
+                .padding([4, 8])
+                .style(toolbar_button_style),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
         // Reset button
         let reset_btn = button(text("Reset All").size(11).color(TEXT_PRIMARY))
             .on_press(Message::ResetAll)
@@ -1736,6 +2063,8 @@ impl App {
             section_divider(),
             lens_section,
             section_divider(),
+            rotation_row,
+            crop_row,
             reset_btn,
             status_text,
         ]
@@ -1842,6 +2171,9 @@ impl App {
             lens_tca_r,
             lens_tca_b,
             image_aspect,
+            rotation: state.rotation,
+            crop_preview: state.crop.unwrap_or(edit::CropRect::FULL),
+            crop_overlay: None,
         }
     }
 
@@ -2245,6 +2577,35 @@ mod tests {
         (dir, paths)
     }
 
+    fn detail_app_with_image(path: &Path, width: u32, height: u32) -> App {
+        let (mut app, _) = App::new();
+        app.tab = Tab::Detail;
+        app.library.clear();
+        app.rebuild_library_indices();
+        app.image = Some(Arc::new(decode::ImageData {
+            pixels: vec![0, 0, 0, 255],
+            width,
+            height,
+            file_size: 2_000_000,
+        }));
+        app.current_image_path = Some(path.to_path_buf());
+        app
+    }
+
+    fn library_app_with_entries(count: usize) -> App {
+        let (mut app, _) = App::new();
+        app.tab = Tab::Library;
+        app.library = (0..count)
+            .map(|index| LibraryEntry {
+                path: PathBuf::from(format!("photo-{index}.png")),
+                filename: format!("photo-{index}.png"),
+                thumbnail_handle: None,
+            })
+            .collect();
+        app.rebuild_library_indices();
+        app
+    }
+
     #[test]
     fn scan_folder_finds_only_images() {
         let (dir, _) = setup_dir(&["photo.jpg", "notes.txt", "icon.png", "data.csv", "art.bmp"]);
@@ -2280,6 +2641,68 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let results = scan_folder_for_images(dir.path());
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn library_grid_uses_latest_window_width_after_returning_from_detail() {
+        let mut app = library_app_with_entries(24);
+
+        let _ = app.handle_event(iced::Event::Window(window::Event::Resized(Size::new(
+            720.0, 640.0,
+        ))));
+        let narrow_columns = app.library_grid_layout().columns;
+
+        app.tab = Tab::Detail;
+        let _ = app.handle_event(iced::Event::Window(window::Event::Resized(Size::new(
+            1600.0, 900.0,
+        ))));
+        app.tab = Tab::Library;
+
+        let wide_columns = app.library_grid_layout().columns;
+
+        assert!(
+            wide_columns > narrow_columns,
+            "expected library thumbnails to reflow after resizing in detail view"
+        );
+    }
+
+    #[test]
+    fn library_grid_keeps_at_least_one_column_in_narrow_windows() {
+        let mut app = library_app_with_entries(3);
+
+        let _ = app.handle_event(iced::Event::Window(window::Event::Resized(Size::new(
+            260.0, 640.0,
+        ))));
+
+        assert_eq!(app.library_grid_layout().columns, 1);
+    }
+
+    #[test]
+    fn collection_grid_uses_latest_window_width_after_returning_from_detail() {
+        let mut app = library_app_with_entries(24);
+        app.collection_store.create("Favorites");
+        for entry in &app.library {
+            app.collection_store.add_photo(0, &entry.path);
+        }
+        app.active_collection = Some(0);
+
+        let _ = app.handle_event(iced::Event::Window(window::Event::Resized(Size::new(
+            720.0, 640.0,
+        ))));
+        let narrow_columns = app.collection_grid_layout().columns;
+
+        app.tab = Tab::Detail;
+        let _ = app.handle_event(iced::Event::Window(window::Event::Resized(Size::new(
+            1600.0, 900.0,
+        ))));
+        app.tab = Tab::Library;
+
+        let wide_columns = app.collection_grid_layout().columns;
+
+        assert!(
+            wide_columns > narrow_columns,
+            "expected collection thumbnails to reflow after resizing in detail view"
+        );
     }
 
     #[test]
@@ -2686,6 +3109,353 @@ mod tests {
         assert_eq!(drag.photo_index, 5);
         assert_eq!(drag.start_pos, cursor);
         assert!(!drag.active);
+    }
+
+    #[test]
+    fn rotate_messages_commit_and_reset_current_image_history() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let _ = app.update(Message::RotateClockwise);
+        let history = app.edit_histories.get_mut(&path).unwrap();
+        assert_eq!(history.current.rotation, edit::QuarterTurns::new(1));
+        assert!(history.undo());
+        assert_eq!(history.current.rotation, edit::QuarterTurns::default());
+
+        let _ = app.update(Message::RotateCounterclockwise);
+        assert_eq!(
+            app.edit_histories.get(&path).unwrap().current.rotation,
+            edit::QuarterTurns::new(3)
+        );
+
+        let _ = app.update(Message::ResetAll);
+        assert_eq!(
+            app.edit_histories.get(&path).unwrap().current.rotation,
+            edit::QuarterTurns::default()
+        );
+    }
+
+    #[test]
+    fn rotate_messages_only_touch_the_current_image_history() {
+        let current_path = PathBuf::from("current.png");
+        let other_path = PathBuf::from("other.png");
+        let mut app = detail_app_with_image(&current_path, 200, 100);
+
+        app.edit_histories.insert(current_path.clone(), edit::UndoHistory::new());
+
+        let mut other_history = edit::UndoHistory::new();
+        other_history.current.rotation = edit::QuarterTurns::new(2);
+        other_history.commit();
+        app.edit_histories.insert(other_path.clone(), other_history);
+
+        let _ = app.update(Message::RotateClockwise);
+
+        assert_eq!(
+            app.edit_histories.get(&current_path).unwrap().current.rotation,
+            edit::QuarterTurns::new(1)
+        );
+        assert_eq!(
+            app.edit_histories.get(&other_path).unwrap().current.rotation,
+            edit::QuarterTurns::new(2)
+        );
+    }
+
+    #[test]
+    fn crop_commit_updates_only_the_current_image_history() {
+        let current_path = PathBuf::from("current.png");
+        let other_path = PathBuf::from("other.png");
+        let mut app = detail_app_with_image(&current_path, 200, 100);
+
+        app.edit_histories
+            .insert(current_path.clone(), edit::UndoHistory::new());
+
+        let mut other_history = edit::UndoHistory::new();
+        other_history.current.crop = Some(edit::CropRect::new(0.0, 0.0, 0.5, 0.5));
+        other_history.commit();
+        app.edit_histories.insert(other_path.clone(), other_history);
+
+        app.handle_viewer(ViewerEvent::CropCommitted {
+            rect: edit::CropRect::new(0.25, 0.0, 0.75, 1.0),
+        });
+
+        let current_history = app.edit_histories.get(&current_path).unwrap();
+        assert_eq!(
+            current_history.current.crop,
+            Some(edit::CropRect::new(0.25, 0.0, 0.75, 1.0))
+        );
+
+        let other_history = app.edit_histories.get(&other_path).unwrap();
+        assert_eq!(
+            other_history.current.crop,
+            Some(edit::CropRect::new(0.0, 0.0, 0.5, 0.5))
+        );
+
+        let current_history = app.edit_histories.get_mut(&current_path).unwrap();
+        assert!(current_history.undo());
+        assert_eq!(current_history.current.crop, None);
+    }
+
+    #[test]
+    fn crop_commit_preserves_actual_size_zoom() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+        app.update_canvas_size([400.0, 200.0]);
+        app.zoom = app.actual_size_zoom_for_rotation_and_crop(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+            None,
+        );
+
+        app.handle_viewer(ViewerEvent::CropCommitted {
+            rect: edit::CropRect::new(0.5, 0.0, 1.0, 1.0),
+        });
+
+        let expected_zoom = app.actual_size_zoom_for_rotation_and_crop(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+            app.current_crop(),
+        );
+        assert!((app.zoom - expected_zoom).abs() < 0.01);
+    }
+
+    #[test]
+    fn rotated_crop_commit_saves_the_selected_rotated_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 2, 1);
+
+        let _ = app.update(Message::RotateClockwise);
+        app.handle_viewer(ViewerEvent::CropCommitted {
+            rect: edit::CropRect::new(0.0, 0.0, 1.0, 0.5),
+        });
+
+        let state = app.edit_histories.get(&path).unwrap().current;
+        let out = edit::save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let img = image::open(&out).unwrap().to_rgba8();
+
+        assert_eq!(img.width(), 1);
+        assert_eq!(img.height(), 1);
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn status_bar_uses_rotated_dimensions_after_rotation() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let mut history = edit::UndoHistory::new();
+        history.current.rotate_clockwise();
+        history.commit();
+        app.edit_histories.insert(path, history);
+
+        let status = app.status_bar_text();
+        assert!(status.contains("100×200"));
+        assert!(!status.contains("200×100"));
+    }
+
+    #[test]
+    fn status_bar_uses_cropped_dimensions_after_rotation_and_crop() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let mut history = edit::UndoHistory::new();
+        history.current.rotate_clockwise();
+        history.current.crop = Some(edit::CropRect::new(0.0, 0.0, 1.0, 0.5));
+        history.commit();
+        app.edit_histories.insert(path, history);
+
+        let status = app.status_bar_text();
+        assert!(status.contains("100\u{00d7}100"));
+        assert!(!status.contains("100\u{00d7}200"));
+        assert!(!status.contains("200\u{00d7}100"));
+    }
+
+    #[test]
+    fn crop_mode_status_and_actual_size_use_the_visible_full_image() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let mut history = edit::UndoHistory::new();
+        history.current.crop = Some(edit::CropRect::new(0.5, 0.0, 1.0, 1.0));
+        history.commit();
+        app.edit_histories.insert(path, history);
+        app.crop_mode = true;
+
+        let status = app.status_bar_text();
+        assert!(status.contains("200\u{00d7}100"));
+        assert!(!status.contains("100\u{00d7}100"));
+
+        app.handle_viewer(ViewerEvent::DoubleClick {
+            canvas_size: [400.0, 200.0],
+        });
+
+        let expected_zoom = app.actual_size_zoom_for_rotation_and_crop(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+            None,
+        );
+        assert!((app.zoom - expected_zoom).abs() < 0.01);
+    }
+
+    #[test]
+    fn rotate_messages_preserve_actual_size_zoom_when_orientation_changes() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        app.update_canvas_size([400.0, 200.0]);
+        let original_zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            edit::QuarterTurns::default(),
+        );
+        app.zoom = original_zoom;
+        app.offset = [0.0, 0.0];
+
+        let _ = app.update(Message::RotateClockwise);
+
+        let rotated_zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+        assert!((app.zoom - rotated_zoom).abs() < 0.01);
+    }
+
+    #[test]
+    fn rotate_messages_preserve_actual_size_zoom_when_panned() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        app.update_canvas_size([400.0, 200.0]);
+        app.zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            edit::QuarterTurns::default(),
+        );
+        app.offset = [32.0, -18.0];
+
+        let _ = app.update(Message::RotateClockwise);
+
+        let rotated_zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+        assert!((app.zoom - rotated_zoom).abs() < 0.01);
+        assert_eq!(app.offset, [32.0, -18.0]);
+    }
+
+    #[test]
+    fn reset_all_preserves_actual_size_zoom_after_rotation() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let mut history = edit::UndoHistory::new();
+        history.current.rotate_clockwise();
+        history.commit();
+        app.edit_histories.insert(path, history);
+        app.update_canvas_size([400.0, 200.0]);
+        app.zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+
+        let _ = app.update(Message::ResetAll);
+
+        let reset_zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+        assert!((app.zoom - reset_zoom).abs() < 0.01);
+    }
+
+    #[test]
+    fn reset_all_preserves_actual_size_zoom_after_clearing_crop() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let mut history = edit::UndoHistory::new();
+        history.current.crop = Some(edit::CropRect::new(0.5, 0.0, 1.0, 1.0));
+        history.commit();
+        app.edit_histories.insert(path, history);
+        app.update_canvas_size([400.0, 200.0]);
+        app.zoom = app.actual_size_zoom_for_rotation_and_crop(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+            app.current_crop(),
+        );
+
+        let _ = app.update(Message::ResetAll);
+
+        let reset_zoom = app.actual_size_zoom_for_rotation_and_crop(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+            None,
+        );
+        assert!((app.zoom - reset_zoom).abs() < 0.01);
+    }
+
+    #[test]
+    fn undo_and_redo_preserve_actual_size_zoom_after_rotation_changes() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+        app.update_canvas_size([400.0, 200.0]);
+
+        let _ = app.update(Message::RotateClockwise);
+        app.zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+
+        let _ = app.handle_key(keyboard::Key::Character("z".into()), keyboard::Modifiers::CTRL);
+        let undo_zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+        assert!((app.zoom - undo_zoom).abs() < 0.01);
+
+        let redo_mods = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
+        let _ = app.handle_key(keyboard::Key::Character("z".into()), redo_mods);
+        let redo_zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+        assert!((app.zoom - redo_zoom).abs() < 0.01);
+    }
+
+    #[test]
+    fn actual_size_shortcut_uses_rotated_dimensions() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+        let mut history = edit::UndoHistory::new();
+        history.current.rotate_clockwise();
+        history.commit();
+        app.edit_histories.insert(path, history);
+        app.update_canvas_size([400.0, 200.0]);
+        app.zoom = 3.0;
+        app.offset = [20.0, -10.0];
+
+        let _ = app.handle_key(keyboard::Key::Character("1".into()), keyboard::Modifiers::default());
+
+        let expected_zoom = app.actual_size_zoom_for_rotation(
+            app.current_canvas_size(),
+            app.image.as_ref().unwrap(),
+            app.current_rotation(),
+        );
+        assert!((app.zoom - expected_zoom).abs() < 0.01);
+        assert_eq!(app.offset, [0.0, 0.0]);
     }
 
     #[test]

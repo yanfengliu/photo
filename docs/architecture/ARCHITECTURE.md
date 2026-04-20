@@ -1,17 +1,17 @@
 # Architecture
 
-> Last verified: 2026-04-19
+> Last verified: 2026-04-20
 > Last updated by: codex
 
 ## System Overview
 
-Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections. The decode path now covers raster, SVG, and common camera RAW formats. Edits are non-destructive with undo/redo and save-as-copy.
+Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats. Edits are non-destructive with undo/redo and save-as-copy.
 
 ## Component Map
 
-- `src/main.rs`: iced application state, message loop, tab routing, keyboard/event handling, view composition, and collection sidebar wiring.
-- `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, texture upload, uniforms, and GPU resource management.
-- `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, lens distortion, vignetting, TCA, and gamma encoding.
+- `src/main.rs`: iced application state, message loop, tab routing, keyboard/event handling, Detail-view crop/rotation tool wiring, view composition, and collection sidebar wiring.
+- `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
+- `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
 - `assets/shaders/blur.wgsl`: 9-tap separable Gaussian blur pre-pass for clarity/dehaze.
 - `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, raw-pixel-first detail decoding, embedded-image fallback for detail loads, and thumbnail loading.
 - `src/edit.rs`: edit state, undo/redo, CPU-side adjustment math, and save pipeline.
@@ -38,12 +38,12 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 5. Thumbnails are stored as `ImageHandle::from_rgba()` and rendered in the Library grid.
 
 ### Edit and Save Flow
-1. Sliders update `EditState` in `App::update()`.
-2. `App::build_adjustment_uniforms()` converts state into shader-friendly uniforms.
+1. Sliders plus Detail-view crop/rotation controls update `EditState` in `App::update()`.
+2. `App::build_adjustment_uniforms()` converts state into shader-friendly uniforms, including committed crop preview state.
 3. `ImageCanvas` sends uniforms to `prepare()`, which writes the GPU uniform buffer.
-4. The shader applies the adjustments per pixel.
-5. `UndoHistory::commit()` stores committed states on slider release.
-6. `apply_all()` mirrors the shader math at full resolution during save.
+4. The shader applies the adjustments per pixel and dims outside the active crop overlay while crop mode is active.
+5. `UndoHistory::commit()` stores committed states on slider release and crop/rotation commits.
+6. `apply_all()` mirrors the shader math at full resolution during save, and the save path applies crop bounds after rotation so preview and export stay aligned.
 
 ### Navigation and Collections
 1. Arrow-key navigation prefers `library_index` and falls back to `DirNav`.
