@@ -136,8 +136,8 @@ impl std::fmt::Display for CropAspect {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum ContextMenuKind {
-    LibraryPhoto { photo_index: usize },
-    CollectionPhoto { photo_index: usize },
+    LibraryPhoto { photo_path: PathBuf },
+    CollectionPhoto { photo_path: PathBuf },
     SidebarCollection { collection_index: usize },
 }
 
@@ -365,7 +365,10 @@ impl App {
                 }
             }
             Tab::Detail => {
-                if let Some(idx) = self.library_index {
+                if let Some(idx) = self
+                    .library_index
+                    .and_then(|idx| self.clamped_library_index(idx))
+                {
                     if let Some(entry) = self.library.get(idx) {
                         return format!("Photo - {}", entry.filename);
                     }
@@ -910,46 +913,31 @@ impl App {
             }
 
             Message::CollectionPhotoRightClicked(photo_index) => {
+                let Some(photo_path) = self
+                    .active_collection
+                    .and_then(|col_idx| self.collection_store.collections.get(col_idx))
+                    .and_then(|collection| collection.photos.get(photo_index))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
                 self.context_menu = Some(ContextMenu {
                     position: self.cursor_position,
-                    kind: ContextMenuKind::CollectionPhoto { photo_index },
+                    kind: ContextMenuKind::CollectionPhoto { photo_path },
                 });
                 Task::none()
             }
 
             Message::RemovePhotoFromCollection => {
-                match &self.context_menu {
-                    Some(ContextMenu {
-                        kind: ContextMenuKind::CollectionPhoto { photo_index },
-                        ..
-                    }) => {
-                        let photo_index = *photo_index;
-                        if let Some(col_idx) = self.active_collection {
-                            if let Some(col) = self.collection_store.collections.get(col_idx) {
-                                if let Some(path) = col.photos.get(photo_index).cloned() {
-                                    self.collection_store.remove_photo(col_idx, &path);
-                                    self.collection_store.save();
-                                }
-                            }
-                        }
+                if let Some(ContextMenu {
+                    kind: ContextMenuKind::CollectionPhoto { photo_path },
+                    ..
+                }) = &self.context_menu
+                {
+                    if let Some(col_idx) = self.active_collection {
+                        self.collection_store.remove_photo(col_idx, photo_path);
+                        self.collection_store.save();
                     }
-                    Some(ContextMenu {
-                        kind: ContextMenuKind::LibraryPhoto { photo_index },
-                        ..
-                    }) => {
-                        let photo_index = *photo_index;
-                        if let Some(entry) = self.library.get(photo_index) {
-                            let path = entry.path.clone();
-                            for (i, col) in self.collection_store.collections.iter().enumerate() {
-                                if col.photos.contains(&path) {
-                                    self.collection_store.remove_photo(i, &path);
-                                    break;
-                                }
-                            }
-                            self.collection_store.save();
-                        }
-                    }
-                    _ => {}
                 }
                 self.context_menu = None;
                 Task::none()
@@ -966,22 +954,26 @@ impl App {
                 if self.collection_store.collections.is_empty() {
                     return Task::none();
                 }
+                let Some(photo_path) = self.library.get(index).map(|entry| entry.path.clone())
+                else {
+                    return Task::none();
+                };
                 self.context_menu = Some(ContextMenu {
                     position: self.cursor_position,
-                    kind: ContextMenuKind::LibraryPhoto { photo_index: index },
+                    kind: ContextMenuKind::LibraryPhoto { photo_path },
                 });
                 Task::none()
             }
 
             Message::AddPhotoToCollection(collection_index) => {
                 if let Some(ContextMenu {
-                    kind: ContextMenuKind::LibraryPhoto { photo_index },
+                    kind: ContextMenuKind::LibraryPhoto { photo_path },
                     ..
                 }) = &self.context_menu
                 {
-                    if let Some(entry) = self.library.get(*photo_index) {
+                    if self.library_entry_by_path(photo_path).is_some() {
                         self.collection_store
-                            .add_photo(collection_index, &entry.path);
+                            .add_photo(collection_index, photo_path);
                         self.collection_store.save();
                     }
                 }
@@ -991,21 +983,22 @@ impl App {
 
             Message::TogglePhotoInCollection(collection_index) => {
                 if let Some(ContextMenu {
-                    kind: ContextMenuKind::LibraryPhoto { photo_index },
+                    kind: ContextMenuKind::LibraryPhoto { photo_path },
                     ..
                 }) = &self.context_menu
                 {
-                    if let Some(entry) = self.library.get(*photo_index) {
-                        let path = entry.path.clone();
+                    if self.library_entry_by_path(photo_path).is_some() {
                         if self
                             .collection_store
                             .collections
                             .get(collection_index)
-                            .is_some_and(|c| c.photos.contains(&path))
+                            .is_some_and(|c| c.photos.contains(photo_path))
                         {
-                            self.collection_store.remove_photo(collection_index, &path);
+                            self.collection_store
+                                .remove_photo(collection_index, photo_path);
                         } else {
-                            self.collection_store.add_photo(collection_index, &path);
+                            self.collection_store
+                                .add_photo(collection_index, photo_path);
                         }
                         self.collection_store.save();
                     }
@@ -1040,8 +1033,11 @@ impl App {
                 self.update_canvas_size(canvas_size);
                 if (self.zoom - 1.0).abs() < 0.01 && self.offset == [0.0, 0.0] {
                     if let Some(img) = &self.image {
-                        self.zoom =
-                            self.actual_size_zoom_for_rotation(canvas_size, img, self.current_rotation());
+                        self.zoom = self.actual_size_zoom_for_rotation(
+                            canvas_size,
+                            img,
+                            self.current_rotation(),
+                        );
                     }
                 } else {
                     self.zoom = 1.0;
@@ -1146,19 +1142,24 @@ impl App {
             // Navigation: next
             Key::Named(Named::ArrowRight) | Key::Named(Named::Space) => {
                 if self.tab == Tab::Detail {
-                    if let Some((col_idx, ref mut photo_idx)) = self.collection_nav {
+                    if let Some((col_idx, photo_idx)) = self.collection_nav {
                         if let Some(col) = self.collection_store.collections.get(col_idx) {
-                            if !col.photos.is_empty() {
-                                *photo_idx = (*photo_idx + 1) % col.photos.len();
-                                let path = col.photos[*photo_idx].clone();
+                            if let Some(current) =
+                                self.clamped_collection_photo_index(col_idx, photo_idx)
+                            {
+                                let next =
+                                    Self::step_wrapped_index(current, col.photos.len(), true);
+                                self.collection_nav = Some((col_idx, next));
+                                let path = col.photos[next].clone();
                                 self.current_image_path = Some(path.clone());
                                 return self.start_load(path);
                             }
                         }
-                    } else if let Some(ref mut lib_idx) = self.library_index {
-                        if !self.library.is_empty() {
-                            *lib_idx = (*lib_idx + 1) % self.library.len();
-                            let path = self.library[*lib_idx].path.clone();
+                    } else if let Some(lib_idx) = self.library_index {
+                        if let Some(current) = self.clamped_library_index(lib_idx) {
+                            let next = Self::step_wrapped_index(current, self.library.len(), true);
+                            self.library_index = Some(next);
+                            let path = self.library[next].path.clone();
                             self.current_image_path = Some(path.clone());
                             return self.start_load(path);
                         }
@@ -1174,27 +1175,25 @@ impl App {
             // Navigation: prev
             Key::Named(Named::ArrowLeft) | Key::Named(Named::Backspace) => {
                 if self.tab == Tab::Detail {
-                    if let Some((col_idx, ref mut photo_idx)) = self.collection_nav {
+                    if let Some((col_idx, photo_idx)) = self.collection_nav {
                         if let Some(col) = self.collection_store.collections.get(col_idx) {
-                            if !col.photos.is_empty() {
-                                *photo_idx = if *photo_idx == 0 {
-                                    col.photos.len() - 1
-                                } else {
-                                    *photo_idx - 1
-                                };
-                                let path = col.photos[*photo_idx].clone();
+                            if let Some(current) =
+                                self.clamped_collection_photo_index(col_idx, photo_idx)
+                            {
+                                let previous =
+                                    Self::step_wrapped_index(current, col.photos.len(), false);
+                                self.collection_nav = Some((col_idx, previous));
+                                let path = col.photos[previous].clone();
                                 self.current_image_path = Some(path.clone());
                                 return self.start_load(path);
                             }
                         }
-                    } else if let Some(ref mut lib_idx) = self.library_index {
-                        if !self.library.is_empty() {
-                            *lib_idx = if *lib_idx == 0 {
-                                self.library.len() - 1
-                            } else {
-                                *lib_idx - 1
-                            };
-                            let path = self.library[*lib_idx].path.clone();
+                    } else if let Some(lib_idx) = self.library_index {
+                        if let Some(current) = self.clamped_library_index(lib_idx) {
+                            let previous =
+                                Self::step_wrapped_index(current, self.library.len(), false);
+                            self.library_index = Some(previous);
+                            let path = self.library[previous].path.clone();
                             self.current_image_path = Some(path.clone());
                             return self.start_load(path);
                         }
@@ -1499,13 +1498,12 @@ impl App {
         ];
 
         let sidebar = self.collection_sidebar();
-        let divider =
-            container(Space::with_width(COLLECTION_SIDEBAR_DIVIDER_WIDTH))
-                .height(Length::Fill)
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(Background::Color(DIVIDER)),
-                    ..Default::default()
-                });
+        let divider = container(Space::with_width(COLLECTION_SIDEBAR_DIVIDER_WIDTH))
+            .height(Length::Fill)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(Background::Color(DIVIDER)),
+                ..Default::default()
+            });
 
         container(row![
             sidebar,
@@ -1716,6 +1714,64 @@ impl App {
             .and_then(|&index| self.library.get(index))
     }
 
+    fn clamped_library_index(&self, index: usize) -> Option<usize> {
+        if self.library.is_empty() {
+            None
+        } else {
+            Some(index.min(self.library.len() - 1))
+        }
+    }
+
+    fn clamped_collection_photo_index(
+        &self,
+        collection_index: usize,
+        photo_index: usize,
+    ) -> Option<usize> {
+        let collection = self.collection_store.collections.get(collection_index)?;
+        if collection.photos.is_empty() {
+            None
+        } else {
+            Some(photo_index.min(collection.photos.len() - 1))
+        }
+    }
+
+    fn step_wrapped_index(current: usize, len: usize, forward: bool) -> usize {
+        if forward {
+            (current + 1) % len
+        } else if current == 0 {
+            len - 1
+        } else {
+            current - 1
+        }
+    }
+
+    fn library_photo_context_menu_actions(&self, photo_path: &Path) -> Vec<(String, Message)> {
+        // Detail navigation clamps stale positions, while context-menu actions fail closed if the
+        // original photo disappears before the click is handled.
+        if self.library_entry_by_path(photo_path).is_none() {
+            return Vec::new();
+        }
+
+        self.collection_store
+            .collections
+            .iter()
+            .enumerate()
+            .map(|(i, col)| {
+                if col.photos.iter().any(|existing| existing == photo_path) {
+                    (
+                        format!("\u{2713} {}", col.name),
+                        Message::TogglePhotoInCollection(i),
+                    )
+                } else {
+                    (
+                        format!("Add to {}", col.name),
+                        Message::AddPhotoToCollection(i),
+                    )
+                }
+            })
+            .collect()
+    }
+
     fn library_grid_layout(&self) -> ThumbnailGridLayout {
         let grid_width =
             self.window_size.width - COLLECTION_SIDEBAR_WIDTH - COLLECTION_SIDEBAR_DIVIDER_WIDTH;
@@ -1754,7 +1810,10 @@ impl App {
                     .as_ref()
                     .map(|p| path_filename_str(p).to_string())
                     .unwrap_or_default()
-            } else if let Some(idx) = self.library_index {
+            } else if let Some(idx) = self
+                .library_index
+                .and_then(|idx| self.clamped_library_index(idx))
+            {
                 self.library
                     .get(idx)
                     .map(|e| e.filename.clone())
@@ -1772,8 +1831,15 @@ impl App {
                     .get(col_idx)
                     .map(|c| c.photos.len())
                     .unwrap_or(0);
-                format!("  {}/{}", photo_idx + 1, total)
-            } else if let Some(idx) = self.library_index {
+                let current = self
+                    .clamped_collection_photo_index(col_idx, photo_idx)
+                    .map(|idx| idx + 1)
+                    .unwrap_or(0);
+                format!("  {current}/{total}")
+            } else if let Some(idx) = self
+                .library_index
+                .and_then(|idx| self.clamped_library_index(idx))
+            {
                 format!("  {}/{}", idx + 1, self.library.len())
             } else {
                 self.nav
@@ -1910,8 +1976,12 @@ impl App {
             return;
         }
 
-        self.zoom =
-            self.actual_size_zoom_for_rotation_and_crop(canvas_size, img, current_rotation, current_crop);
+        self.zoom = self.actual_size_zoom_for_rotation_and_crop(
+            canvas_size,
+            img,
+            current_rotation,
+            current_crop,
+        );
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
@@ -2017,7 +2087,11 @@ impl App {
         ]
         .spacing(8);
 
-        let crop_mode_label = if self.crop_mode { "Finish Crop" } else { "Crop" };
+        let crop_mode_label = if self.crop_mode {
+            "Finish Crop"
+        } else {
+            "Crop"
+        };
         let crop_row = row![
             button(text(crop_mode_label).size(11).color(TEXT_PRIMARY))
                 .on_press(Message::ToggleCropMode)
@@ -2189,27 +2263,11 @@ impl App {
                     context_menu_item("Delete", Message::ContextMenuDelete),
                 ]
             }
-            ContextMenuKind::LibraryPhoto { photo_index } => {
-                let photo_path = &self.library[*photo_index].path;
-                self.collection_store
-                    .collections
-                    .iter()
-                    .enumerate()
-                    .map(|(i, col)| {
-                        if col.photos.contains(photo_path) {
-                            context_menu_item(
-                                format!("\u{2713} {}", col.name),
-                                Message::TogglePhotoInCollection(i),
-                            )
-                        } else {
-                            context_menu_item(
-                                format!("Add to {}", col.name),
-                                Message::AddPhotoToCollection(i),
-                            )
-                        }
-                    })
-                    .collect()
-            }
+            ContextMenuKind::LibraryPhoto { photo_path } => self
+                .library_photo_context_menu_actions(photo_path)
+                .into_iter()
+                .map(|(label, message)| context_menu_item(label, message))
+                .collect(),
             ContextMenuKind::CollectionPhoto { .. } => {
                 let col_name = self
                     .active_collection
@@ -2582,6 +2640,9 @@ mod tests {
         app.tab = Tab::Detail;
         app.library.clear();
         app.rebuild_library_indices();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
         app.image = Some(Arc::new(decode::ImageData {
             pixels: vec![0, 0, 0, 255],
             width,
@@ -2595,6 +2656,9 @@ mod tests {
     fn library_app_with_entries(count: usize) -> App {
         let (mut app, _) = App::new();
         app.tab = Tab::Library;
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
         app.library = (0..count)
             .map(|index| LibraryEntry {
                 path: PathBuf::from(format!("photo-{index}.png")),
@@ -2703,6 +2767,99 @@ mod tests {
             wide_columns > narrow_columns,
             "expected collection thumbnails to reflow after resizing in detail view"
         );
+    }
+
+    #[test]
+    fn stale_collection_nav_prev_clamps_to_last_valid_photo() {
+        let mut app = detail_app_with_image(Path::new("frame.png"), 200, 100);
+        app.collection_store.create("Favorites");
+        let only_photo = PathBuf::from("only-photo.png");
+        app.collection_store.add_photo(0, &only_photo);
+        app.collection_nav = Some((0, 99));
+
+        let _ = app.handle_key(
+            keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
+            keyboard::Modifiers::default(),
+        );
+
+        assert_eq!(app.collection_nav, Some((0, 0)));
+        assert_eq!(
+            app.current_image_path.as_deref(),
+            Some(only_photo.as_path())
+        );
+    }
+
+    #[test]
+    fn stale_collection_nav_next_clamps_then_wraps() {
+        let mut app = detail_app_with_image(Path::new("frame.png"), 200, 100);
+        app.collection_store.create("Favorites");
+        let photos = [
+            PathBuf::from("one.png"),
+            PathBuf::from("two.png"),
+            PathBuf::from("three.png"),
+        ];
+        for photo in &photos {
+            app.collection_store.add_photo(0, photo);
+        }
+        app.collection_nav = Some((0, 99));
+
+        let _ = app.handle_key(
+            keyboard::Key::Named(keyboard::key::Named::ArrowRight),
+            keyboard::Modifiers::default(),
+        );
+
+        assert_eq!(app.collection_nav, Some((0, 0)));
+        assert_eq!(app.current_image_path.as_deref(), Some(photos[0].as_path()));
+    }
+
+    #[test]
+    fn stale_library_index_prev_clamps_to_last_valid_photo() {
+        let mut app = library_app_with_entries(1);
+        app.tab = Tab::Detail;
+        app.library_index = Some(99);
+        let expected_path = app.library[0].path.clone();
+
+        let _ = app.handle_key(
+            keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
+            keyboard::Modifiers::default(),
+        );
+
+        assert_eq!(app.library_index, Some(0));
+        assert_eq!(
+            app.current_image_path.as_deref(),
+            Some(expected_path.as_path())
+        );
+    }
+
+    #[test]
+    fn stale_library_index_next_clamps_then_wraps() {
+        let mut app = library_app_with_entries(3);
+        app.tab = Tab::Detail;
+        app.library_index = Some(99);
+        let expected_path = app.library[0].path.clone();
+
+        let _ = app.handle_key(
+            keyboard::Key::Named(keyboard::key::Named::ArrowRight),
+            keyboard::Modifiers::default(),
+        );
+
+        assert_eq!(app.library_index, Some(0));
+        assert_eq!(
+            app.current_image_path.as_deref(),
+            Some(expected_path.as_path())
+        );
+    }
+
+    #[test]
+    fn stale_library_photo_context_menu_ignores_missing_target() {
+        let mut app = library_app_with_entries(1);
+        let photo_path = app.library[0].path.clone();
+        app.library.clear();
+        app.rebuild_library_indices();
+
+        assert!(app
+            .library_photo_context_menu_actions(&photo_path)
+            .is_empty());
     }
 
     #[test]
@@ -3044,20 +3201,67 @@ mod tests {
 
     #[test]
     fn library_photo_right_click_creates_context_menu() {
-        // Simulate LibraryPhotoRightClicked with collections present
-        let mut store = collection::CollectionStore::default();
-        store.create("My Collection");
-        assert!(!store.collections.is_empty());
+        let mut app = library_app_with_entries(3);
+        app.collection_store.create("My Collection");
         let cursor_position = [150.0, 300.0];
-        let menu = ContextMenu {
-            position: cursor_position,
-            kind: ContextMenuKind::LibraryPhoto { photo_index: 2 },
+        let expected_path = app.library[2].path.clone();
+        app.cursor_position = cursor_position;
+
+        let _ = app.update(Message::LibraryPhotoRightClicked(2));
+
+        let Some(menu) = app.context_menu.clone() else {
+            panic!("expected library photo context menu");
         };
         assert_eq!(menu.position, [150.0, 300.0]);
         match menu.kind {
-            ContextMenuKind::LibraryPhoto { photo_index } => assert_eq!(photo_index, 2),
+            ContextMenuKind::LibraryPhoto { photo_path } => assert_eq!(photo_path, expected_path),
             _ => panic!("expected LibraryPhoto"),
         }
+    }
+
+    #[test]
+    fn add_photo_to_collection_targets_original_photo_after_library_reflow() {
+        let mut app = library_app_with_entries(3);
+        app.collection_store.create("Favorites");
+        let expected_path = app.library[1].path.clone();
+        app.cursor_position = [150.0, 300.0];
+
+        let _ = app.update(Message::LibraryPhotoRightClicked(1));
+        app.library.remove(0);
+        app.rebuild_library_indices();
+        let _ = app.update(Message::AddPhotoToCollection(0));
+
+        assert_eq!(
+            app.collection_store.collections[0].photos,
+            vec![expected_path]
+        );
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn remove_photo_from_collection_targets_original_photo_after_collection_reflow() {
+        let mut app = detail_app_with_image(Path::new("frame.png"), 200, 100);
+        app.collection_store.create("Favorites");
+        let photos = [
+            PathBuf::from("one.png"),
+            PathBuf::from("two.png"),
+            PathBuf::from("three.png"),
+        ];
+        for photo in &photos {
+            app.collection_store.add_photo(0, photo);
+        }
+        app.active_collection = Some(0);
+        app.cursor_position = [180.0, 280.0];
+
+        let _ = app.update(Message::CollectionPhotoRightClicked(1));
+        app.collection_store.remove_photo(0, &photos[0]);
+        let _ = app.update(Message::RemovePhotoFromCollection);
+
+        assert_eq!(
+            app.collection_store.collections[0].photos,
+            vec![photos[2].clone()]
+        );
+        assert!(app.context_menu.is_none());
     }
 
     #[test]
@@ -3141,7 +3345,8 @@ mod tests {
         let other_path = PathBuf::from("other.png");
         let mut app = detail_app_with_image(&current_path, 200, 100);
 
-        app.edit_histories.insert(current_path.clone(), edit::UndoHistory::new());
+        app.edit_histories
+            .insert(current_path.clone(), edit::UndoHistory::new());
 
         let mut other_history = edit::UndoHistory::new();
         other_history.current.rotation = edit::QuarterTurns::new(2);
@@ -3151,11 +3356,19 @@ mod tests {
         let _ = app.update(Message::RotateClockwise);
 
         assert_eq!(
-            app.edit_histories.get(&current_path).unwrap().current.rotation,
+            app.edit_histories
+                .get(&current_path)
+                .unwrap()
+                .current
+                .rotation,
             edit::QuarterTurns::new(1)
         );
         assert_eq!(
-            app.edit_histories.get(&other_path).unwrap().current.rotation,
+            app.edit_histories
+                .get(&other_path)
+                .unwrap()
+                .current
+                .rotation,
             edit::QuarterTurns::new(2)
         );
     }
@@ -3417,7 +3630,10 @@ mod tests {
             app.current_rotation(),
         );
 
-        let _ = app.handle_key(keyboard::Key::Character("z".into()), keyboard::Modifiers::CTRL);
+        let _ = app.handle_key(
+            keyboard::Key::Character("z".into()),
+            keyboard::Modifiers::CTRL,
+        );
         let undo_zoom = app.actual_size_zoom_for_rotation(
             app.current_canvas_size(),
             app.image.as_ref().unwrap(),
@@ -3447,7 +3663,10 @@ mod tests {
         app.zoom = 3.0;
         app.offset = [20.0, -10.0];
 
-        let _ = app.handle_key(keyboard::Key::Character("1".into()), keyboard::Modifiers::default());
+        let _ = app.handle_key(
+            keyboard::Key::Character("1".into()),
+            keyboard::Modifiers::default(),
+        );
 
         let expected_zoom = app.actual_size_zoom_for_rotation(
             app.current_canvas_size(),

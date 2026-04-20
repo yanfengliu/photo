@@ -364,11 +364,7 @@ impl ImageCanvas {
         image_rect_from_normalized(bounds, self.compute_rect(bounds))
     }
 
-    fn overlay_crop(
-        &self,
-        state: &ViewerState,
-        bounds: Rectangle,
-    ) -> Option<edit::CropRect> {
+    fn overlay_crop(&self, state: &ViewerState, bounds: Rectangle) -> Option<edit::CropRect> {
         if !self.crop_mode {
             return None;
         }
@@ -1577,7 +1573,9 @@ mod tests {
             &mut shell,
         );
         assert!(matches!(status, event::Status::Captured));
-        assert!(matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 20.0) && approx_eq(delta[1], 10.0)));
+        assert!(
+            matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 20.0) && approx_eq(delta[1], 10.0))
+        );
 
         canvas.zoom = 1.0;
         canvas.offset = [18.0, -9.0];
@@ -1604,7 +1602,9 @@ mod tests {
             &mut shell,
         );
         assert!(matches!(status, event::Status::Captured));
-        assert!(matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 20.0) && approx_eq(delta[1], 10.0)));
+        assert!(
+            matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 20.0) && approx_eq(delta[1], 10.0))
+        );
     }
 
     #[test]
@@ -1672,7 +1672,9 @@ mod tests {
             &mut shell,
         );
         assert!(matches!(status, event::Status::Captured));
-        assert!(matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 10.0) && approx_eq(delta[1], 20.0)));
+        assert!(
+            matches!(event, Some(ViewerEvent::Pan { delta }) if approx_eq(delta[0], 10.0) && approx_eq(delta[1], 20.0))
+        );
     }
 
     #[test]

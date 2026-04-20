@@ -723,11 +723,26 @@ mod tests {
 
     #[test]
     fn rotated_dimensions_swap_axes_for_odd_quarter_turns() {
-        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(0)), (200, 100));
-        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(1)), (100, 200));
-        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(2)), (200, 100));
-        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(3)), (100, 200));
-        assert_eq!(rotated_dimensions(200u32, 100u32, QuarterTurns::new(5)), (100, 200));
+        assert_eq!(
+            rotated_dimensions(200u32, 100u32, QuarterTurns::new(0)),
+            (200, 100)
+        );
+        assert_eq!(
+            rotated_dimensions(200u32, 100u32, QuarterTurns::new(1)),
+            (100, 200)
+        );
+        assert_eq!(
+            rotated_dimensions(200u32, 100u32, QuarterTurns::new(2)),
+            (200, 100)
+        );
+        assert_eq!(
+            rotated_dimensions(200u32, 100u32, QuarterTurns::new(3)),
+            (100, 200)
+        );
+        assert_eq!(
+            rotated_dimensions(200u32, 100u32, QuarterTurns::new(5)),
+            (100, 200)
+        );
     }
 
     #[test]
