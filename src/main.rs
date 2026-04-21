@@ -26,6 +26,7 @@ use iced::{
     event, keyboard, mouse, window, Alignment, Background, Border, Color, Element, Length, Point,
     Size, Subscription, Task, Theme,
 };
+use serde::{Deserialize, Serialize};
 
 use decode::ImageData;
 use nav::DirNav;
@@ -231,6 +232,12 @@ struct SaveRequest {
     image: Arc<ImageData>,
     state: edit::EditState,
     vig: [f32; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedEditEntry {
+    path: PathBuf,
+    state: edit::EditState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,7 +681,7 @@ impl App {
             library_index: None,
             detail_load: DetailLoadState::default(),
             error: None,
-            edit_histories: std::collections::HashMap::new(),
+            edit_histories: load_local_edits(),
             current_image_path: None,
             lens_db: lens::LensDatabase::load_bundled(),
             current_lens_profile: None,
@@ -964,6 +971,7 @@ impl App {
                         let history = self.edit_histories.entry(path.clone()).or_default();
                         set_slider_field(&mut history.current, kind, 0.0);
                         history.commit();
+                        self.persist_local_edits();
                     }
                 } else {
                     self.last_slider_release = Some((kind, now));
@@ -972,6 +980,7 @@ impl App {
                         if let Some(path) = &self.current_image_path {
                             if let Some(history) = self.edit_histories.get_mut(path) {
                                 history.commit();
+                                self.persist_local_edits();
                             }
                         }
                     }
@@ -984,6 +993,7 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     set_slider_field(&mut history.current, kind, 0.0);
                     history.commit();
+                    self.persist_local_edits();
                 }
                 Task::none()
             }
@@ -994,6 +1004,7 @@ impl App {
                 if let Some(path) = &self.current_image_path {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.reset_all();
+                    self.persist_local_edits();
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 Task::none()
@@ -1004,6 +1015,7 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.lens_correction = !history.current.lens_correction;
                     history.commit();
+                    self.persist_local_edits();
                 }
                 Task::none()
             }
@@ -1015,6 +1027,7 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.rotate_clockwise();
                     history.commit();
+                    self.persist_local_edits();
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 Task::none()
@@ -1027,6 +1040,7 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.rotate_counterclockwise();
                     history.commit();
+                    self.persist_local_edits();
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
                 Task::none()
@@ -1086,6 +1100,7 @@ impl App {
                     if history.current.crop.is_some() {
                         history.current.crop = None;
                         history.commit();
+                        self.persist_local_edits();
                     }
                 }
                 self.crop_mode = false;
@@ -1118,6 +1133,7 @@ impl App {
                         let history = self.edit_histories.entry(path.clone()).or_default();
                         set_slider_field(&mut history.current, kind, clamped);
                         history.commit();
+                        self.persist_local_edits();
                     }
                 }
                 self.editing_slider = None;
@@ -1439,6 +1455,7 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.crop = Some(rect);
                     history.commit();
+                    self.persist_local_edits();
                 }
                 self.crop_mode = false;
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
@@ -1593,7 +1610,9 @@ impl App {
                 let previous_crop = self.visible_crop();
                 if let Some(path) = &self.current_image_path {
                     if let Some(history) = self.edit_histories.get_mut(path) {
-                        history.undo();
+                        if history.undo() {
+                            self.persist_local_edits();
+                        }
                     }
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
@@ -1608,7 +1627,9 @@ impl App {
                 let previous_crop = self.visible_crop();
                 if let Some(path) = &self.current_image_path {
                     if let Some(history) = self.edit_histories.get_mut(path) {
-                        history.redo();
+                        if history.redo() {
+                            self.persist_local_edits();
+                        }
                     }
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
@@ -2554,6 +2575,10 @@ impl App {
         })
     }
 
+    fn persist_local_edits(&self) {
+        save_local_edits(&self.edit_histories);
+    }
+
     fn current_lens_vignetting(&self, lens_correction_enabled: bool) -> [f32; 3] {
         if !lens_correction_enabled {
             return [0.0; 3];
@@ -3272,8 +3297,76 @@ fn slider_step(kind: SliderKind) -> f32 {
     }
 }
 
+fn local_app_storage_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|dir| Path::new(&dir).join("photo"))
+}
+
 fn library_file_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|dir| Path::new(&dir).join("photo").join("library.txt"))
+    local_app_storage_dir().map(|dir| dir.join("library.txt"))
+}
+
+fn local_edits_file_path() -> Option<PathBuf> {
+    local_app_storage_dir().map(|dir| dir.join("edits.json"))
+}
+
+fn save_local_edits_to(
+    path: &Path,
+    edit_histories: &std::collections::HashMap<PathBuf, edit::UndoHistory>,
+) {
+    let mut entries = edit_histories
+        .iter()
+        .filter(|(image_path, history)| image_path.exists() && !history.current.is_default())
+        .map(|(image_path, history)| PersistedEditEntry {
+            path: image_path.clone(),
+            state: history.current,
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+    if entries.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&entries) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn save_local_edits(edit_histories: &std::collections::HashMap<PathBuf, edit::UndoHistory>) {
+    let Some(path) = local_edits_file_path() else {
+        return;
+    };
+    save_local_edits_to(&path, edit_histories);
+}
+
+fn load_local_edits_from(path: &Path) -> std::collections::HashMap<PathBuf, edit::UndoHistory> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<PersistedEditEntry>>(&content) else {
+        return std::collections::HashMap::new();
+    };
+
+    entries
+        .into_iter()
+        .filter(|entry| entry.path.exists())
+        .filter_map(|entry| {
+            let state = entry.state.sanitized();
+            (!state.is_default()).then(|| (entry.path, edit::UndoHistory::from_saved_state(state)))
+        })
+        .collect()
+}
+
+fn load_local_edits() -> std::collections::HashMap<PathBuf, edit::UndoHistory> {
+    let Some(path) = local_edits_file_path() else {
+        return std::collections::HashMap::new();
+    };
+    load_local_edits_from(&path)
 }
 
 fn save_library(library: &[LibraryEntry]) {
@@ -3333,6 +3426,7 @@ mod tests {
         let (mut app, _) = App::new();
         app.tab = Tab::Detail;
         app.clear_library_entries();
+        app.edit_histories.clear();
         app.collection_store = collection::CollectionStore::default();
         app.active_collection = None;
         app.context_menu = None;
@@ -3374,6 +3468,7 @@ mod tests {
     fn library_app_with_entries(count: usize) -> App {
         let (mut app, _) = App::new();
         app.tab = Tab::Library;
+        app.edit_histories.clear();
         app.collection_store = collection::CollectionStore::default();
         app.active_collection = None;
         app.context_menu = None;
@@ -3621,6 +3716,116 @@ mod tests {
             .collect();
 
         assert_eq!(loaded, vec![p1, p2]);
+    }
+
+    #[test]
+    fn local_edits_round_trip_rotation_and_crop() {
+        let dir = tempfile::tempdir().unwrap();
+        let edits_path = dir.path().join("edits.json");
+        let image_path = dir.path().join("frame.png");
+        std::fs::write(&image_path, b"frame").unwrap();
+
+        let state = edit::EditState {
+            exposure: 1.0,
+            rotation: edit::QuarterTurns::new(1),
+            crop: Some(edit::CropRect::new(0.25, 0.0, 0.75, 1.0)),
+            ..edit::EditState::default()
+        };
+        let mut histories = std::collections::HashMap::new();
+        histories.insert(image_path.clone(), edit::UndoHistory::from_saved_state(state));
+
+        save_local_edits_to(&edits_path, &histories);
+        let loaded = load_local_edits_from(&edits_path);
+
+        let history = loaded.get(&image_path).expect("persisted edit state");
+        assert_eq!(history.current, state);
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn local_edits_skip_default_and_missing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let edits_path = dir.path().join("edits.json");
+        let kept_path = dir.path().join("kept.png");
+        let default_path = dir.path().join("default.png");
+        let missing_path = dir.path().join("missing.png");
+        std::fs::write(&kept_path, b"kept").unwrap();
+        std::fs::write(&default_path, b"default").unwrap();
+
+        let mut histories = std::collections::HashMap::new();
+        histories.insert(
+            kept_path.clone(),
+            edit::UndoHistory::from_saved_state(edit::EditState {
+                rotation: edit::QuarterTurns::new(3),
+                crop: Some(edit::CropRect::new(0.0, 0.0, 1.0, 0.5)),
+                ..edit::EditState::default()
+            }),
+        );
+        histories.insert(
+            default_path.clone(),
+            edit::UndoHistory::from_saved_state(edit::EditState::default()),
+        );
+        histories.insert(
+            missing_path.clone(),
+            edit::UndoHistory::from_saved_state(edit::EditState {
+                exposure: 0.5,
+                ..edit::EditState::default()
+            }),
+        );
+
+        save_local_edits_to(&edits_path, &histories);
+        let loaded = load_local_edits_from(&edits_path);
+
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains_key(&kept_path));
+        assert!(!loaded.contains_key(&default_path));
+        assert!(!loaded.contains_key(&missing_path));
+    }
+
+    #[test]
+    fn local_edits_normalize_loaded_crop_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let edits_path = dir.path().join("edits.json");
+        let image_path = dir.path().join("frame.png");
+        std::fs::write(&image_path, b"frame").unwrap();
+        let json = serde_json::json!([
+            {
+                "path": image_path,
+                "state": {
+                    "exposure": 0.0,
+                    "contrast": 0.0,
+                    "highlights": 0.0,
+                    "shadows": 0.0,
+                    "whites": 0.0,
+                    "blacks": 0.0,
+                    "temperature": 0.0,
+                    "tint": 0.0,
+                    "vibrance": 0.0,
+                    "saturation": 0.0,
+                    "clarity": 0.0,
+                    "dehaze": 0.0,
+                    "lens_correction": false,
+                    "rotation": 7,
+                    "crop": {
+                        "left": 0.75,
+                        "top": 1.0,
+                        "right": 0.25,
+                        "bottom": 0.0
+                    }
+                }
+            }
+        ]);
+        std::fs::write(&edits_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let loaded = load_local_edits_from(&edits_path);
+        let history = loaded.get(&image_path).expect("normalized edit state");
+
+        assert_eq!(history.current.rotation, edit::QuarterTurns::new(3));
+        assert_eq!(
+            history.current.crop,
+            Some(edit::CropRect::new(0.25, 0.0, 0.75, 1.0))
+        );
     }
 
     #[test]

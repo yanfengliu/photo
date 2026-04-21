@@ -4,7 +4,10 @@
 
 // -- Data model --
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(from = "u8", into = "u8")]
 pub struct QuarterTurns(u8);
 
 impl QuarterTurns {
@@ -29,7 +32,19 @@ impl QuarterTurns {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+impl From<u8> for QuarterTurns {
+    fn from(value: u8) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<QuarterTurns> for u8 {
+    fn from(value: QuarterTurns) -> Self {
+        value.as_u8()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CropRect {
     pub left: f32,
     pub top: f32,
@@ -89,7 +104,7 @@ impl CropRect {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct EditState {
     pub exposure: f32,    // -3.0 to +3.0 (stops)
     pub contrast: f32,    // -50 to +50
@@ -110,9 +125,16 @@ pub struct EditState {
 
 impl EditState {
     /// Returns true if all adjustments are at their defaults (no edits).
-    #[cfg(test)]
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    pub fn sanitized(mut self) -> Self {
+        self.rotation = QuarterTurns::new(self.rotation.as_u8());
+        self.crop = self
+            .crop
+            .map(|crop| CropRect::new(crop.left, crop.top, crop.right, crop.bottom));
+        self
     }
 
     pub fn rotate_clockwise(&mut self) {
@@ -204,6 +226,16 @@ impl UndoHistory {
         self.redo_stack.clear();
         self.committed = EditState::default();
         self.current = EditState::default();
+    }
+
+    pub fn from_saved_state(state: EditState) -> Self {
+        let state = state.sanitized();
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            committed: state,
+            current: state,
+        }
     }
 
     #[cfg(test)]
