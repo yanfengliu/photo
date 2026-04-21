@@ -63,6 +63,8 @@ const ROTATION_ICON_SHAPING: iced::widget::text::Shaping = iced::widget::text::S
 const FULL_IMAGE_SESSION_CACHE_MAX_ENTRIES: usize = 4;
 // Keep enough headroom for a single large RAW decode to stay hot across repeat opens.
 const FULL_IMAGE_SESSION_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
+// Retain a small recent history even when large detail images overflow the byte budget.
+const FULL_IMAGE_SESSION_CACHE_MIN_RECENT_ENTRIES: usize = 2;
 const SOURCE_FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
 const FILE_SHARE_READ: u32 = 0x00000001;
 
@@ -325,6 +327,7 @@ struct SessionFullImageCache {
     total_bytes: usize,
     max_entries: usize,
     max_bytes: usize,
+    min_recent_entries: usize,
 }
 
 impl Default for SessionFullImageCache {
@@ -344,6 +347,7 @@ impl SessionFullImageCache {
             total_bytes: 0,
             max_entries,
             max_bytes,
+            min_recent_entries: FULL_IMAGE_SESSION_CACHE_MIN_RECENT_ENTRIES.min(max_entries),
         }
     }
 
@@ -428,7 +432,8 @@ impl SessionFullImageCache {
     }
 
     fn evict_as_needed(&mut self) {
-        while self.entries.len() > self.max_entries || self.total_bytes > self.max_bytes
+        while self.entries.len() > self.max_entries
+            || (self.entries.len() > self.min_recent_entries && self.total_bytes > self.max_bytes)
         {
             let Some(oldest_path) = self.lru.pop_front() else {
                 break;
@@ -4947,6 +4952,55 @@ mod tests {
     }
 
     #[test]
+    fn reopening_a_recently_viewed_detail_image_reuses_the_session_memory_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.arw");
+        let second = dir.path().join("second.arw");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+
+        let (mut app, _) = App::new();
+        app.collection_store = collection::CollectionStore::default();
+        app.tab = Tab::Detail;
+        app.session_full_image_cache = SessionFullImageCache::new(4, 8);
+
+        app.current_image_path = Some(first.clone());
+        let _ = app.update(Message::ImageLoaded {
+            request_id: app.detail_load.request_id,
+            result: Ok(loaded_full_image(&first, test_image_with_bytes(2, 1, 8))),
+        });
+
+        app.current_image_path = Some(second.clone());
+        let _ = app.update(Message::ImageLoaded {
+            request_id: app.detail_load.request_id,
+            result: Ok(loaded_full_image(&second, test_image_with_bytes(2, 1, 8))),
+        });
+
+        app.error = Some("stale error".to_string());
+        app.save_status = Some("stale save".to_string());
+        app.current_exif = Some(lens::ExifInfo::default());
+        app.zoom = 2.5;
+        app.offset = [18.0, -9.0];
+        app.crop_mode = true;
+
+        let _ = app.start_load(first);
+
+        assert!(!app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert_eq!(
+            app.image.as_ref().map(|image| (image.width, image.height)),
+            Some((2, 1))
+        );
+        assert!(app.error.is_none());
+        assert!(app.save_status.is_none());
+        assert!(app.current_exif.is_none());
+        assert_eq!(app.zoom, 1.0);
+        assert_eq!(app.offset, [0.0, 0.0]);
+        assert!(!app.crop_mode);
+        assert!(app.current_save_request().is_some());
+    }
+
+    #[test]
     fn repeat_raw_open_does_not_treat_embedded_preview_as_a_cached_full_image() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("frame.arw");
@@ -5058,6 +5112,30 @@ mod tests {
         assert!(cache.get(&first).is_none());
         assert!(cache.get(&second).is_some());
         assert!(cache.get(&third).is_some());
+    }
+
+    #[test]
+    fn session_full_image_cache_keeps_two_recent_entries_hot_even_when_they_fill_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.arw");
+        let second = dir.path().join("second.arw");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+
+        let mut cache = SessionFullImageCache::new(4, 8);
+        cache.insert(
+            &first,
+            SourceFileFingerprint::from_path(&first).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+        cache.insert(
+            &second,
+            SourceFileFingerprint::from_path(&second).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+
+        assert!(cache.get(&first).is_some());
+        assert!(cache.get(&second).is_some());
     }
 
     #[test]
