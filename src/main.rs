@@ -10,6 +10,11 @@ mod viewer;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+};
+use std::os::windows::fs::OpenOptionsExt;
 
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
@@ -48,19 +53,44 @@ const GRID_PADDING: f32 = 14.0;
 const GRID_CARD_PADDING: f32 = 6.0;
 const COLLECTION_SIDEBAR_WIDTH: f32 = 180.0;
 const COLLECTION_SIDEBAR_DIVIDER_WIDTH: f32 = 1.0;
-const ROTATE_COUNTERCLOCKWISE_ICON: &str = "↺";
-const ROTATE_CLOCKWISE_ICON: &str = "↻";
-const ROTATE_COUNTERCLOCKWISE_STEP_LABEL: &str = "-90°";
-const ROTATE_CLOCKWISE_STEP_LABEL: &str = "+90°";
+const ROTATE_COUNTERCLOCKWISE_ICON: &str = "\u{21BA}";
+const ROTATE_CLOCKWISE_ICON: &str = "\u{21BB}";
+const ROTATE_COUNTERCLOCKWISE_STEP_LABEL: &str = "-90\u{00B0}";
+const ROTATE_CLOCKWISE_STEP_LABEL: &str = "+90\u{00B0}";
+const ROTATION_ICON_FONT_FAMILY: &str = "Segoe UI Symbol";
+const ROTATION_ICON_FONT: iced::Font = iced::Font::with_name(ROTATION_ICON_FONT_FAMILY);
+const ROTATION_ICON_SHAPING: iced::widget::text::Shaping = iced::widget::text::Shaping::Advanced;
+const FULL_IMAGE_SESSION_CACHE_MAX_ENTRIES: usize = 4;
+// Keep enough headroom for a single large RAW decode to stay hot across repeat opens.
+const FULL_IMAGE_SESSION_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
+const SOURCE_FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
+const FILE_SHARE_READ: u32 = 0x00000001;
 
-fn rotation_button(
+fn rotation_icon_label<'a, ThemeT, RendererT>(
+    icon: &'static str,
+) -> iced::widget::Text<'a, ThemeT, RendererT>
+where
+    ThemeT: iced::widget::text::Catalog + 'a,
+    RendererT: iced::advanced::text::Renderer<Font = iced::Font>,
+{
+    // These glyphs are not consistently present in the default text font.
+    text(icon)
+        .font(ROTATION_ICON_FONT)
+        .shaping(ROTATION_ICON_SHAPING)
+        .size(16)
+}
+
+fn rotation_button_widget<'a, RendererT>(
     icon: &'static str,
     step_label: &'static str,
     message: Message,
-) -> Element<'static, Message> {
+) -> iced::widget::Button<'a, Message, iced::Theme, RendererT>
+where
+    RendererT: iced::advanced::Renderer + iced::advanced::text::Renderer<Font = iced::Font> + 'a,
+{
     button(
         column![
-            text(icon).size(16).color(TEXT_PRIMARY),
+            rotation_icon_label(icon).color(TEXT_PRIMARY),
             text(step_label).size(10).color(TEXT_SECONDARY)
         ]
         .width(Length::Fill)
@@ -71,7 +101,14 @@ fn rotation_button(
     .width(Length::Fill)
     .padding([6, 10])
     .style(toolbar_button_style)
-    .into()
+}
+
+fn rotation_button(
+    icon: &'static str,
+    step_label: &'static str,
+    message: Message,
+) -> Element<'static, Message> {
+    rotation_button_widget::<iced::Renderer>(icon, step_label, message).into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -194,6 +231,215 @@ struct SaveRequest {
     vig: [f32; 3],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceFileFingerprint {
+    file_size: u64,
+    modified: std::time::Duration,
+    content_signature: u64,
+}
+
+impl SourceFileFingerprint {
+    #[cfg(test)]
+    fn from_path(path: &Path) -> Option<Self> {
+        let mut file = File::open(path).ok()?;
+        Self::from_file(&mut file)
+    }
+
+    fn from_file(file: &mut File) -> Option<Self> {
+        let metadata = file.metadata().ok()?;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let content_signature = source_file_signature(file, metadata.len())?;
+        Some(Self {
+            file_size: metadata.len(),
+            modified,
+            content_signature,
+        })
+    }
+}
+
+fn open_cache_validation_handle(path: &Path) -> Option<File> {
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .ok()
+}
+
+fn source_file_signature(file: &mut File, file_size: u64) -> Option<u64> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut hasher = DefaultHasher::new();
+    file_size.hash(&mut hasher);
+    let mut buffer = vec![0; SOURCE_FINGERPRINT_BUFFER_BYTES];
+
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        buffer[..read].hash(&mut hasher);
+    }
+
+    Some(hasher.finish())
+}
+
+fn metadata_matches_fingerprint(path: &Path, fingerprint: SourceFileFingerprint) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return true;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return true;
+    };
+    let Ok(modified) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return true;
+    };
+    metadata.len() == fingerprint.file_size && modified == fingerprint.modified
+}
+
+struct SessionFullImageCacheEntry {
+    fingerprint: SourceFileFingerprint,
+    image: Arc<ImageData>,
+    bytes: usize,
+}
+
+struct SessionFullImageCacheHit {
+    image: Arc<ImageData>,
+    _write_guard: File,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedFullImage {
+    image: Arc<ImageData>,
+    fingerprint: Option<SourceFileFingerprint>,
+}
+
+struct SessionFullImageCache {
+    entries: std::collections::HashMap<PathBuf, SessionFullImageCacheEntry>,
+    lru: std::collections::VecDeque<PathBuf>,
+    total_bytes: usize,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for SessionFullImageCache {
+    fn default() -> Self {
+        Self::new(
+            FULL_IMAGE_SESSION_CACHE_MAX_ENTRIES,
+            FULL_IMAGE_SESSION_CACHE_MAX_BYTES,
+        )
+    }
+}
+
+impl SessionFullImageCache {
+    fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            lru: std::collections::VecDeque::new(),
+            total_bytes: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, path: &Path) -> Option<SessionFullImageCacheHit> {
+        let (cached_fingerprint, image) = match self.entries.get(path) {
+            Some(entry) => (entry.fingerprint, entry.image.clone()),
+            None => return None,
+        };
+
+        let mut guard = open_cache_validation_handle(path)?;
+        let metadata = guard.metadata().ok()?;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        if metadata.len() != cached_fingerprint.file_size || modified != cached_fingerprint.modified
+        {
+            self.remove(path);
+            return None;
+        }
+
+        let Some(fingerprint) = SourceFileFingerprint::from_file(&mut guard) else {
+            self.remove(path);
+            return None;
+        };
+        if fingerprint != cached_fingerprint {
+            self.remove(path);
+            return None;
+        }
+
+        self.touch(path);
+        Some(SessionFullImageCacheHit {
+            image,
+            _write_guard: guard,
+        })
+    }
+
+    fn contains_path(&self, path: &Path) -> bool {
+        self.entries.contains_key(path)
+    }
+
+    fn metadata_matches_path(&self, path: &Path) -> bool {
+        self.entries
+            .get(path)
+            .is_some_and(|entry| metadata_matches_fingerprint(path, entry.fingerprint))
+    }
+
+    fn insert(&mut self, path: &Path, fingerprint: SourceFileFingerprint, image: Arc<ImageData>) {
+        self.remove(path);
+
+        let bytes = image.pixels.len();
+        let path_buf = path.to_path_buf();
+
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.entries.insert(
+            path_buf.clone(),
+            SessionFullImageCacheEntry {
+                fingerprint,
+                image,
+                bytes,
+            },
+        );
+        self.lru.push_back(path_buf);
+        self.evict_as_needed();
+    }
+
+    fn touch(&mut self, path: &Path) {
+        if let Some(position) = self.lru.iter().position(|candidate| candidate == path) {
+            self.lru.remove(position);
+        }
+        self.lru.push_back(path.to_path_buf());
+    }
+
+    fn remove(&mut self, path: &Path) {
+        if let Some(entry) = self.entries.remove(path) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+        }
+        if let Some(position) = self.lru.iter().position(|candidate| candidate == path) {
+            self.lru.remove(position);
+        }
+    }
+
+    fn evict_as_needed(&mut self) {
+        while self.entries.len() > self.max_entries || self.total_bytes > self.max_bytes
+        {
+            let Some(oldest_path) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest_path) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
@@ -285,6 +531,7 @@ struct App {
     offset: [f32; 2],
     window_size: Size,
     canvas_size_cache: Arc<Mutex<[f32; 2]>>,
+    session_full_image_cache: SessionFullImageCache,
     nav: Option<DirNav>,
     library_index: Option<usize>,
     detail_load: DetailLoadState,
@@ -318,6 +565,8 @@ struct App {
     last_collection_click: Option<(usize, Instant)>,
     /// When entering Detail from a collection, stores (collection_index, photo_index_within_collection).
     collection_nav: Option<(usize, usize)>,
+    pending_import_cache_warm_paths: std::collections::VecDeque<PathBuf>,
+    import_cache_warm_in_flight: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -332,7 +581,7 @@ enum Message {
     },
     ImageLoaded {
         request_id: u64,
-        result: Result<Arc<ImageData>, String>,
+        result: Result<LoadedFullImage, String>,
     },
     ExifLoaded {
         request_id: u64,
@@ -346,6 +595,10 @@ enum Message {
     FolderPicked(Option<PathBuf>),
     FilesPicked(Option<Vec<PathBuf>>),
     ThumbnailLoaded(PathBuf, Result<Arc<ImageData>, String>),
+    ImportCacheWarmCompleted {
+        path: PathBuf,
+        result: Result<bool, String>,
+    },
     LibraryItemClicked(usize),
     SliderChanged(SliderKind, f32),
     SliderReleased(SliderKind),
@@ -411,6 +664,7 @@ impl App {
             offset: [0.0, 0.0],
             window_size: DEFAULT_WINDOW_SIZE,
             canvas_size_cache,
+            session_full_image_cache: SessionFullImageCache::default(),
             nav: None,
             library_index: None,
             detail_load: DetailLoadState::default(),
@@ -440,6 +694,8 @@ impl App {
             cursor_position: [0.0, 0.0],
             last_collection_click: None,
             collection_nav: None,
+            pending_import_cache_warm_paths: std::collections::VecDeque::new(),
+            import_cache_warm_in_flight: None,
         };
 
         // Restore saved library entries
@@ -521,7 +777,9 @@ impl App {
                 path,
                 result,
             } => {
-                if !self.detail_load.is_current_request(request_id) || !self.detail_load.is_loading() {
+                if !self.detail_load.is_current_request(request_id)
+                    || !self.detail_load.is_loading()
+                {
                     return Task::none();
                 }
 
@@ -544,9 +802,12 @@ impl App {
                 }
 
                 match result {
-                    Ok(data) => {
+                    Ok(loaded) => {
                         let reset_view = self.detail_load.on_full_image_loaded();
-                        self.apply_loaded_image(data, reset_view);
+                        if let Some(fingerprint) = loaded.fingerprint {
+                            self.cache_full_image_for_current_path(fingerprint, loaded.image.clone());
+                        }
+                        self.apply_loaded_image(loaded.image, reset_view);
                     }
                     Err(e) => {
                         let had_preview = self.detail_load.shows_embedded_preview();
@@ -607,21 +868,14 @@ impl App {
             ),
 
             Message::FolderPicked(Some(folder)) => {
-                let new_paths = scan_folder_for_images(&folder);
-                self.add_library_entries(&new_paths);
-                save_library(&self.library);
-                Self::load_thumbnails(&new_paths)
+                let new_paths = self.filter_new_library_paths(scan_folder_for_images(&folder));
+                self.import_library_paths(new_paths)
             }
             Message::FolderPicked(None) => Task::none(),
 
             Message::FilesPicked(Some(paths)) => {
-                let new_paths: Vec<PathBuf> = paths
-                    .into_iter()
-                    .filter(|p| !self.library.iter().any(|e| e.path == *p))
-                    .collect();
-                self.add_library_entries(&new_paths);
-                save_library(&self.library);
-                Self::load_thumbnails(&new_paths)
+                let new_paths = self.filter_new_library_paths(paths);
+                self.import_library_paths(new_paths)
             }
             Message::FilesPicked(None) => Task::none(),
 
@@ -636,6 +890,19 @@ impl App {
                 Task::none()
             }
             Message::ThumbnailLoaded(_, Err(_)) => Task::none(),
+            Message::ImportCacheWarmCompleted { path, result } => {
+                if self.import_cache_warm_in_flight.as_deref() == Some(path.as_path()) {
+                    self.import_cache_warm_in_flight = None;
+                }
+                if let Err(error) = result {
+                    log::warn!(
+                        "Import-time decoded cache warm failed for {}: {}",
+                        path.display(),
+                        error
+                    );
+                }
+                self.start_next_import_cache_warm_if_idle()
+            }
 
             Message::LibraryItemClicked(index) => {
                 // Start potential drag
@@ -1422,6 +1689,65 @@ impl App {
         self.rebuild_library_indices();
     }
 
+    fn filter_new_library_paths(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut new_paths = Vec::new();
+        for path in paths {
+            if self.library.iter().any(|entry| entry.path == path)
+                || new_paths.iter().any(|candidate| candidate == &path)
+            {
+                continue;
+            }
+            new_paths.push(path);
+        }
+        new_paths
+    }
+
+    fn import_library_paths(&mut self, new_paths: Vec<PathBuf>) -> Task<Message> {
+        if new_paths.is_empty() {
+            return Task::none();
+        }
+
+        self.add_library_entries(&new_paths);
+        save_library(&self.library);
+
+        Task::batch([
+            Self::load_thumbnails(&new_paths),
+            self.enqueue_import_cache_warm_paths(&new_paths),
+        ])
+    }
+
+    fn enqueue_import_cache_warm_paths(&mut self, paths: &[PathBuf]) -> Task<Message> {
+        for path in paths {
+            if !decode::path_uses_persisted_decoded_cache(path) {
+                continue;
+            }
+            if self.import_cache_warm_in_flight.as_deref() == Some(path.as_path())
+                || self
+                    .pending_import_cache_warm_paths
+                    .iter()
+                    .any(|candidate| candidate == path)
+            {
+                continue;
+            }
+            self.pending_import_cache_warm_paths.push_back(path.clone());
+        }
+
+        self.start_next_import_cache_warm_if_idle()
+    }
+
+    fn start_next_import_cache_warm_if_idle(&mut self) -> Task<Message> {
+        if self.import_cache_warm_in_flight.is_some() {
+            return Task::none();
+        }
+
+        let Some(path) = self.pending_import_cache_warm_paths.pop_front() else {
+            return Task::none();
+        };
+
+        self.import_cache_warm_in_flight = Some(path.clone());
+        Self::import_cache_warm_task(path)
+    }
+
     #[cfg(test)]
     fn replace_library_entries(&mut self, entries: Vec<LibraryEntry>) {
         self.library = entries;
@@ -1484,6 +1810,24 @@ impl App {
         }))
     }
 
+    fn import_cache_warm_task(path: PathBuf) -> Task<Message> {
+        let task_path = path.clone();
+        Task::perform(
+            async move {
+                let result: Result<bool, String> = tokio::task::spawn_blocking(move || {
+                    decode::warm_persisted_decoded_cache(&task_path)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                result
+            },
+            move |result| Message::ImportCacheWarmCompleted {
+                path: path.clone(),
+                result,
+            },
+        )
+    }
+
     fn open_file_dialog(&self) -> Task<Message> {
         Task::perform(
             async {
@@ -1534,9 +1878,11 @@ impl App {
         Task::perform(
             async move {
                 let result: Result<Option<Arc<ImageData>>, String> =
-                    tokio::task::spawn_blocking(move || decode::decode_embedded_preview(&task_path))
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    tokio::task::spawn_blocking(move || {
+                        decode::decode_embedded_preview(&task_path)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
                 result
             },
             move |result| Message::ImagePreviewLoaded {
@@ -1550,10 +1896,19 @@ impl App {
     fn full_image_load_task(path: PathBuf, request_id: u64) -> Task<Message> {
         Task::perform(
             async move {
-                let result: Result<Arc<ImageData>, String> =
-                    tokio::task::spawn_blocking(move || decode::decode_image(&path))
-                        .await
-                        .map_err(|e| e.to_string())?;
+                let result: Result<LoadedFullImage, String> = tokio::task::spawn_blocking(
+                    move || {
+                        let mut guard = open_cache_validation_handle(&path);
+                        let fingerprint = guard
+                            .as_mut()
+                            .and_then(SourceFileFingerprint::from_file);
+                        let image = decode::decode_image(&path)?;
+                        drop(guard);
+                        Ok(LoadedFullImage { image, fingerprint })
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
                 result
             },
             move |result| Message::ImageLoaded { request_id, result },
@@ -1578,17 +1933,58 @@ impl App {
         ])
     }
 
+    fn cache_full_image_for_current_path(
+        &mut self,
+        fingerprint: SourceFileFingerprint,
+        image: Arc<ImageData>,
+    ) {
+        let Some(path) = self.current_image_path.as_deref() else {
+            return;
+        };
+        self.session_full_image_cache.insert(path, fingerprint, image);
+    }
+
+    fn displayed_full_image_for_path(&self, path: &Path) -> Option<Arc<ImageData>> {
+        if self.current_image_path.as_deref() != Some(path) {
+            return None;
+        }
+        if !self.session_full_image_cache.contains_path(path) {
+            return None;
+        }
+        if !self.session_full_image_cache.metadata_matches_path(path) {
+            return None;
+        }
+        if self.detail_load.is_loading() || self.detail_load.shows_embedded_preview() {
+            return None;
+        }
+        self.image.clone()
+    }
+
     fn start_load(&mut self, path: PathBuf) -> Task<Message> {
+        let displayed_full_image = self.displayed_full_image_for_path(&path);
         let request_id = self.detail_load.begin_request();
         self.current_image_path = Some(path.clone());
         self.error = None;
         self.save_status = None;
-        self.image = None;
         self.current_exif = None;
         if self.lens_override_name.is_none() {
             self.current_lens_profile = None;
         }
 
+        if let Some(image) = displayed_full_image {
+            let reset_view = self.detail_load.on_full_image_loaded();
+            self.apply_loaded_image(image, reset_view);
+            return Self::exif_load_task(path, request_id);
+        }
+
+        let cached_full_image = self.session_full_image_cache.get(&path);
+        if let Some(hit) = cached_full_image {
+            let reset_view = self.detail_load.on_full_image_loaded();
+            self.apply_loaded_image(hit.image, reset_view);
+            return Self::exif_load_task(path, request_id);
+        }
+
+        self.image = None;
         if nav::is_raw_file(&path) {
             Self::preview_load_task(path, request_id)
         } else {
@@ -2337,10 +2733,10 @@ impl App {
                     .color(TEXT_DIM)
                     .into()
             } else if let Some(profile) = &self.current_lens_profile {
-            text(format!("{} {}", profile.maker, profile.model))
-                .size(10)
-                .color(TEXT_SECONDARY)
-                .into()
+                text(format!("{} {}", profile.maker, profile.model))
+                    .size(10)
+                    .color(TEXT_SECONDARY)
+                    .into()
             } else {
                 text("No lens profile matched")
                     .size(10)
@@ -2954,6 +3350,22 @@ mod tests {
         })
     }
 
+    fn test_image_with_bytes(width: u32, height: u32, bytes: usize) -> Arc<decode::ImageData> {
+        Arc::new(decode::ImageData {
+            pixels: vec![0; bytes],
+            width,
+            height,
+            file_size: u64::try_from(bytes).unwrap_or(u64::MAX),
+        })
+    }
+
+    fn loaded_full_image(path: &Path, image: Arc<decode::ImageData>) -> LoadedFullImage {
+        LoadedFullImage {
+            image,
+            fingerprint: SourceFileFingerprint::from_path(path),
+        }
+    }
+
     fn library_app_with_entries(count: usize) -> App {
         let (mut app, _) = App::new();
         app.tab = Tab::Library;
@@ -3204,6 +3616,101 @@ mod tests {
             .collect();
 
         assert_eq!(loaded, vec![p1, p2]);
+    }
+
+    #[test]
+    fn importing_files_starts_background_cache_warming_for_supported_formats() {
+        let (_dir, paths) = setup_dir(&["frame.dng", "frame.png", "overlay.svg"]);
+        let raw = paths[0].clone();
+        let png = paths[1].clone();
+        let svg = paths[2].clone();
+        let (mut app, _) = App::new();
+        app.clear_library_entries();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
+
+        let _ = app.update(Message::FilesPicked(Some(paths)));
+
+        assert!(app.library_entry_by_path(&raw).is_some());
+        assert!(app.library_entry_by_path(&png).is_some());
+        assert!(app.library_entry_by_path(&svg).is_some());
+        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(raw.as_path()));
+        assert_eq!(
+            app.pending_import_cache_warm_paths.iter().collect::<Vec<_>>(),
+            vec![&svg]
+        );
+    }
+
+    #[test]
+    fn import_cache_warm_completion_advances_to_the_next_supported_image() {
+        let (_dir, paths) = setup_dir(&["frame.dng", "overlay.svg"]);
+        let raw = paths[0].clone();
+        let svg = paths[1].clone();
+        let (mut app, _) = App::new();
+        app.clear_library_entries();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
+
+        let _ = app.update(Message::FilesPicked(Some(paths)));
+        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(raw.as_path()));
+
+        let _ = app.update(Message::ImportCacheWarmCompleted {
+            path: raw,
+            result: Ok(true),
+        });
+
+        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(svg.as_path()));
+        assert!(app.pending_import_cache_warm_paths.is_empty());
+    }
+
+    #[test]
+    fn import_cache_warm_failure_still_advances_to_the_next_supported_image() {
+        let (_dir, paths) = setup_dir(&["frame.dng", "overlay.svg"]);
+        let raw = paths[0].clone();
+        let svg = paths[1].clone();
+        let (mut app, _) = App::new();
+        app.clear_library_entries();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
+
+        let _ = app.update(Message::FilesPicked(Some(paths)));
+        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(raw.as_path()));
+
+        let _ = app.update(Message::ImportCacheWarmCompleted {
+            path: raw,
+            result: Err("warm failed".to_string()),
+        });
+
+        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(svg.as_path()));
+        assert!(app.pending_import_cache_warm_paths.is_empty());
+    }
+
+    #[test]
+    fn importing_more_files_while_a_warm_is_in_flight_appends_to_the_queue() {
+        let (_dir, first_batch) = setup_dir(&["first.dng"]);
+        let first = first_batch[0].clone();
+        let (_dir2, second_batch) = setup_dir(&["second.dng", "overlay.svg"]);
+        let second = second_batch[0].clone();
+        let svg = second_batch[1].clone();
+        let (mut app, _) = App::new();
+        app.clear_library_entries();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
+
+        let _ = app.update(Message::FilesPicked(Some(first_batch)));
+        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(first.as_path()));
+
+        let _ = app.update(Message::FilesPicked(Some(second_batch)));
+
+        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(first.as_path()));
+        assert_eq!(
+            app.pending_import_cache_warm_paths.iter().collect::<Vec<_>>(),
+            vec![&second, &svg]
+        );
     }
 
     #[test]
@@ -3969,6 +4476,7 @@ mod tests {
     #[test]
     fn rotation_controls_use_icon_buttons() {
         use iced::advanced::widget::Tree;
+        use iced::advanced::{layout, text as advanced_text, Widget};
 
         let button_ref: Element<'static, Message> = button(text("x")).into();
         let text_ref: Element<'static, Message> = text("x").into();
@@ -3983,10 +4491,228 @@ mod tests {
         let container_tag = Tree::new(&container_ref).tag;
         let row_tag = Tree::new(&row_ref).tag;
 
-        assert_eq!(ROTATE_COUNTERCLOCKWISE_ICON, "↺");
-        assert_eq!(ROTATE_CLOCKWISE_ICON, "↻");
-        assert_eq!(ROTATE_COUNTERCLOCKWISE_STEP_LABEL, "-90°");
-        assert_eq!(ROTATE_CLOCKWISE_STEP_LABEL, "+90°");
+        assert_eq!(ROTATE_COUNTERCLOCKWISE_ICON, "\u{21BA}");
+        assert_eq!(ROTATE_CLOCKWISE_ICON, "\u{21BB}");
+        assert_eq!(ROTATE_COUNTERCLOCKWISE_STEP_LABEL, "-90\u{00B0}");
+        assert_eq!(ROTATE_CLOCKWISE_STEP_LABEL, "+90\u{00B0}");
+        assert_eq!(ROTATION_ICON_FONT_FAMILY, "Segoe UI Symbol");
+        assert_eq!(
+            ROTATION_ICON_FONT,
+            iced::Font::with_name(ROTATION_ICON_FONT_FAMILY)
+        );
+        assert_eq!(ROTATION_ICON_SHAPING, iced::widget::text::Shaping::Advanced);
+
+        #[derive(Debug, Clone, Default)]
+        struct CapturingParagraph {
+            last_text: Option<advanced_text::Text<String, iced::Font>>,
+        }
+
+        impl advanced_text::Paragraph for CapturingParagraph {
+            type Font = iced::Font;
+
+            fn with_text(text: advanced_text::Text<&str, Self::Font>) -> Self {
+                Self {
+                    last_text: Some(advanced_text::Text {
+                        content: text.content.to_owned(),
+                        bounds: text.bounds,
+                        size: text.size,
+                        line_height: text.line_height,
+                        font: text.font,
+                        horizontal_alignment: text.horizontal_alignment,
+                        vertical_alignment: text.vertical_alignment,
+                        shaping: text.shaping,
+                        wrapping: text.wrapping,
+                    }),
+                }
+            }
+
+            fn with_spans<Link>(
+                _text: advanced_text::Text<
+                    &[advanced_text::Span<'_, Link, Self::Font>],
+                    Self::Font,
+                >,
+            ) -> Self {
+                Self::default()
+            }
+
+            fn resize(&mut self, new_bounds: iced::Size) {
+                if let Some(last_text) = &mut self.last_text {
+                    last_text.bounds = new_bounds;
+                }
+            }
+
+            fn compare(
+                &self,
+                text: advanced_text::Text<(), Self::Font>,
+            ) -> advanced_text::Difference {
+                let Some(last_text) = &self.last_text else {
+                    return advanced_text::Difference::Shape;
+                };
+
+                let same_shape = last_text.size == text.size
+                    && last_text.line_height == text.line_height
+                    && last_text.font == text.font
+                    && last_text.horizontal_alignment == text.horizontal_alignment
+                    && last_text.vertical_alignment == text.vertical_alignment
+                    && last_text.shaping == text.shaping
+                    && last_text.wrapping == text.wrapping;
+
+                if same_shape && last_text.bounds == text.bounds {
+                    advanced_text::Difference::None
+                } else if same_shape {
+                    advanced_text::Difference::Bounds
+                } else {
+                    advanced_text::Difference::Shape
+                }
+            }
+
+            fn horizontal_alignment(&self) -> iced::alignment::Horizontal {
+                self.last_text
+                    .as_ref()
+                    .map(|text| text.horizontal_alignment)
+                    .unwrap_or(iced::alignment::Horizontal::Left)
+            }
+
+            fn vertical_alignment(&self) -> iced::alignment::Vertical {
+                self.last_text
+                    .as_ref()
+                    .map(|text| text.vertical_alignment)
+                    .unwrap_or(iced::alignment::Vertical::Top)
+            }
+
+            fn min_bounds(&self) -> iced::Size {
+                self.last_text
+                    .as_ref()
+                    .map(|text| text.bounds)
+                    .unwrap_or(iced::Size::ZERO)
+            }
+
+            fn hit_test(&self, _point: iced::Point) -> Option<advanced_text::Hit> {
+                None
+            }
+
+            fn hit_span(&self, _point: iced::Point) -> Option<usize> {
+                None
+            }
+
+            fn span_bounds(&self, _index: usize) -> Vec<iced::Rectangle> {
+                vec![]
+            }
+
+            fn grapheme_position(&self, _line: usize, _index: usize) -> Option<iced::Point> {
+                None
+            }
+        }
+
+        #[derive(Default)]
+        struct CapturingRenderer;
+
+        impl iced::advanced::Renderer for CapturingRenderer {
+            fn start_layer(&mut self, _bounds: iced::Rectangle) {}
+
+            fn end_layer(&mut self) {}
+
+            fn start_transformation(&mut self, _transformation: iced::Transformation) {}
+
+            fn end_transformation(&mut self) {}
+
+            fn fill_quad(
+                &mut self,
+                _quad: iced::advanced::renderer::Quad,
+                _background: impl Into<iced::Background>,
+            ) {
+            }
+
+            fn clear(&mut self) {}
+        }
+
+        impl advanced_text::Renderer for CapturingRenderer {
+            type Font = iced::Font;
+            type Paragraph = CapturingParagraph;
+            type Editor = ();
+
+            const ICON_FONT: Self::Font = iced::Font::DEFAULT;
+            const CHECKMARK_ICON: char = '0';
+            const ARROW_DOWN_ICON: char = '0';
+
+            fn default_font(&self) -> Self::Font {
+                iced::Font::DEFAULT
+            }
+
+            fn default_size(&self) -> iced::Pixels {
+                iced::Pixels(16.0)
+            }
+
+            fn fill_paragraph(
+                &mut self,
+                _paragraph: &Self::Paragraph,
+                _position: iced::Point,
+                _color: iced::Color,
+                _clip_bounds: iced::Rectangle,
+            ) {
+            }
+
+            fn fill_editor(
+                &mut self,
+                _editor: &Self::Editor,
+                _position: iced::Point,
+                _color: iced::Color,
+                _clip_bounds: iced::Rectangle,
+            ) {
+            }
+
+            fn fill_text(
+                &mut self,
+                _text: advanced_text::Text<String, Self::Font>,
+                _position: iced::Point,
+                _color: iced::Color,
+                _clip_bounds: iced::Rectangle,
+            ) {
+            }
+        }
+
+        fn captured_button_icon_text(
+            icon: &'static str,
+            step_label: &'static str,
+            message: Message,
+        ) -> advanced_text::Text<String, iced::Font> {
+            let button: Element<'static, Message, iced::Theme, CapturingRenderer> =
+                rotation_button_widget::<CapturingRenderer>(icon, step_label, message).into();
+            let mut tree = Tree::new(button.as_widget());
+            let renderer = CapturingRenderer;
+            let limits = layout::Limits::new(iced::Size::ZERO, iced::Size::new(200.0, 200.0));
+            let _ = Widget::layout(button.as_widget(), &mut tree, &renderer, &limits);
+
+            tree.children[0].children[0]
+                .state
+                .downcast_ref::<iced::widget::text::State<CapturingParagraph>>()
+                .0
+                .raw()
+                .last_text
+                .clone()
+                .expect("rotation icon label should populate paragraph state")
+        }
+
+        let counterclockwise_icon_text = captured_button_icon_text(
+            ROTATE_COUNTERCLOCKWISE_ICON,
+            ROTATE_COUNTERCLOCKWISE_STEP_LABEL,
+            Message::RotateCounterclockwise,
+        );
+        assert_eq!(
+            counterclockwise_icon_text.content,
+            ROTATE_COUNTERCLOCKWISE_ICON
+        );
+        assert_eq!(counterclockwise_icon_text.font, ROTATION_ICON_FONT);
+        assert_eq!(counterclockwise_icon_text.shaping, ROTATION_ICON_SHAPING);
+
+        let clockwise_icon_text = captured_button_icon_text(
+            ROTATE_CLOCKWISE_ICON,
+            ROTATE_CLOCKWISE_STEP_LABEL,
+            Message::RotateClockwise,
+        );
+        assert_eq!(clockwise_icon_text.content, ROTATE_CLOCKWISE_ICON);
+        assert_eq!(clockwise_icon_text.font, ROTATION_ICON_FONT);
+        assert_eq!(clockwise_icon_text.shaping, ROTATION_ICON_SHAPING);
 
         fn assert_rotation_button_tree(
             tree: &Tree,
@@ -4109,7 +4835,7 @@ mod tests {
 
         let _ = app.update(Message::ImageLoaded {
             request_id,
-            result: Ok(test_image(6000, 3000)),
+            result: Ok(loaded_full_image(Path::new("frame.arw"), test_image(6000, 3000))),
         });
 
         assert!(!app.detail_load.is_loading());
@@ -4132,6 +4858,225 @@ mod tests {
     }
 
     #[test]
+    fn repeat_raw_open_reuses_cached_full_image_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.arw");
+        std::fs::write(&path, b"raw").unwrap();
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id: app.detail_load.request_id,
+            result: Ok(loaded_full_image(&path, test_image(6000, 3000))),
+        });
+
+        app.error = Some("stale error".to_string());
+        app.save_status = Some("stale save".to_string());
+        app.current_exif = Some(lens::ExifInfo::default());
+        app.zoom = 2.5;
+        app.offset = [18.0, -9.0];
+        app.crop_mode = true;
+
+        let _ = app.start_load(path.clone());
+
+        assert!(!app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert_eq!(
+            app.image.as_ref().map(|image| (image.width, image.height)),
+            Some((6000, 3000))
+        );
+        assert!(app.error.is_none());
+        assert!(app.save_status.is_none());
+        assert!(app.current_exif.is_none());
+        assert_eq!(app.zoom, 1.0);
+        assert_eq!(app.offset, [0.0, 0.0]);
+        assert!(!app.crop_mode);
+        assert!(app.current_save_request().is_some());
+    }
+
+    #[test]
+    fn library_reopen_reuses_the_displayed_full_image_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.arw");
+        std::fs::write(&path, b"raw").unwrap();
+
+        let (mut app, _) = App::new();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
+        app.tab = Tab::Detail;
+        app.replace_library_entries(vec![LibraryEntry {
+            path: path.clone(),
+            filename: "frame.arw".to_string(),
+            thumbnail_handle: None,
+        }]);
+        app.current_image_path = Some(path.clone());
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id: app.detail_load.request_id,
+            result: Ok(loaded_full_image(&path, test_image(6000, 3000))),
+        });
+
+        app.error = Some("stale error".to_string());
+        app.save_status = Some("stale save".to_string());
+        app.current_exif = Some(lens::ExifInfo::default());
+        app.zoom = 2.5;
+        app.offset = [18.0, -9.0];
+        app.crop_mode = true;
+
+        let _ = app.update(Message::SwitchTab(Tab::Library));
+        std::fs::remove_file(&path).unwrap();
+
+        let _ = app.update(Message::LibraryItemClicked(0));
+        let _ = app.update(Message::LibraryItemClicked(0));
+
+        assert_eq!(app.tab, Tab::Detail);
+        assert_eq!(app.library_index, Some(0));
+        assert!(!app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert_eq!(
+            app.image.as_ref().map(|image| (image.width, image.height)),
+            Some((6000, 3000))
+        );
+        assert!(app.error.is_none());
+        assert!(app.save_status.is_none());
+        assert!(app.current_exif.is_none());
+        assert_eq!(app.zoom, 1.0);
+        assert_eq!(app.offset, [0.0, 0.0]);
+        assert!(!app.crop_mode);
+        assert!(app.current_save_request().is_some());
+    }
+
+    #[test]
+    fn repeat_raw_open_does_not_treat_embedded_preview_as_a_cached_full_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.arw");
+        std::fs::write(&path, b"raw").unwrap();
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let _ = app.start_load(path.clone());
+        let request_id = app.detail_load.request_id;
+
+        let _ = app.update(Message::ImagePreviewLoaded {
+            request_id,
+            path: path.clone(),
+            result: Ok(Some(test_image(400, 200))),
+        });
+        assert!(app.detail_load.shows_embedded_preview());
+
+        let _ = app.start_load(path);
+
+        assert!(app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert!(app.image.is_none());
+        assert!(app.current_save_request().is_none());
+    }
+
+    #[test]
+    fn repeat_raw_open_ignores_cached_full_image_after_the_source_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.arw");
+        std::fs::write(&path, b"raw").unwrap();
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id: app.detail_load.request_id,
+            result: Ok(loaded_full_image(&path, test_image(6000, 3000))),
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"new").unwrap();
+
+        let _ = app.start_load(path);
+
+        assert!(app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert!(app.image.is_none());
+        assert!(app.current_save_request().is_none());
+    }
+
+    #[test]
+    fn session_full_image_cache_evicts_the_least_recently_used_entry_when_over_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.arw");
+        let second = dir.path().join("second.arw");
+        let third = dir.path().join("third.arw");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        std::fs::write(&third, b"third").unwrap();
+
+        let mut cache = SessionFullImageCache::new(4, 16);
+        cache.insert(
+            &first,
+            SourceFileFingerprint::from_path(&first).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+        cache.insert(
+            &second,
+            SourceFileFingerprint::from_path(&second).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+        assert!(cache.get(&first).is_some());
+
+        cache.insert(
+            &third,
+            SourceFileFingerprint::from_path(&third).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+
+        assert!(cache.get(&first).is_some());
+        assert!(cache.get(&second).is_none());
+        assert!(cache.get(&third).is_some());
+    }
+
+    #[test]
+    fn session_full_image_cache_evicts_oldest_entries_when_the_entry_cap_is_exceeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.arw");
+        let second = dir.path().join("second.arw");
+        let third = dir.path().join("third.arw");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        std::fs::write(&third, b"third").unwrap();
+
+        let mut cache = SessionFullImageCache::new(2, 64);
+        cache.insert(
+            &first,
+            SourceFileFingerprint::from_path(&first).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+        cache.insert(
+            &second,
+            SourceFileFingerprint::from_path(&second).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+        cache.insert(
+            &third,
+            SourceFileFingerprint::from_path(&third).unwrap(),
+            test_image_with_bytes(2, 1, 8),
+        );
+
+        assert!(cache.get(&first).is_none());
+        assert!(cache.get(&second).is_some());
+        assert!(cache.get(&third).is_some());
+    }
+
+    #[test]
+    fn session_full_image_cache_rejects_a_stale_fingerprint_captured_before_a_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.arw");
+        std::fs::write(&path, b"old").unwrap();
+        let old_fingerprint = SourceFileFingerprint::from_path(&path).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"new").unwrap();
+
+        let mut cache = SessionFullImageCache::new(2, 64);
+        cache.insert(&path, old_fingerprint, test_image_with_bytes(2, 1, 8));
+
+        assert!(cache.get(&path).is_none());
+    }
+
+    #[test]
     fn raw_without_embedded_preview_still_finishes_full_resolution_load() {
         let path = PathBuf::from("frame.arw");
         let mut app = detail_app_with_image(&path, 200, 100);
@@ -4151,7 +5096,7 @@ mod tests {
 
         let _ = app.update(Message::ImageLoaded {
             request_id,
-            result: Ok(test_image(6000, 4000)),
+            result: Ok(loaded_full_image(Path::new("frame.arw"), test_image(6000, 4000))),
         });
 
         assert!(!app.detail_load.is_loading());
@@ -4208,7 +5153,7 @@ mod tests {
         });
         let _ = app.update(Message::ImageLoaded {
             request_id: first_request_id,
-            result: Ok(test_image(640, 320)),
+            result: Ok(loaded_full_image(Path::new("first.arw"), test_image(640, 320))),
         });
 
         assert!(app.image.is_none());

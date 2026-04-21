@@ -1,6 +1,7 @@
 /target
 /.claude
 /.superpowers
+/decoded-cache
 *.exe
 *.pdb
 *.dll
