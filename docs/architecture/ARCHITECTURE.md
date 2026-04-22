@@ -5,7 +5,7 @@
 
 ## System Overview
 
-Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats, and RAW Detail view uses a staged load that shows an embedded preview first when available before upgrading to the fully developed image. Edits are non-destructive, persist locally per image across restarts, and can still be exported with save-as-copy.
+Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats, and RAW Detail view uses a staged load that shows an embedded preview first when available before upgrading to the fully developed image. Edits are non-destructive, persist locally per image across restarts in the repo, and can still be exported with save-as-copy.
 
 ## Component Map
 
@@ -45,12 +45,12 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 3. `ImageCanvas` sends uniforms to `prepare()`, which writes the GPU uniform buffer.
 4. The shader applies the adjustments per pixel and dims outside the active crop overlay while crop mode is active.
 5. `UndoHistory::commit()` stores committed states on slider release and crop/rotation commits.
-6. Committed non-default edit states are serialized into `%LOCALAPPDATA%/photo/edits.json` so reopening the same image in a later session restores its last local edit state, including rotation and crop.
+6. Committed non-default edit states are serialized into the repo-local `local-edits.json` file so reopening the same image in a later session restores its last local edit state, including rotation and crop.
 7. `apply_all()` mirrors the shader math at full resolution during save, and the save path applies crop bounds after rotation so preview and export stay aligned.
 
 ### Navigation and Collections
 1. Arrow-key navigation prefers `library_index` and falls back to `DirNav`.
-2. Library paths load from `%LOCALAPPDATA%/photo/library.txt`, and per-image edit states load from `%LOCALAPPDATA%/photo/edits.json`.
+2. Library paths load from `%LOCALAPPDATA%/photo/library.txt`, and per-image edit states load from the repo-local `local-edits.json` file.
 3. Collections load from `%LOCALAPPDATA%/photo/collections.json`.
 4. Collection mutations go through `CollectionStore`.
 5. Photos can be added or removed through context menus or drag-and-drop.

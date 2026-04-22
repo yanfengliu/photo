@@ -66,6 +66,7 @@ const FULL_IMAGE_SESSION_CACHE_MAX_ENTRIES: usize = 4;
 const FULL_IMAGE_SESSION_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
 // Retain a small recent history even when large detail images overflow the byte budget.
 const FULL_IMAGE_SESSION_CACHE_MIN_RECENT_ENTRIES: usize = 2;
+const LOCAL_EDITS_FILE_NAME: &str = "local-edits.json";
 const SOURCE_FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
 const FILE_SHARE_READ: u32 = 0x00000001;
 
@@ -3305,8 +3306,33 @@ fn library_file_path() -> Option<PathBuf> {
     local_app_storage_dir().map(|dir| dir.join("library.txt"))
 }
 
+fn local_edits_file_path_for_repo_root(repo_root: &Path) -> PathBuf {
+    repo_root.join(LOCAL_EDITS_FILE_NAME)
+}
+
 fn local_edits_file_path() -> Option<PathBuf> {
-    local_app_storage_dir().map(|dir| dir.join("edits.json"))
+    photo_repo_root().map(|repo_root| local_edits_file_path_for_repo_root(&repo_root))
+}
+
+fn photo_repo_root() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| find_photo_repo_root(path.parent()?))
+        .or_else(|| std::env::current_dir().ok().and_then(|dir| find_photo_repo_root(&dir)))
+}
+
+fn find_photo_repo_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| is_photo_repo_root(candidate))
+        .map(Path::to_path_buf)
+}
+
+fn is_photo_repo_root(candidate: &Path) -> bool {
+    candidate.join(".git").exists()
+        && candidate.join("AGENTS.md").is_file()
+        && candidate.join("Cargo.toml").is_file()
+        && candidate.join("src").join("main.rs").is_file()
 }
 
 fn save_local_edits_to(
@@ -3716,6 +3742,24 @@ mod tests {
             .collect();
 
         assert_eq!(loaded, vec![p1, p2]);
+    }
+
+    #[test]
+    fn local_edits_file_targets_a_visible_repo_local_file_when_repo_root_is_known() {
+        let repo_root = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            local_edits_file_path_for_repo_root(repo_root.path()),
+            repo_root.path().join(LOCAL_EDITS_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn local_edits_file_resolves_under_this_repo_root() {
+        assert_eq!(
+            local_edits_file_path_for_repo_root(Path::new(env!("CARGO_MANIFEST_DIR"))),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LOCAL_EDITS_FILE_NAME)
+        );
     }
 
     #[test]

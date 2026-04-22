@@ -3,6 +3,7 @@
 Keep this file short, current, and actionable.
 
 ## Active Lessons
+- 2026-04-21 - If local non-destructive metadata needs to be inspectable during development, keep it in a visible repo-local path and lock that path down with a focused regression instead of burying it in profile-scoped app storage.
 - 2026-04-21 - When you persist non-destructive per-image edit state locally, restore it as the committed baseline rather than as an undo step, and normalize saved crop bounds on load so a malformed local file cannot produce inverted crop rectangles.
 - 2026-04-21 - If a same-session full-image cache is byte-bounded, keep at least a small recent-history floor in memory; otherwise a second large Detail image can evict the first immediately and erase the perceived benefit of reopening recently viewed work.
 - 2026-04-21 - When moving expensive first-open work to import time, queue background warmups serially and make failure advance the queue; otherwise bulk imports can overwhelm I/O or one bad file can silently block every later image from getting primed.

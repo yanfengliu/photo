@@ -13,3 +13,4 @@
 | 2026-04-19 | Split canonical docs into `docs/architecture/`, `docs/devlog/`, and support subdirectories with legacy shims at the old flat paths | Align the repo with AGENTS.md while preserving older links during the transition | codex |
 | 2026-04-20 | Switched RAW Detail loading to a staged preview-first flow with async EXIF in `main.rs`/`decode.rs` | Reduce time-to-first-image in Detail while keeping the full-quality RAW decode path | codex |
 | 2026-04-21 | Added local per-image edit persistence in `main.rs`/`edit.rs` | Non-destructive Detail edits, including rotation and crop, now survive reopen and restart through a local edit-state store | codex |
+| 2026-04-21 | Moved local edit persistence from profile-scoped storage to repo-local `local-edits.json` | Make saved edit state inspectable inside the repo, matching the repo-local decoded-cache direction | codex |
