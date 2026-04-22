@@ -4,50 +4,42 @@
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
 - Use a subagent to implement the plan such that the tests pass. For example, if the tech stack uses node, it should make sure `npx vitest run`, `npx tsc --noEmit`, and `npx vite build` pass.
-- Use Codex and Gemini code reviewer subagents to independently review every change on the following aspects, in series:
+- Use all of Codex / Gemini / Claude as code reviewer subagents to independently review every change on the following aspects:
   1. Design.
     - Can easily scale, generalize, debug, be understood and reasoned about, and stay lean.
   2. Test coverage.
   3. Correctness.
   4. Clean code, typing, efficiency, memory leaks.
     - No: god class, large files, duplicated logic, inconsistent implementations, violation of boundaries.
+    - Prefer composition over inheritance.
+    - Clean up dead code.
   5. Documentation.
     - Dev logs should be updated and maintained.
     - References to code should be up to date.
     - No outdated comments.
     - Learnings from debugging and friction points should be documented in `docs/learning/lessons.md`. The file should be actively maintained to not become long, tedious, or outdated.
-- CRITICAL: Each round of review should be done by a new subagent in series. This means 5 steps * 2 reviewers = 10 reviews. Reviews might take a long time depending on the amount of changes you made. Be patient and wait for the result.
+- Reviews might take a long time depending on the amount of changes you made. Be patient and wait for the result.
 - After addressing review comments, ask the reviewer to verify that you have successfully done so. This is basically a second round of full review.
-- Example commands to use Codex for code review:
+- Example command to use Codex for code review:
   - `codex exec --sandbox read-only --ask-for-approval never --ephemeral "Review my code for bugs and security issues but do not make any edits"`
-- Example commands to use Gemini for code review:
+- Example command to use Gemini for code review:
   - `git diff [branch] | gemini -p "@src Review my code for bugs and security issues but do not make any edits" --model gemini-3-pro --thinking high` (Use the @ symbol within the prompt to include directory context for the best reasoning results).
+- Example command to use Claude for code review:
+  - `git diff origin/main...HEAD | claude -p --append-system-prompt "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Be concise." --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
 - The reviewers should check `docs/learning/lessons.md`.
-- Prefer small functions and files, reusable utilities, composition over inheritance, and dead-code cleanup.
-- Do not change game mechanics or behavior unless explicitly asked.
+- Do not change app mechanics or behavior unless explicitly asked.
+- Run `cargo build --release` after your changes.
 
 ## Command and git rules
 
-- Never use compound shell commands. Do not chain commands with `&&`, `|`, or `;`.
-- If multiple commands are needed, run them as separate sequential tool calls.
 - Always run the full test suite, not a subset.
 - Do not use worktrees or branches; work directly on `main`.
-- For all git commands, always use `git -C <path> <command>`.
-- Never use `cd ... && git ...`; that triggers the CLI security block.
 - Commit durable docs you add if you are not planning to remove them.
-- Commit as soon as you have a coherent, self-contained unit of change.
-
-## Subagents
-
-- If you dispatch a subagent that cannot read repository instructions on its own, include this file and any nested instruction files in its prompt.
+- CRITICAL: Commit as soon as you have a coherent, self-contained unit of change.
 
 ## Project docs
 
 - Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` at session start.
-- Key directories:
-  - `src`: game code.
-  - `docs`: architecture, devlogs, reviews.
-  - `design`: game and mechanism notes.
 
 ## Architecture
 
@@ -74,4 +66,4 @@
 ## Debugging
 
 - When debugging, use `docs/debugging/template.md` to record your process. Create a new file per debugging session and use it to iterate until you solve the problem.
-- Clean up the stackdump files created during debugging after you are done, but keep the `.md` files.
+- Clean up the stackdump files created during debugging after you are done.
