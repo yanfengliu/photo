@@ -21,11 +21,11 @@
 - Reviews might take a long time depending on the amount of changes you made. Be patient and wait for the result.
 - After addressing review comments, ask the reviewer to verify that you have successfully done so. This is basically a second round of full review.
 - Example command to use Codex for code review:
-  - `codex exec --sandbox read-only --ask-for-approval never --ephemeral "Review my code for bugs and security issues but do not make any edits"`
+  - `git diff [branch] | codex exec --model gpt-5.4 --model-reasoning-effort xhigh --sandbox read-only --ask-for-approval never --ephemeral "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."`
 - Example command to use Gemini for code review:
-  - `git diff [branch] | gemini -p "@src Review my code for bugs and security issues but do not make any edits" --model gemini-3-pro --thinking high` (Use the @ symbol within the prompt to include directory context for the best reasoning results).
+  - `git diff [branch] | gemini -p "@src You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text." --model gemini-3-pro --thinking high` (Use the @ symbol within the prompt to include directory context for the best reasoning results).
 - Example command to use Claude for code review:
-  - `git diff origin/main...HEAD | claude -p --append-system-prompt "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Be concise." --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
+  - `git diff [branch] | claude -p --append-system-prompt "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text." --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
 - The reviewers should check `docs/learning/lessons.md`.
 - Do not change app mechanics or behavior unless explicitly asked.
 - Run `cargo build --release` after your changes.
