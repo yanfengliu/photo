@@ -3,8 +3,11 @@
 Keep this file short, current, and actionable.
 
 ## Active Lessons
+- 2026-04-21 - If a persisted local cache stores both a full image and a thumbnail, tag them with the same generation and only trust a thumbnail that matches its full sibling; otherwise partial writes can make Library and Detail disagree after restart.
+- 2026-04-21 - When background persistence captures a render snapshot, refresh any immediate UI preview from that same snapshot instead of recomputing from later mutable app state.
 - 2026-04-21 - If local non-destructive metadata needs to be inspectable during development, keep it in a visible repo-local path and lock that path down with a focused regression instead of burying it in profile-scoped app storage.
-- 2026-04-21 - When you persist non-destructive per-image edit state locally, restore it as the committed baseline rather than as an undo step, and normalize saved crop bounds on load so a malformed local file cannot produce inverted crop rectangles.
+- 2026-04-21 - If cross-session undo is not part of the product contract, persist baked local image data instead of edit operations; keep undo/redo session-scoped in memory and let restart reopen from the baked local copy.
+- 2026-04-21 - When tests need a process-wide repo-root override, guard the override with a mutex around the whole override window; otherwise parallel tests can race and read each other's fake roots.
 - 2026-04-21 - If a same-session full-image cache is byte-bounded, keep at least a small recent-history floor in memory; otherwise a second large Detail image can evict the first immediately and erase the perceived benefit of reopening recently viewed work.
 - 2026-04-21 - When moving expensive first-open work to import time, queue background warmups serially and make failure advance the queue; otherwise bulk imports can overwhelm I/O or one bad file can silently block every later image from getting primed.
 - 2026-04-21 - Same-session reopen paths should prefer the already displayed full image when the user comes straight back from Library, and they should guard that fast path with cheap file-metadata checks so ordinary rewrites still fall back to a fresh load instead of rehashing the whole source on the UI path.

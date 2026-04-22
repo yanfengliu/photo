@@ -4,9 +4,7 @@
 
 // -- Data model --
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(from = "u8", into = "u8")]
 pub struct QuarterTurns(u8);
 
@@ -129,14 +127,6 @@ impl EditState {
         *self == Self::default()
     }
 
-    pub fn sanitized(mut self) -> Self {
-        self.rotation = QuarterTurns::new(self.rotation.as_u8());
-        self.crop = self
-            .crop
-            .map(|crop| CropRect::new(crop.left, crop.top, crop.right, crop.bottom));
-        self
-    }
-
     pub fn rotate_clockwise(&mut self) {
         self.rotation = self.rotation.clockwise();
     }
@@ -226,16 +216,6 @@ impl UndoHistory {
         self.redo_stack.clear();
         self.committed = EditState::default();
         self.current = EditState::default();
-    }
-
-    pub fn from_saved_state(state: EditState) -> Self {
-        let state = state.sanitized();
-        Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            committed: state,
-            current: state,
-        }
     }
 
     #[cfg(test)]
@@ -589,18 +569,20 @@ fn rotate_rgba_pixels(
     (Cow::Owned(rotated), out_w, out_h)
 }
 
-// -- Save --
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedImage {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
 
-/// Apply all edits and save to disk. Returns the output path on success.
-/// `vig` is the lens vignetting coefficients [k1, k2, k3] (pass [0;3] if none).
-pub fn save_edited_image(
-    original_path: &Path,
+pub fn render_edited_image(
     pixels: &[u8],
     width: u32,
     height: u32,
     state: &EditState,
     vig: [f32; 3],
-) -> Result<PathBuf, String> {
+) -> RenderedImage {
     let temp_matrix = temperature_tint_matrix(state.temperature, state.tint);
     let (rotated_pixels, rotated_width, rotated_height) =
         rotate_rgba_pixels(pixels, width, height, state.rotation);
@@ -637,8 +619,29 @@ pub fn save_edited_image(
         }
     }
 
+    RenderedImage {
+        pixels: output,
+        width: cropped_width,
+        height: cropped_height,
+    }
+}
+
+// -- Save --
+
+/// Apply all edits and save to disk. Returns the output path on success.
+/// `vig` is the lens vignetting coefficients [k1, k2, k3] (pass [0;3] if none).
+pub fn save_edited_image(
+    original_path: &Path,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    state: &EditState,
+    vig: [f32; 3],
+) -> Result<PathBuf, String> {
+    let rendered = render_edited_image(pixels, width, height, state, vig);
+
     let save_path = edited_save_path(original_path);
-    let img = image::RgbaImage::from_raw(cropped_width, cropped_height, output)
+    let img = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.pixels)
         .ok_or_else(|| "Failed to create output image".to_string())?;
     img.save(&save_path)
         .map_err(|e| format!("Failed to save: {e}"))?;

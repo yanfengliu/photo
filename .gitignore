@@ -2,6 +2,7 @@
 /.claude
 /.superpowers
 /decoded-cache
+/local-edits/
 /local-edits.json
 *.exe
 *.pdb

@@ -7,15 +7,19 @@ mod lens;
 mod nav;
 mod viewer;
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use std::{
-    fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom},
-};
 use std::os::windows::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs::{File, OpenOptions},
+    hash::{Hash, Hasher},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+};
 
+use decode::ImageData;
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
     button, column, container, horizontal_space, pick_list, row, scrollable, shader, slider, text,
@@ -26,9 +30,6 @@ use iced::{
     event, keyboard, mouse, window, Alignment, Background, Border, Color, Element, Length, Point,
     Size, Subscription, Task, Theme,
 };
-use serde::{Deserialize, Serialize};
-
-use decode::ImageData;
 use nav::DirNav;
 use viewer::{zoom_at_cursor, ImageCanvas, ViewerEvent};
 
@@ -66,9 +67,21 @@ const FULL_IMAGE_SESSION_CACHE_MAX_ENTRIES: usize = 4;
 const FULL_IMAGE_SESSION_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
 // Retain a small recent history even when large detail images overflow the byte budget.
 const FULL_IMAGE_SESSION_CACHE_MIN_RECENT_ENTRIES: usize = 2;
-const LOCAL_EDITS_FILE_NAME: &str = "local-edits.json";
+const LOCAL_EDIT_CACHE_DIR_NAME: &str = "local-edits";
+const LOCAL_EDIT_CACHE_MAGIC: &[u8; 8] = b"PHOEDITS";
+const LOCAL_EDIT_CACHE_SCHEMA_VERSION: u32 = 2;
+const LOCAL_EDIT_THUMBNAIL_MAX_DIM: u32 = 200;
 const SOURCE_FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
 const FILE_SHARE_READ: u32 = 0x00000001;
+static NEXT_LOCAL_EDIT_CACHE_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_LOCAL_EDIT_CACHE_GENERATION_NONCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_PHOTO_REPO_ROOT_OVERRIDE: std::sync::OnceLock<
+    std::sync::Mutex<Option<Option<PathBuf>>>,
+> = std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_PHOTO_REPO_ROOT_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
 
 fn rotation_icon_label<'a, ThemeT, RendererT>(
     icon: &'static str,
@@ -225,6 +238,7 @@ struct DragState {
 struct LibraryEntry {
     path: PathBuf,
     filename: String,
+    thumbnail_image: Option<Arc<ImageData>>,
     thumbnail_handle: Option<ImageHandle>,
 }
 
@@ -235,10 +249,35 @@ struct SaveRequest {
     vig: [f32; 3],
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedEditEntry {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseImageSource {
+    Original,
+    PersistedLocalEdit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalEditCacheVariant {
+    Full,
+    Thumbnail,
+}
+
+impl LocalEditCacheVariant {
+    fn file_suffix(self) -> &'static str {
+        match self {
+            Self::Full => ".full.rgba",
+            Self::Thumbnail => ".thumb.rgba",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LocalEditPersistRequest {
+    request_id: u64,
     path: PathBuf,
+    image: Arc<ImageData>,
     state: edit::EditState,
+    vig: [f32; 3],
+    base_source: BaseImageSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +366,12 @@ struct SessionFullImageCacheHit {
 struct LoadedFullImage {
     image: Arc<ImageData>,
     fingerprint: Option<SourceFileFingerprint>,
+    base_source: BaseImageSource,
+}
+
+struct LoadedLocalEditCacheVariant {
+    generation_id: u64,
+    image: Arc<ImageData>,
 }
 
 struct SessionFullImageCache {
@@ -550,6 +595,7 @@ struct App {
     detail_load: DetailLoadState,
     error: Option<String>,
     edit_histories: std::collections::HashMap<PathBuf, edit::UndoHistory>,
+    base_image_sources: std::collections::HashMap<PathBuf, BaseImageSource>,
     current_image_path: Option<PathBuf>,
     lens_db: lens::LensDatabase,
     current_lens_profile: Option<lens::LensProfile>,
@@ -580,6 +626,8 @@ struct App {
     collection_nav: Option<(usize, usize)>,
     pending_import_cache_warm_paths: std::collections::VecDeque<PathBuf>,
     import_cache_warm_in_flight: Option<PathBuf>,
+    pending_local_edit_persist_requests: std::collections::VecDeque<LocalEditPersistRequest>,
+    local_edit_persist_in_flight: Option<LocalEditPersistRequest>,
 }
 
 #[derive(Debug, Clone)]
@@ -611,6 +659,11 @@ enum Message {
     ImportCacheWarmCompleted {
         path: PathBuf,
         result: Result<bool, String>,
+    },
+    LocalEditPersistCompleted {
+        path: PathBuf,
+        request_id: u64,
+        result: Result<(), String>,
     },
     LibraryItemClicked(usize),
     SliderChanged(SliderKind, f32),
@@ -682,7 +735,8 @@ impl App {
             library_index: None,
             detail_load: DetailLoadState::default(),
             error: None,
-            edit_histories: load_local_edits(),
+            edit_histories: std::collections::HashMap::new(),
+            base_image_sources: std::collections::HashMap::new(),
             current_image_path: None,
             lens_db: lens::LensDatabase::load_bundled(),
             current_lens_profile: None,
@@ -709,6 +763,8 @@ impl App {
             collection_nav: None,
             pending_import_cache_warm_paths: std::collections::VecDeque::new(),
             import_cache_warm_in_flight: None,
+            pending_local_edit_persist_requests: std::collections::VecDeque::new(),
+            local_edit_persist_in_flight: None,
         };
 
         // Restore saved library entries
@@ -816,11 +872,18 @@ impl App {
 
                 match result {
                     Ok(loaded) => {
+                        if let Some(path) = self.current_image_path.clone() {
+                            self.base_image_sources.insert(path, loaded.base_source);
+                        }
                         let reset_view = self.detail_load.on_full_image_loaded();
                         if let Some(fingerprint) = loaded.fingerprint {
-                            self.cache_full_image_for_current_path(fingerprint, loaded.image.clone());
+                            self.cache_full_image_for_current_path(
+                                fingerprint,
+                                loaded.image.clone(),
+                            );
                         }
                         self.apply_loaded_image(loaded.image, reset_view);
+                        return self.enqueue_current_local_edit_persist();
                     }
                     Err(e) => {
                         let had_preview = self.detail_load.shows_embedded_preview();
@@ -844,13 +907,18 @@ impl App {
                 self.detail_load.finish_exif();
                 self.current_exif = exif;
                 self.refresh_auto_lens_profile();
+                let state = self.visible_edit_state();
+                if self.current_image_path.is_some()
+                    && self.image.is_some()
+                    && state.lens_correction
+                    && self.lens_override_name.is_none()
+                {
+                    return self.on_current_visible_render_changed();
+                }
                 Task::none()
             }
 
-            Message::Viewer(evt) => {
-                self.handle_viewer(evt);
-                Task::none()
-            }
+            Message::Viewer(evt) => self.handle_viewer(evt),
 
             Message::Event(evt) => self.handle_event(evt),
 
@@ -893,12 +961,10 @@ impl App {
             Message::FilesPicked(None) => Task::none(),
 
             Message::ThumbnailLoaded(path, Ok(data)) => {
+                let handle = self.thumbnail_handle_for_path(&path, &data);
                 if let Some(entry) = self.library.iter_mut().find(|e| e.path == path) {
-                    entry.thumbnail_handle = Some(ImageHandle::from_rgba(
-                        data.width,
-                        data.height,
-                        data.pixels.clone(),
-                    ));
+                    entry.thumbnail_image = Some(data.clone());
+                    entry.thumbnail_handle = Some(handle);
                 }
                 Task::none()
             }
@@ -915,6 +981,27 @@ impl App {
                     );
                 }
                 self.start_next_import_cache_warm_if_idle()
+            }
+            Message::LocalEditPersistCompleted {
+                path,
+                request_id,
+                result,
+            } => {
+                if self
+                    .local_edit_persist_in_flight
+                    .as_ref()
+                    .is_some_and(|request| request.path == path && request.request_id == request_id)
+                {
+                    self.local_edit_persist_in_flight = None;
+                }
+                if let Err(error) = result {
+                    log::warn!(
+                        "Local edit persistence failed for {}: {}",
+                        path.display(),
+                        error
+                    );
+                }
+                self.start_next_local_edit_persist_if_idle()
             }
 
             Message::LibraryItemClicked(index) => {
@@ -972,8 +1059,8 @@ impl App {
                         let history = self.edit_histories.entry(path.clone()).or_default();
                         set_slider_field(&mut history.current, kind, 0.0);
                         history.commit();
-                        self.persist_local_edits();
                     }
+                    return self.on_current_edit_committed();
                 } else {
                     self.last_slider_release = Some((kind, now));
                     // Only commit if the user actually dragged (not a single track click)
@@ -981,8 +1068,8 @@ impl App {
                         if let Some(path) = &self.current_image_path {
                             if let Some(history) = self.edit_histories.get_mut(path) {
                                 history.commit();
-                                self.persist_local_edits();
                             }
+                            return self.on_current_edit_committed();
                         }
                     }
                 }
@@ -994,9 +1081,8 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     set_slider_field(&mut history.current, kind, 0.0);
                     history.commit();
-                    self.persist_local_edits();
                 }
-                Task::none()
+                self.on_current_edit_committed()
             }
 
             Message::ResetAll => {
@@ -1005,10 +1091,9 @@ impl App {
                 if let Some(path) = &self.current_image_path {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.reset_all();
-                    self.persist_local_edits();
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
-                Task::none()
+                self.on_current_edit_committed()
             }
 
             Message::ToggleLensCorrection => {
@@ -1016,9 +1101,8 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.lens_correction = !history.current.lens_correction;
                     history.commit();
-                    self.persist_local_edits();
                 }
-                Task::none()
+                self.on_current_edit_committed()
             }
 
             Message::RotateClockwise => {
@@ -1028,10 +1112,9 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.rotate_clockwise();
                     history.commit();
-                    self.persist_local_edits();
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
-                Task::none()
+                self.on_current_edit_committed()
             }
 
             Message::RotateCounterclockwise => {
@@ -1041,10 +1124,9 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.rotate_counterclockwise();
                     history.commit();
-                    self.persist_local_edits();
                 }
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
-                Task::none()
+                self.on_current_edit_committed()
             }
 
             Message::SaveEdited => {
@@ -1101,12 +1183,11 @@ impl App {
                     if history.current.crop.is_some() {
                         history.current.crop = None;
                         history.commit();
-                        self.persist_local_edits();
                     }
                 }
                 self.crop_mode = false;
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
-                Task::none()
+                self.on_current_edit_committed()
             }
 
             Message::SliderTextInput(kind) => {
@@ -1134,12 +1215,11 @@ impl App {
                         let history = self.edit_histories.entry(path.clone()).or_default();
                         set_slider_field(&mut history.current, kind, clamped);
                         history.commit();
-                        self.persist_local_edits();
                     }
                 }
                 self.editing_slider = None;
                 self.slider_text_buf.clear();
-                Task::none()
+                self.on_current_edit_committed()
             }
 
             Message::LensProfileSelected(name) => {
@@ -1418,7 +1498,7 @@ impl App {
     // Viewer interaction
     // ---------------------------------------------------------------------------
 
-    fn handle_viewer(&mut self, evt: ViewerEvent) {
+    fn handle_viewer(&mut self, evt: ViewerEvent) -> Task<Message> {
         match evt {
             ViewerEvent::Zoom {
                 factor,
@@ -1429,10 +1509,12 @@ impl App {
                 let (z, o) = zoom_at_cursor(self.zoom, self.offset, factor, cursor, canvas_size);
                 self.zoom = z;
                 self.offset = o;
+                Task::none()
             }
             ViewerEvent::Pan { delta } => {
                 self.offset[0] += delta[0];
                 self.offset[1] += delta[1];
+                Task::none()
             }
             ViewerEvent::DoubleClick { canvas_size } => {
                 self.update_canvas_size(canvas_size);
@@ -1448,6 +1530,7 @@ impl App {
                     self.zoom = 1.0;
                     self.offset = [0.0, 0.0];
                 }
+                Task::none()
             }
             ViewerEvent::CropCommitted { rect } => {
                 let previous_rotation = self.current_rotation();
@@ -1456,10 +1539,10 @@ impl App {
                     let history = self.edit_histories.entry(path.clone()).or_default();
                     history.current.crop = Some(rect);
                     history.commit();
-                    self.persist_local_edits();
                 }
                 self.crop_mode = false;
                 self.preserve_actual_size_after_display_change(previous_rotation, previous_crop);
+                self.on_current_edit_committed()
             }
         }
     }
@@ -1611,8 +1694,13 @@ impl App {
                 let previous_crop = self.visible_crop();
                 if let Some(path) = &self.current_image_path {
                     if let Some(history) = self.edit_histories.get_mut(path) {
-                        if history.undo() {
-                            self.persist_local_edits();
+                        let did_undo = history.undo();
+                        if did_undo {
+                            self.preserve_actual_size_after_display_change(
+                                previous_rotation,
+                                previous_crop,
+                            );
+                            return self.on_current_edit_committed();
                         }
                     }
                 }
@@ -1628,8 +1716,13 @@ impl App {
                 let previous_crop = self.visible_crop();
                 if let Some(path) = &self.current_image_path {
                     if let Some(history) = self.edit_histories.get_mut(path) {
-                        if history.redo() {
-                            self.persist_local_edits();
+                        let did_redo = history.redo();
+                        if did_redo {
+                            self.preserve_actual_size_after_display_change(
+                                previous_rotation,
+                                previous_crop,
+                            );
+                            return self.on_current_edit_committed();
                         }
                     }
                 }
@@ -1709,6 +1802,7 @@ impl App {
                 self.library.push(LibraryEntry {
                     filename: path_filename_str(path).to_string(),
                     path: path.clone(),
+                    thumbnail_image: None,
                     thumbnail_handle: None,
                 });
             }
@@ -1827,14 +1921,189 @@ impl App {
             Task::perform(
                 async move {
                     let result: Result<Arc<ImageData>, String> =
-                        tokio::task::spawn_blocking(move || decode::decode_thumbnail(&p, 200))
-                            .await
-                            .map_err(|e| e.to_string())?;
+                        tokio::task::spawn_blocking(move || {
+                            load_library_thumbnail_base_image(&p, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
                     result
                 },
                 move |result| Message::ThumbnailLoaded(p2.clone(), result),
             )
         }))
+    }
+
+    fn preferred_base_image_source(&self, path: &Path) -> BaseImageSource {
+        self.base_image_sources
+            .get(path)
+            .copied()
+            .unwrap_or_else(|| {
+                if persisted_local_edit_exists(path, LocalEditCacheVariant::Full) {
+                    BaseImageSource::PersistedLocalEdit
+                } else {
+                    BaseImageSource::Original
+                }
+            })
+    }
+
+    fn current_base_image_source(&self) -> BaseImageSource {
+        self.current_image_path
+            .as_deref()
+            .map(|path| self.preferred_base_image_source(path))
+            .unwrap_or(BaseImageSource::Original)
+    }
+
+    fn thumbnail_handle_for_path(&self, path: &Path, image: &ImageData) -> ImageHandle {
+        let state = self
+            .edit_histories
+            .get(path)
+            .map(|history| history.current)
+            .unwrap_or_default();
+        let vig = if self.current_image_path.as_deref() == Some(path) {
+            self.current_lens_vignetting(state.lens_correction)
+        } else {
+            [0.0; 3]
+        };
+        let rendered =
+            edit::render_edited_image(&image.pixels, image.width, image.height, &state, vig);
+        ImageHandle::from_rgba(rendered.width, rendered.height, rendered.pixels)
+    }
+
+    fn refresh_library_thumbnail_for_path(&mut self, path: &Path) {
+        let Some(&index) = self.library_indices_by_path.get(path) else {
+            return;
+        };
+        let Some(base_image) = self.library[index].thumbnail_image.clone() else {
+            return;
+        };
+        let handle = self.thumbnail_handle_for_path(path, &base_image);
+        self.library[index].thumbnail_handle = Some(handle);
+    }
+
+    fn set_library_thumbnail_for_path(&mut self, path: &Path, image: Arc<ImageData>) {
+        let Some(&index) = self.library_indices_by_path.get(path) else {
+            return;
+        };
+        self.library[index].thumbnail_handle = Some(ImageHandle::from_rgba(
+            image.width,
+            image.height,
+            image.pixels.clone(),
+        ));
+    }
+
+    fn current_local_edit_persist_request(&mut self) -> Option<LocalEditPersistRequest> {
+        if self.detail_load.blocks_save() {
+            return None;
+        }
+
+        let path = self.current_image_path.clone()?;
+        let image = self.image.clone()?;
+        let state = self.visible_edit_state();
+        if self.current_render_depends_on_pending_auto_lens_metadata(state) {
+            return None;
+        }
+        let base_source = self.current_base_image_source();
+        if state.is_default()
+            && matches!(base_source, BaseImageSource::Original)
+            && !persisted_local_edit_exists(&path, LocalEditCacheVariant::Full)
+        {
+            return None;
+        }
+        let vig = self.current_lens_vignetting(state.lens_correction);
+        let request_id = self
+            .local_edit_persist_in_flight
+            .as_ref()
+            .map(|request| request.request_id)
+            .unwrap_or(0)
+            .max(
+                self.pending_local_edit_persist_requests
+                    .back()
+                    .map(|request| request.request_id)
+                    .unwrap_or(0),
+            )
+            + 1;
+
+        Some(LocalEditPersistRequest {
+            request_id,
+            path,
+            image,
+            state,
+            vig,
+            base_source,
+        })
+    }
+
+    fn current_render_depends_on_pending_auto_lens_metadata(&self, state: edit::EditState) -> bool {
+        state.lens_correction && self.lens_override_name.is_none() && self.detail_load.exif_loading
+    }
+
+    fn enqueue_current_local_edit_persist(&mut self) -> Task<Message> {
+        let Some(request) = self.current_local_edit_persist_request() else {
+            return Task::none();
+        };
+        self.enqueue_local_edit_persist(request)
+    }
+
+    fn enqueue_local_edit_persist(&mut self, request: LocalEditPersistRequest) -> Task<Message> {
+        if self.local_edit_persist_in_flight.is_none() {
+            self.local_edit_persist_in_flight = Some(request.clone());
+            return Self::local_edit_persist_task(request);
+        }
+
+        self.pending_local_edit_persist_requests
+            .retain(|pending| pending.path != request.path);
+        self.pending_local_edit_persist_requests.push_back(request);
+        Task::none()
+    }
+
+    fn start_next_local_edit_persist_if_idle(&mut self) -> Task<Message> {
+        if self.local_edit_persist_in_flight.is_some() {
+            return Task::none();
+        }
+
+        let Some(request) = self.pending_local_edit_persist_requests.pop_front() else {
+            return Task::none();
+        };
+
+        self.local_edit_persist_in_flight = Some(request.clone());
+        Self::local_edit_persist_task(request)
+    }
+
+    fn local_edit_persist_task(request: LocalEditPersistRequest) -> Task<Message> {
+        let message_path = request.path.clone();
+        let request_id = request.request_id;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || persist_local_edit(&request))
+                    .await
+                    .map_err(|e| e.to_string())?
+            },
+            move |result| Message::LocalEditPersistCompleted {
+                path: message_path.clone(),
+                request_id,
+                result,
+            },
+        )
+    }
+
+    fn on_current_visible_render_changed(&mut self) -> Task<Message> {
+        if let Some(request) = self.current_local_edit_persist_request() {
+            if let Ok(thumbnail) = rendered_thumbnail_image_for_local_edit_request(&request) {
+                self.set_library_thumbnail_for_path(&request.path, thumbnail);
+            } else if let Some(path) = self.current_image_path.clone() {
+                self.refresh_library_thumbnail_for_path(&path);
+            }
+            return self.enqueue_local_edit_persist(request);
+        }
+
+        if let Some(path) = self.current_image_path.clone() {
+            self.refresh_library_thumbnail_for_path(&path);
+        }
+        Task::none()
+    }
+
+    fn on_current_edit_committed(&mut self) -> Task<Message> {
+        self.on_current_visible_render_changed()
     }
 
     fn import_cache_warm_task(path: PathBuf) -> Task<Message> {
@@ -1920,22 +2189,39 @@ impl App {
         )
     }
 
-    fn full_image_load_task(path: PathBuf, request_id: u64) -> Task<Message> {
+    fn full_image_load_task(
+        path: PathBuf,
+        request_id: u64,
+        preferred_source: BaseImageSource,
+    ) -> Task<Message> {
         Task::perform(
             async move {
-                let result: Result<LoadedFullImage, String> = tokio::task::spawn_blocking(
-                    move || {
+                let result: Result<LoadedFullImage, String> =
+                    tokio::task::spawn_blocking(move || {
                         let mut guard = open_cache_validation_handle(&path);
-                        let fingerprint = guard
-                            .as_mut()
-                            .and_then(SourceFileFingerprint::from_file);
-                        let image = decode::decode_image(&path)?;
+                        let fingerprint = guard.as_mut().and_then(SourceFileFingerprint::from_file);
+                        let (image, base_source) = match preferred_source {
+                            BaseImageSource::PersistedLocalEdit => {
+                                match load_persisted_local_edit_image(&path) {
+                                    Ok(Some(image)) => (image, BaseImageSource::PersistedLocalEdit),
+                                    Ok(None) | Err(_) => {
+                                        (decode::decode_image(&path)?, BaseImageSource::Original)
+                                    }
+                                }
+                            }
+                            BaseImageSource::Original => {
+                                (decode::decode_image(&path)?, BaseImageSource::Original)
+                            }
+                        };
                         drop(guard);
-                        Ok(LoadedFullImage { image, fingerprint })
-                    },
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+                        Ok(LoadedFullImage {
+                            image,
+                            fingerprint,
+                            base_source,
+                        })
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
                 result
             },
             move |result| Message::ImageLoaded { request_id, result },
@@ -1954,8 +2240,9 @@ impl App {
     }
 
     fn start_follow_up_load(&self, path: PathBuf, request_id: u64) -> Task<Message> {
+        let preferred_source = self.preferred_base_image_source(&path);
         Task::batch([
-            Self::full_image_load_task(path.clone(), request_id),
+            Self::full_image_load_task(path.clone(), request_id, preferred_source),
             Self::exif_load_task(path, request_id),
         ])
     }
@@ -1968,7 +2255,8 @@ impl App {
         let Some(path) = self.current_image_path.as_deref() else {
             return;
         };
-        self.session_full_image_cache.insert(path, fingerprint, image);
+        self.session_full_image_cache
+            .insert(path, fingerprint, image);
     }
 
     fn displayed_full_image_for_path(&self, path: &Path) -> Option<Arc<ImageData>> {
@@ -2012,11 +2300,14 @@ impl App {
         }
 
         self.image = None;
-        if nav::is_raw_file(&path) {
+        let preferred_source = self.preferred_base_image_source(&path);
+        if nav::is_raw_file(&path)
+            && !matches!(preferred_source, BaseImageSource::PersistedLocalEdit)
+        {
             Self::preview_load_task(path, request_id)
         } else {
             Task::batch([
-                Self::full_image_load_task(path.clone(), request_id),
+                Self::full_image_load_task(path.clone(), request_id, preferred_source),
                 Self::exif_load_task(path, request_id),
             ])
         }
@@ -2561,10 +2852,7 @@ impl App {
         let path = self.current_image_path.clone()?;
         let image = self.image.clone()?;
         let state = self.visible_edit_state();
-        if state.lens_correction
-            && self.lens_override_name.is_none()
-            && self.detail_load.exif_loading
-        {
+        if self.current_render_depends_on_pending_auto_lens_metadata(state) {
             return None;
         }
         let vig = self.current_lens_vignetting(state.lens_correction);
@@ -2574,10 +2862,6 @@ impl App {
             state,
             vig,
         })
-    }
-
-    fn persist_local_edits(&self) {
-        save_local_edits(&self.edit_histories);
     }
 
     fn current_lens_vignetting(&self, lens_correction_enabled: bool) -> [f32; 3] {
@@ -3306,19 +3590,27 @@ fn library_file_path() -> Option<PathBuf> {
     local_app_storage_dir().map(|dir| dir.join("library.txt"))
 }
 
-fn local_edits_file_path_for_repo_root(repo_root: &Path) -> PathBuf {
-    repo_root.join(LOCAL_EDITS_FILE_NAME)
-}
-
-fn local_edits_file_path() -> Option<PathBuf> {
-    photo_repo_root().map(|repo_root| local_edits_file_path_for_repo_root(&repo_root))
-}
-
 fn photo_repo_root() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        let override_root = TEST_PHOTO_REPO_ROOT_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap()
+            .clone();
+        if let Some(repo_root) = override_root {
+            return repo_root;
+        }
+    }
+
     std::env::current_exe()
         .ok()
         .and_then(|path| find_photo_repo_root(path.parent()?))
-        .or_else(|| std::env::current_dir().ok().and_then(|dir| find_photo_repo_root(&dir)))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|dir| find_photo_repo_root(&dir))
+        })
 }
 
 fn find_photo_repo_root(start: &Path) -> Option<PathBuf> {
@@ -3335,64 +3627,419 @@ fn is_photo_repo_root(candidate: &Path) -> bool {
         && candidate.join("src").join("main.rs").is_file()
 }
 
-fn save_local_edits_to(
+#[cfg(test)]
+fn with_test_photo_repo_root<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
+    let _guard = TEST_PHOTO_REPO_ROOT_GUARD
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let storage = TEST_PHOTO_REPO_ROOT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
+    *storage
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Some(repo_root.to_path_buf()));
+    let result = f();
+    *storage
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    result
+}
+
+fn local_edit_cache_dir_for_repo_root(repo_root: &Path) -> PathBuf {
+    repo_root.join(LOCAL_EDIT_CACHE_DIR_NAME)
+}
+
+fn local_edit_cache_dir() -> Option<PathBuf> {
+    photo_repo_root().map(|repo_root| local_edit_cache_dir_for_repo_root(&repo_root))
+}
+
+fn normalized_source_path_key(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn source_file_state(path: &Path) -> Option<(u64, u64, u32)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())?;
+    Some((metadata.len(), modified.as_secs(), modified.subsec_nanos()))
+}
+
+fn local_edit_cache_file_path_for_path_key(
+    cache_dir: &Path,
+    path_key: &str,
+    variant: LocalEditCacheVariant,
+) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    path_key.hash(&mut hasher);
+    cache_dir.join(format!("{:016x}{}", hasher.finish(), variant.file_suffix()))
+}
+
+fn local_edit_cache_file_path(
+    cache_dir: &Path,
     path: &Path,
-    edit_histories: &std::collections::HashMap<PathBuf, edit::UndoHistory>,
-) {
-    let mut entries = edit_histories
-        .iter()
-        .filter(|(image_path, history)| image_path.exists() && !history.current.is_default())
-        .map(|(image_path, history)| PersistedEditEntry {
-            path: image_path.clone(),
-            state: history.current,
+    variant: LocalEditCacheVariant,
+) -> PathBuf {
+    let path_key = normalized_source_path_key(path);
+    local_edit_cache_file_path_for_path_key(cache_dir, &path_key, variant)
+}
+
+fn local_edit_cache_temp_file_path(final_path: &Path) -> PathBuf {
+    let temp_id = NEXT_LOCAL_EDIT_CACHE_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+    final_path.with_extension(format!("{}.tmp", temp_id))
+}
+
+fn next_local_edit_cache_generation_id() -> u64 {
+    let time_part = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let nonce = u128::from(NEXT_LOCAL_EDIT_CACHE_GENERATION_NONCE.fetch_add(1, Ordering::Relaxed));
+    let mixed = time_part ^ nonce;
+    u64::try_from(mixed.min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
+}
+
+fn persisted_local_edit_exists(path: &Path, variant: LocalEditCacheVariant) -> bool {
+    let Some(cache_dir) = local_edit_cache_dir() else {
+        return false;
+    };
+    local_edit_cache_file_path(&cache_dir, path, variant).exists()
+}
+
+fn write_u32(writer: &mut impl Write, value: u32) -> Result<(), String> {
+    writer
+        .write_all(&value.to_le_bytes())
+        .map_err(|e| format!("Failed to write cache: {e}"))
+}
+
+fn write_u64(writer: &mut impl Write, value: u64) -> Result<(), String> {
+    writer
+        .write_all(&value.to_le_bytes())
+        .map_err(|e| format!("Failed to write cache: {e}"))
+}
+
+fn read_u32(reader: &mut impl Read) -> Result<u32, String> {
+    let mut bytes = [0u8; 4];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("Failed to read cache: {e}"))?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64(reader: &mut impl Read) -> Result<u64, String> {
+    let mut bytes = [0u8; 8];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("Failed to read cache: {e}"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn thumbnail_from_rendered_image(
+    rendered: &edit::RenderedImage,
+    max_dim: u32,
+) -> Result<edit::RenderedImage, String> {
+    if rendered.width <= max_dim && rendered.height <= max_dim {
+        return Ok(rendered.clone());
+    }
+
+    let source =
+        image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.pixels.clone())
+            .ok_or_else(|| "Failed to build thumbnail source image".to_string())?;
+    let thumb = image::imageops::thumbnail(&source, max_dim, max_dim);
+    let (width, height) = thumb.dimensions();
+    Ok(edit::RenderedImage {
+        pixels: thumb.into_raw(),
+        width,
+        height,
+    })
+}
+
+fn rendered_thumbnail_image_for_local_edit_request(
+    request: &LocalEditPersistRequest,
+) -> Result<Arc<ImageData>, String> {
+    let full = edit::render_edited_image(
+        &request.image.pixels,
+        request.image.width,
+        request.image.height,
+        &request.state,
+        request.vig,
+    );
+    let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)?;
+    Ok(Arc::new(ImageData {
+        pixels: thumb.pixels,
+        width: thumb.width,
+        height: thumb.height,
+        file_size: request.image.file_size,
+    }))
+}
+
+#[cfg(test)]
+fn write_local_edit_cache_variant_to(
+    cache_dir: &Path,
+    path: &Path,
+    variant: LocalEditCacheVariant,
+    image: &edit::RenderedImage,
+) -> Result<(), String> {
+    write_local_edit_cache_variant_with_generation_to(
+        cache_dir,
+        path,
+        variant,
+        next_local_edit_cache_generation_id(),
+        image,
+    )
+}
+
+fn write_local_edit_cache_variant_with_generation_to(
+    cache_dir: &Path,
+    path: &Path,
+    variant: LocalEditCacheVariant,
+    generation_id: u64,
+    image: &edit::RenderedImage,
+) -> Result<(), String> {
+    let Some((file_size, modified_secs, modified_nanos)) = source_file_state(path) else {
+        return Err("Failed to read source file metadata".to_string());
+    };
+    let path_key = normalized_source_path_key(path);
+    let final_path = local_edit_cache_file_path_for_path_key(cache_dir, &path_key, variant);
+    let temp_path = local_edit_cache_temp_file_path(&final_path);
+
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|e| format!("Failed to create local edit dir: {e}"))?;
+
+    let write_result: Result<(), String> = (|| {
+        let file =
+            File::create(&temp_path).map_err(|e| format!("Failed to create cache file: {e}"))?;
+        let mut writer = BufWriter::new(file);
+        let path_bytes = path_key.as_bytes();
+        let path_len = u32::try_from(path_bytes.len())
+            .map_err(|_| "Cache path key exceeded u32 length".to_string())?;
+        let pixel_len = u64::try_from(image.pixels.len())
+            .map_err(|_| "Cache pixel data exceeded u64 length".to_string())?;
+
+        writer
+            .write_all(LOCAL_EDIT_CACHE_MAGIC)
+            .map_err(|e| format!("Failed to write cache: {e}"))?;
+        write_u32(&mut writer, LOCAL_EDIT_CACHE_SCHEMA_VERSION)?;
+        write_u64(&mut writer, generation_id)?;
+        write_u64(&mut writer, file_size)?;
+        write_u64(&mut writer, modified_secs)?;
+        write_u32(&mut writer, modified_nanos)?;
+        write_u32(&mut writer, path_len)?;
+        write_u32(&mut writer, image.width)?;
+        write_u32(&mut writer, image.height)?;
+        write_u64(&mut writer, pixel_len)?;
+        writer
+            .write_all(path_bytes)
+            .map_err(|e| format!("Failed to write cache: {e}"))?;
+        writer
+            .write_all(&image.pixels)
+            .map_err(|e| format!("Failed to write cache: {e}"))?;
+        writer
+            .flush()
+            .map_err(|e| format!("Failed to flush cache: {e}"))?;
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    std::fs::rename(&temp_path, &final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("Failed to finalize cache file: {e}")
+    })
+}
+
+fn remove_persisted_local_edit(path: &Path) -> Result<(), String> {
+    let Some(cache_dir) = local_edit_cache_dir() else {
+        return Ok(());
+    };
+
+    for variant in [
+        LocalEditCacheVariant::Full,
+        LocalEditCacheVariant::Thumbnail,
+    ] {
+        let cache_path = local_edit_cache_file_path(&cache_dir, path, variant);
+        if let Err(error) = std::fs::remove_file(&cache_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("Failed to remove local edit cache: {error}"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn load_persisted_local_edit_variant(
+    path: &Path,
+    variant: LocalEditCacheVariant,
+) -> Result<Option<LoadedLocalEditCacheVariant>, String> {
+    let Some(cache_dir) = local_edit_cache_dir() else {
+        return Ok(None);
+    };
+    let Some((file_size, modified_secs, modified_nanos)) = source_file_state(path) else {
+        return Ok(None);
+    };
+    let path_key = normalized_source_path_key(path);
+    let cache_path = local_edit_cache_file_path_for_path_key(&cache_dir, &path_key, variant);
+    if !cache_path.exists() {
+        return Ok(None);
+    }
+
+    let read_result: Result<LoadedLocalEditCacheVariant, String> = (|| {
+        let file =
+            File::open(&cache_path).map_err(|e| format!("Failed to open local edit cache: {e}"))?;
+        let mut reader = BufReader::new(file);
+
+        let mut magic = [0u8; LOCAL_EDIT_CACHE_MAGIC.len()];
+        reader
+            .read_exact(&mut magic)
+            .map_err(|e| format!("Failed to read local edit cache: {e}"))?;
+        if &magic != LOCAL_EDIT_CACHE_MAGIC {
+            return Err("Local edit cache magic mismatch".to_string());
+        }
+
+        if read_u32(&mut reader)? != LOCAL_EDIT_CACHE_SCHEMA_VERSION {
+            return Err("Local edit cache schema mismatch".to_string());
+        }
+
+        let generation_id = read_u64(&mut reader)?;
+        let cached_file_size = read_u64(&mut reader)?;
+        let cached_modified_secs = read_u64(&mut reader)?;
+        let cached_modified_nanos = read_u32(&mut reader)?;
+        let path_len = read_u32(&mut reader)? as usize;
+        let width = read_u32(&mut reader)?;
+        let height = read_u32(&mut reader)?;
+        let pixel_len = read_u64(&mut reader)?;
+
+        if cached_file_size != file_size
+            || cached_modified_secs != modified_secs
+            || cached_modified_nanos != modified_nanos
+        {
+            return Err("Local edit cache source metadata mismatch".to_string());
+        }
+
+        let mut cached_path = vec![0u8; path_len];
+        reader
+            .read_exact(&mut cached_path)
+            .map_err(|e| format!("Failed to read local edit cache path: {e}"))?;
+        if cached_path != path_key.as_bytes() {
+            return Err("Local edit cache path key mismatch".to_string());
+        }
+
+        let expected_len = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|count| count.checked_mul(4))
+            .ok_or_else(|| "Local edit cache dimensions overflowed".to_string())?;
+        if pixel_len != expected_len {
+            return Err("Local edit cache pixel length mismatch".to_string());
+        }
+
+        let pixel_len = usize::try_from(pixel_len)
+            .map_err(|_| "Local edit cache pixel length exceeded usize".to_string())?;
+        let mut pixels = vec![0u8; pixel_len];
+        reader
+            .read_exact(&mut pixels)
+            .map_err(|e| format!("Failed to read local edit cache pixels: {e}"))?;
+
+        Ok(LoadedLocalEditCacheVariant {
+            generation_id,
+            image: Arc::new(ImageData {
+                pixels,
+                width,
+                height,
+                file_size,
+            }),
         })
-        .collect::<Vec<_>>();
+    })();
 
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-
-    if entries.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&entries) {
-        let _ = std::fs::write(path, json);
+    match read_result {
+        Ok(image) => Ok(Some(image)),
+        Err(error) => {
+            let _ = std::fs::remove_file(&cache_path);
+            Err(error)
+        }
     }
 }
 
-fn save_local_edits(edit_histories: &std::collections::HashMap<PathBuf, edit::UndoHistory>) {
-    let Some(path) = local_edits_file_path() else {
-        return;
-    };
-    save_local_edits_to(&path, edit_histories);
+fn load_persisted_local_edit_image(path: &Path) -> Result<Option<Arc<ImageData>>, String> {
+    Ok(
+        load_persisted_local_edit_variant(path, LocalEditCacheVariant::Full)?
+            .map(|entry| entry.image),
+    )
 }
 
-fn load_local_edits_from(path: &Path) -> std::collections::HashMap<PathBuf, edit::UndoHistory> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return std::collections::HashMap::new();
-    };
-    let Ok(entries) = serde_json::from_str::<Vec<PersistedEditEntry>>(&content) else {
-        return std::collections::HashMap::new();
+fn load_library_thumbnail_base_image(path: &Path, max_dim: u32) -> Result<Arc<ImageData>, String> {
+    let full_entry = match load_persisted_local_edit_variant(path, LocalEditCacheVariant::Full) {
+        Ok(Some(image)) => Some(image),
+        Ok(None) | Err(_) => None,
     };
 
-    entries
-        .into_iter()
-        .filter(|entry| entry.path.exists())
-        .filter_map(|entry| {
-            let state = entry.state.sanitized();
-            (!state.is_default()).then(|| (entry.path, edit::UndoHistory::from_saved_state(state)))
-        })
-        .collect()
+    if let Some(full_entry) = full_entry {
+        if let Ok(Some(thumbnail_entry)) =
+            load_persisted_local_edit_variant(path, LocalEditCacheVariant::Thumbnail)
+        {
+            if thumbnail_entry.generation_id == full_entry.generation_id {
+                return Ok(thumbnail_entry.image);
+            }
+        }
+
+        let thumb = thumbnail_from_rendered_image(
+            &edit::RenderedImage {
+                pixels: full_entry.image.pixels.clone(),
+                width: full_entry.image.width,
+                height: full_entry.image.height,
+            },
+            max_dim,
+        )?;
+        return Ok(Arc::new(ImageData {
+            pixels: thumb.pixels,
+            width: thumb.width,
+            height: thumb.height,
+            file_size: full_entry.image.file_size,
+        }));
+    }
+
+    decode::decode_thumbnail(path, max_dim)
 }
 
-fn load_local_edits() -> std::collections::HashMap<PathBuf, edit::UndoHistory> {
-    let Some(path) = local_edits_file_path() else {
-        return std::collections::HashMap::new();
+fn persist_local_edit(request: &LocalEditPersistRequest) -> Result<(), String> {
+    if request.state.is_default() && matches!(request.base_source, BaseImageSource::Original) {
+        return remove_persisted_local_edit(&request.path);
+    }
+
+    let Some(cache_dir) = local_edit_cache_dir() else {
+        return Ok(());
     };
-    load_local_edits_from(&path)
+
+    let full = edit::render_edited_image(
+        &request.image.pixels,
+        request.image.width,
+        request.image.height,
+        &request.state,
+        request.vig,
+    );
+    let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)?;
+    let generation_id = next_local_edit_cache_generation_id();
+    write_local_edit_cache_variant_with_generation_to(
+        &cache_dir,
+        &request.path,
+        LocalEditCacheVariant::Full,
+        generation_id,
+        &full,
+    )?;
+    write_local_edit_cache_variant_with_generation_to(
+        &cache_dir,
+        &request.path,
+        LocalEditCacheVariant::Thumbnail,
+        generation_id,
+        &thumb,
+    )?;
+    Ok(())
 }
 
 fn save_library(library: &[LibraryEntry]) {
@@ -3437,6 +4084,17 @@ pub fn scan_folder_for_images(folder: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    fn opaque_black_pixels(width: u32, height: u32) -> Vec<u8> {
+        let pixel_count = usize::try_from(width)
+            .unwrap()
+            .saturating_mul(usize::try_from(height).unwrap());
+        let mut pixels = vec![0; pixel_count.saturating_mul(4)];
+        for alpha in pixels.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+        pixels
+    }
+
     fn setup_dir(names: &[&str]) -> (tempfile::TempDir, Vec<PathBuf>) {
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Vec::new();
@@ -3453,22 +4111,25 @@ mod tests {
         app.tab = Tab::Detail;
         app.clear_library_entries();
         app.edit_histories.clear();
+        app.base_image_sources.clear();
         app.collection_store = collection::CollectionStore::default();
         app.active_collection = None;
         app.context_menu = None;
         app.image = Some(Arc::new(decode::ImageData {
-            pixels: vec![0, 0, 0, 255],
+            pixels: opaque_black_pixels(width, height),
             width,
             height,
             file_size: 2_000_000,
         }));
         app.current_image_path = Some(path.to_path_buf());
+        app.base_image_sources
+            .insert(path.to_path_buf(), BaseImageSource::Original);
         app
     }
 
     fn test_image(width: u32, height: u32) -> Arc<decode::ImageData> {
         Arc::new(decode::ImageData {
-            pixels: vec![0, 0, 0, 255],
+            pixels: opaque_black_pixels(width, height),
             width,
             height,
             file_size: 2_000_000,
@@ -3488,6 +4149,7 @@ mod tests {
         LoadedFullImage {
             image,
             fingerprint: SourceFileFingerprint::from_path(path),
+            base_source: BaseImageSource::Original,
         }
     }
 
@@ -3495,6 +4157,7 @@ mod tests {
         let (mut app, _) = App::new();
         app.tab = Tab::Library;
         app.edit_histories.clear();
+        app.base_image_sources.clear();
         app.collection_store = collection::CollectionStore::default();
         app.active_collection = None;
         app.context_menu = None;
@@ -3503,11 +4166,56 @@ mod tests {
                 .map(|index| LibraryEntry {
                     path: PathBuf::from(format!("photo-{index}.png")),
                     filename: format!("photo-{index}.png"),
+                    thumbnail_image: None,
                     thumbnail_handle: None,
                 })
                 .collect(),
         );
         app
+    }
+
+    fn test_image_from_pixels(width: u32, height: u32, pixels: &[u8]) -> Arc<decode::ImageData> {
+        Arc::new(decode::ImageData {
+            pixels: pixels.to_vec(),
+            width,
+            height,
+            file_size: u64::try_from(pixels.len()).unwrap_or(u64::MAX),
+        })
+    }
+
+    fn write_test_png(path: &Path, width: u32, height: u32, pixels: &[u8]) {
+        let image =
+            image::RgbaImage::from_raw(width, height, pixels.to_vec()).expect("valid test image");
+        image.save(path).unwrap();
+    }
+
+    fn rgba_handle_pixels(handle: &ImageHandle) -> (u32, u32, Vec<u8>) {
+        match handle {
+            ImageHandle::Rgba {
+                width,
+                height,
+                pixels,
+                ..
+            } => (*width, *height, pixels.to_vec()),
+            _ => panic!("expected an RGBA image handle"),
+        }
+    }
+
+    fn persist_test_local_edit(
+        path: &Path,
+        image: Arc<decode::ImageData>,
+        state: edit::EditState,
+        base_source: BaseImageSource,
+    ) {
+        persist_local_edit(&LocalEditPersistRequest {
+            request_id: 1,
+            path: path.to_path_buf(),
+            image,
+            state,
+            vig: [0.0; 3],
+            base_source,
+        })
+        .unwrap();
     }
 
     #[test]
@@ -3715,11 +4423,13 @@ mod tests {
             LibraryEntry {
                 path: p1.clone(),
                 filename: "a.png".to_string(),
+                thumbnail_image: None,
                 thumbnail_handle: None,
             },
             LibraryEntry {
                 path: p2.clone(),
                 filename: "b.jpg".to_string(),
+                thumbnail_image: None,
                 thumbnail_handle: None,
             },
         ];
@@ -3745,130 +4455,216 @@ mod tests {
     }
 
     #[test]
-    fn local_edits_file_targets_a_visible_repo_local_file_when_repo_root_is_known() {
+    fn local_edit_cache_targets_a_visible_repo_local_directory_when_repo_root_is_known() {
         let repo_root = tempfile::tempdir().unwrap();
 
         assert_eq!(
-            local_edits_file_path_for_repo_root(repo_root.path()),
-            repo_root.path().join(LOCAL_EDITS_FILE_NAME)
+            local_edit_cache_dir_for_repo_root(repo_root.path()),
+            repo_root.path().join(LOCAL_EDIT_CACHE_DIR_NAME)
         );
     }
 
     #[test]
-    fn local_edits_file_resolves_under_this_repo_root() {
+    fn local_edit_cache_resolves_under_this_repo_root() {
         assert_eq!(
-            local_edits_file_path_for_repo_root(Path::new(env!("CARGO_MANIFEST_DIR"))),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LOCAL_EDITS_FILE_NAME)
+            local_edit_cache_dir_for_repo_root(Path::new(env!("CARGO_MANIFEST_DIR"))),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LOCAL_EDIT_CACHE_DIR_NAME)
         );
     }
 
     #[test]
-    fn local_edits_round_trip_rotation_and_crop() {
-        let dir = tempfile::tempdir().unwrap();
-        let edits_path = dir.path().join("edits.json");
-        let image_path = dir.path().join("frame.png");
-        std::fs::write(&image_path, b"frame").unwrap();
+    fn local_edit_cache_round_trips_baked_image_data_without_restoring_history() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
 
-        let state = edit::EditState {
-            exposure: 1.0,
-            rotation: edit::QuarterTurns::new(1),
-            crop: Some(edit::CropRect::new(0.25, 0.0, 0.75, 1.0)),
-            ..edit::EditState::default()
-        };
-        let mut histories = std::collections::HashMap::new();
-        histories.insert(image_path.clone(), edit::UndoHistory::from_saved_state(state));
+        let mut state = edit::EditState::default();
+        state.rotate_clockwise();
 
-        save_local_edits_to(&edits_path, &histories);
-        let loaded = load_local_edits_from(&edits_path);
+        with_test_photo_repo_root(repo_root.path(), || {
+            persist_test_local_edit(
+                &image_path,
+                test_image_from_pixels(2, 1, &pixels),
+                state,
+                BaseImageSource::Original,
+            );
 
-        let history = loaded.get(&image_path).expect("persisted edit state");
-        assert_eq!(history.current, state);
-        assert!(!history.can_undo());
-        assert!(!history.can_redo());
+            let loaded = load_persisted_local_edit_image(&image_path)
+                .unwrap()
+                .expect("persisted local edit image");
+            let expected = edit::render_edited_image(&pixels, 2, 1, &state, [0.0; 3]);
+            assert_eq!(loaded.width, expected.width);
+            assert_eq!(loaded.height, expected.height);
+            assert_eq!(loaded.pixels, expected.pixels);
+
+            let (app, _) = App::new();
+            assert!(app.edit_histories.is_empty());
+        });
     }
 
     #[test]
-    fn local_edits_skip_default_and_missing_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let edits_path = dir.path().join("edits.json");
-        let kept_path = dir.path().join("kept.png");
-        let default_path = dir.path().join("default.png");
-        let missing_path = dir.path().join("missing.png");
-        std::fs::write(&kept_path, b"kept").unwrap();
-        std::fs::write(&default_path, b"default").unwrap();
+    fn library_thumbnail_load_prefers_the_persisted_local_edit_thumbnail() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
 
-        let mut histories = std::collections::HashMap::new();
-        histories.insert(
-            kept_path.clone(),
-            edit::UndoHistory::from_saved_state(edit::EditState {
-                rotation: edit::QuarterTurns::new(3),
-                crop: Some(edit::CropRect::new(0.0, 0.0, 1.0, 0.5)),
+        let mut state = edit::EditState::default();
+        state.rotate_clockwise();
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            persist_test_local_edit(
+                &image_path,
+                test_image_from_pixels(2, 1, &pixels),
+                state,
+                BaseImageSource::Original,
+            );
+
+            let thumbnail =
+                load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+            let expected = edit::render_edited_image(&pixels, 2, 1, &state, [0.0; 3]);
+            assert_eq!(thumbnail.width, expected.width);
+            assert_eq!(thumbnail.height, expected.height);
+            assert_eq!(thumbnail.pixels, expected.pixels);
+        });
+    }
+
+    #[test]
+    fn library_thumbnail_ignores_a_stale_persisted_thumbnail_when_full_copy_changed() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
+
+        let original =
+            edit::render_edited_image(&pixels, 2, 1, &edit::EditState::default(), [0.0; 3]);
+        let mut rotated_state = edit::EditState::default();
+        rotated_state.rotate_clockwise();
+        let rotated = edit::render_edited_image(&pixels, 2, 1, &rotated_state, [0.0; 3]);
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            let stale_thumb =
+                thumbnail_from_rendered_image(&original, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+            write_local_edit_cache_variant_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Thumbnail,
+                &stale_thumb,
+            )
+            .unwrap();
+            write_local_edit_cache_variant_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Full,
+                &rotated,
+            )
+            .unwrap();
+
+            let thumbnail =
+                load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+
+            assert_eq!(thumbnail.width, rotated.width);
+            assert_eq!(thumbnail.height, rotated.height);
+            assert_eq!(thumbnail.pixels, rotated.pixels);
+        });
+    }
+
+    #[test]
+    fn persisted_local_edit_is_ignored_after_the_source_file_changes() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let original_pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let replacement_pixels = [0, 0, 255, 255, 255, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &original_pixels);
+
+        let mut state = edit::EditState::default();
+        state.rotate_clockwise();
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            persist_test_local_edit(
+                &image_path,
+                test_image_from_pixels(2, 1, &original_pixels),
+                state,
+                BaseImageSource::Original,
+            );
+
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            write_test_png(&image_path, 2, 1, &replacement_pixels);
+
+            assert!(load_persisted_local_edit_image(&image_path)
+                .unwrap_or(None)
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn rotate_clockwise_updates_library_thumbnail_immediately() {
+        let path = PathBuf::from("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        let thumbnail_image = test_image_from_pixels(2, 1, &pixels);
+        let mut app = detail_app_with_image(&path, 2, 1);
+        app.image = Some(test_image_from_pixels(2, 1, &pixels));
+        app.library = vec![LibraryEntry {
+            path: path.clone(),
+            filename: "frame.png".to_string(),
+            thumbnail_image: Some(thumbnail_image),
+            thumbnail_handle: None,
+        }];
+        app.rebuild_library_indices();
+
+        let _ = app.update(Message::RotateClockwise);
+
+        let handle = app.library[0]
+            .thumbnail_handle
+            .as_ref()
+            .expect("rotated thumbnail handle");
+        let (width, height, pixels) = rgba_handle_pixels(handle);
+        let expected = edit::render_edited_image(
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+            2,
+            1,
+            &edit::EditState {
+                rotation: edit::QuarterTurns::new(1),
                 ..edit::EditState::default()
-            }),
-        );
-        histories.insert(
-            default_path.clone(),
-            edit::UndoHistory::from_saved_state(edit::EditState::default()),
-        );
-        histories.insert(
-            missing_path.clone(),
-            edit::UndoHistory::from_saved_state(edit::EditState {
-                exposure: 0.5,
-                ..edit::EditState::default()
-            }),
+            },
+            [0.0; 3],
         );
 
-        save_local_edits_to(&edits_path, &histories);
-        let loaded = load_local_edits_from(&edits_path);
-
-        assert_eq!(loaded.len(), 1);
-        assert!(loaded.contains_key(&kept_path));
-        assert!(!loaded.contains_key(&default_path));
-        assert!(!loaded.contains_key(&missing_path));
+        assert_eq!(width, expected.width);
+        assert_eq!(height, expected.height);
+        assert_eq!(pixels, expected.pixels);
     }
 
     #[test]
-    fn local_edits_normalize_loaded_crop_bounds() {
-        let dir = tempfile::tempdir().unwrap();
-        let edits_path = dir.path().join("edits.json");
-        let image_path = dir.path().join("frame.png");
-        std::fs::write(&image_path, b"frame").unwrap();
-        let json = serde_json::json!([
-            {
-                "path": image_path,
-                "state": {
-                    "exposure": 0.0,
-                    "contrast": 0.0,
-                    "highlights": 0.0,
-                    "shadows": 0.0,
-                    "whites": 0.0,
-                    "blacks": 0.0,
-                    "temperature": 0.0,
-                    "tint": 0.0,
-                    "vibrance": 0.0,
-                    "saturation": 0.0,
-                    "clarity": 0.0,
-                    "dehaze": 0.0,
-                    "lens_correction": false,
-                    "rotation": 7,
-                    "crop": {
-                        "left": 0.75,
-                        "top": 1.0,
-                        "right": 0.25,
-                        "bottom": 0.0
-                    }
-                }
-            }
-        ]);
-        std::fs::write(&edits_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    fn exposure_commit_updates_library_thumbnail_immediately() {
+        let path = PathBuf::from("frame.png");
+        let pixels = [96, 96, 96, 255];
+        let thumbnail_image = test_image_from_pixels(1, 1, &pixels);
+        let mut app = detail_app_with_image(&path, 1, 1);
+        app.image = Some(test_image_from_pixels(1, 1, &pixels));
+        app.library = vec![LibraryEntry {
+            path: path.clone(),
+            filename: "frame.png".to_string(),
+            thumbnail_image: Some(thumbnail_image),
+            thumbnail_handle: None,
+        }];
+        app.rebuild_library_indices();
+        app.slider_text_buf = "1.0".to_string();
 
-        let loaded = load_local_edits_from(&edits_path);
-        let history = loaded.get(&image_path).expect("normalized edit state");
+        let _ = app.update(Message::SliderTextSubmit(SliderKind::Exposure));
 
-        assert_eq!(history.current.rotation, edit::QuarterTurns::new(3));
-        assert_eq!(
-            history.current.crop,
-            Some(edit::CropRect::new(0.25, 0.0, 0.75, 1.0))
+        let handle = app.library[0]
+            .thumbnail_handle
+            .as_ref()
+            .expect("exposure-adjusted thumbnail handle");
+        let (_, _, rendered_pixels) = rgba_handle_pixels(handle);
+        assert!(
+            rendered_pixels[0] > pixels[0],
+            "expected exposure-adjusted thumbnail to brighten"
         );
     }
 
@@ -3889,9 +4685,14 @@ mod tests {
         assert!(app.library_entry_by_path(&raw).is_some());
         assert!(app.library_entry_by_path(&png).is_some());
         assert!(app.library_entry_by_path(&svg).is_some());
-        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(raw.as_path()));
         assert_eq!(
-            app.pending_import_cache_warm_paths.iter().collect::<Vec<_>>(),
+            app.import_cache_warm_in_flight.as_deref(),
+            Some(raw.as_path())
+        );
+        assert_eq!(
+            app.pending_import_cache_warm_paths
+                .iter()
+                .collect::<Vec<_>>(),
             vec![&svg]
         );
     }
@@ -3908,14 +4709,20 @@ mod tests {
         app.context_menu = None;
 
         let _ = app.update(Message::FilesPicked(Some(paths)));
-        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(raw.as_path()));
+        assert_eq!(
+            app.import_cache_warm_in_flight.as_deref(),
+            Some(raw.as_path())
+        );
 
         let _ = app.update(Message::ImportCacheWarmCompleted {
             path: raw,
             result: Ok(true),
         });
 
-        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(svg.as_path()));
+        assert_eq!(
+            app.import_cache_warm_in_flight.as_deref(),
+            Some(svg.as_path())
+        );
         assert!(app.pending_import_cache_warm_paths.is_empty());
     }
 
@@ -3931,14 +4738,20 @@ mod tests {
         app.context_menu = None;
 
         let _ = app.update(Message::FilesPicked(Some(paths)));
-        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(raw.as_path()));
+        assert_eq!(
+            app.import_cache_warm_in_flight.as_deref(),
+            Some(raw.as_path())
+        );
 
         let _ = app.update(Message::ImportCacheWarmCompleted {
             path: raw,
             result: Err("warm failed".to_string()),
         });
 
-        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(svg.as_path()));
+        assert_eq!(
+            app.import_cache_warm_in_flight.as_deref(),
+            Some(svg.as_path())
+        );
         assert!(app.pending_import_cache_warm_paths.is_empty());
     }
 
@@ -3956,13 +4769,21 @@ mod tests {
         app.context_menu = None;
 
         let _ = app.update(Message::FilesPicked(Some(first_batch)));
-        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(first.as_path()));
+        assert_eq!(
+            app.import_cache_warm_in_flight.as_deref(),
+            Some(first.as_path())
+        );
 
         let _ = app.update(Message::FilesPicked(Some(second_batch)));
 
-        assert_eq!(app.import_cache_warm_in_flight.as_deref(), Some(first.as_path()));
         assert_eq!(
-            app.pending_import_cache_warm_paths.iter().collect::<Vec<_>>(),
+            app.import_cache_warm_in_flight.as_deref(),
+            Some(first.as_path())
+        );
+        assert_eq!(
+            app.pending_import_cache_warm_paths
+                .iter()
+                .collect::<Vec<_>>(),
             vec![&second, &svg]
         );
     }
@@ -4538,7 +5359,7 @@ mod tests {
         other_history.commit();
         app.edit_histories.insert(other_path.clone(), other_history);
 
-        app.handle_viewer(ViewerEvent::CropCommitted {
+        let _ = app.handle_viewer(ViewerEvent::CropCommitted {
             rect: edit::CropRect::new(0.25, 0.0, 0.75, 1.0),
         });
 
@@ -4571,7 +5392,7 @@ mod tests {
             None,
         );
 
-        app.handle_viewer(ViewerEvent::CropCommitted {
+        let _ = app.handle_viewer(ViewerEvent::CropCommitted {
             rect: edit::CropRect::new(0.5, 0.0, 1.0, 1.0),
         });
 
@@ -4593,7 +5414,7 @@ mod tests {
         let mut app = detail_app_with_image(&path, 2, 1);
 
         let _ = app.update(Message::RotateClockwise);
-        app.handle_viewer(ViewerEvent::CropCommitted {
+        let _ = app.handle_viewer(ViewerEvent::CropCommitted {
             rect: edit::CropRect::new(0.0, 0.0, 1.0, 0.5),
         });
 
@@ -4653,7 +5474,7 @@ mod tests {
         assert!(status.contains("200\u{00d7}100"));
         assert!(!status.contains("100\u{00d7}100"));
 
-        app.handle_viewer(ViewerEvent::DoubleClick {
+        let _ = app.handle_viewer(ViewerEvent::DoubleClick {
             canvas_size: [400.0, 200.0],
         });
 
@@ -5089,7 +5910,10 @@ mod tests {
 
         let _ = app.update(Message::ImageLoaded {
             request_id,
-            result: Ok(loaded_full_image(Path::new("frame.arw"), test_image(6000, 3000))),
+            result: Ok(loaded_full_image(
+                Path::new("frame.arw"),
+                test_image(6000, 3000),
+            )),
         });
 
         assert!(!app.detail_load.is_loading());
@@ -5161,6 +5985,7 @@ mod tests {
         app.replace_library_entries(vec![LibraryEntry {
             path: path.clone(),
             filename: "frame.arw".to_string(),
+            thumbnail_image: None,
             thumbnail_handle: None,
         }]);
         app.current_image_path = Some(path.clone());
@@ -5423,7 +6248,10 @@ mod tests {
 
         let _ = app.update(Message::ImageLoaded {
             request_id,
-            result: Ok(loaded_full_image(Path::new("frame.arw"), test_image(6000, 4000))),
+            result: Ok(loaded_full_image(
+                Path::new("frame.arw"),
+                test_image(6000, 4000),
+            )),
         });
 
         assert!(!app.detail_load.is_loading());
@@ -5480,7 +6308,10 @@ mod tests {
         });
         let _ = app.update(Message::ImageLoaded {
             request_id: first_request_id,
-            result: Ok(loaded_full_image(Path::new("first.arw"), test_image(640, 320))),
+            result: Ok(loaded_full_image(
+                Path::new("first.arw"),
+                test_image(640, 320),
+            )),
         });
 
         assert!(app.image.is_none());
@@ -5614,6 +6445,97 @@ mod tests {
 
         let request = app.current_save_request().unwrap();
         assert_eq!(request.vig, [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn current_local_edit_persist_request_waits_for_auto_lens_metadata() {
+        let path = PathBuf::from("frame.arw");
+        let mut app = detail_app_with_image(&path, 3, 3);
+        let pixels = vec![
+            200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200,
+            200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200, 200,
+            200, 255,
+        ];
+        app.image = Some(test_image_from_pixels(3, 3, &pixels));
+        let mut history = edit::UndoHistory::default();
+        history.current.lens_correction = true;
+        history.commit();
+        app.edit_histories.insert(path, history);
+        app.detail_load.stage = DetailLoadStage::Idle;
+        app.detail_load.exif_loading = true;
+        app.lens_override_name = None;
+        app.current_lens_profile = None;
+
+        assert!(app.current_local_edit_persist_request().is_none());
+    }
+
+    #[test]
+    fn exif_loaded_refreshes_library_thumbnail_and_persist_for_auto_lens_correction() {
+        let path = PathBuf::from("frame.arw");
+        let mut app = detail_app_with_image(&path, 3, 3);
+        let pixels = vec![
+            200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200,
+            200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200, 200, 200, 255, 200, 200,
+            200, 255,
+        ];
+        let base_image = test_image_from_pixels(3, 3, &pixels);
+        app.image = Some(base_image.clone());
+        app.library = vec![LibraryEntry {
+            path: path.clone(),
+            filename: "frame.arw".to_string(),
+            thumbnail_image: Some(base_image),
+            thumbnail_handle: None,
+        }];
+        app.rebuild_library_indices();
+        let mut history = edit::UndoHistory::default();
+        history.current.lens_correction = true;
+        history.commit();
+        app.edit_histories.insert(path.clone(), history);
+        app.detail_load.stage = DetailLoadStage::Idle;
+        app.detail_load.exif_loading = true;
+        app.lens_override_name = None;
+        app.lens_db = lens::LensDatabase {
+            profiles: vec![lens::LensProfile {
+                maker: "Sony".to_string(),
+                model: "E 16mm".to_string(),
+                vignetting: Some(lens::VignetteCoeffs {
+                    k1: -1.0,
+                    k2: 0.0,
+                    k3: 0.0,
+                }),
+                ..lens::LensProfile::default()
+            }],
+        };
+
+        let _ = app.update(Message::ExifLoaded {
+            request_id: app.detail_load.request_id,
+            exif: Some(lens::ExifInfo {
+                camera_make: "Sony".to_string(),
+                lens_model: "E 16mm".to_string(),
+                ..lens::ExifInfo::default()
+            }),
+        });
+
+        let handle = app.library[0]
+            .thumbnail_handle
+            .as_ref()
+            .expect("lens-corrected thumbnail handle");
+        let (width, height, rendered_pixels) = rgba_handle_pixels(handle);
+        let expected = edit::render_edited_image(
+            &pixels,
+            3,
+            3,
+            &edit::EditState {
+                lens_correction: true,
+                ..edit::EditState::default()
+            },
+            [-1.0, 0.0, 0.0],
+        );
+
+        assert_eq!(width, expected.width);
+        assert_eq!(height, expected.height);
+        assert_eq!(rendered_pixels, expected.pixels);
+        assert!(app.local_edit_persist_in_flight.is_some());
     }
 
     #[test]
