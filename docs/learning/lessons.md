@@ -3,6 +3,7 @@
 Keep this file short, current, and actionable.
 
 ## Active Lessons
+- 2026-04-22 - If the UI reports image dimensions, track the logical base-image dimensions separately from the decoded GPU/upload buffer and carry them back on the async load result; otherwise texture-limit downscales can make the UI lie, and a quick fix can accidentally move expensive source inspection onto the UI thread.
 - 2026-04-21 - If a persisted local cache stores both a full image and a thumbnail, tag them with the same generation and only trust a thumbnail that matches its full sibling; otherwise partial writes can make Library and Detail disagree after restart.
 - 2026-04-21 - When background persistence captures a render snapshot, refresh any immediate UI preview from that same snapshot instead of recomputing from later mutable app state.
 - 2026-04-21 - If local non-destructive metadata needs to be inspectable during development, keep it in a visible repo-local path and lock that path down with a focused regression instead of burying it in profile-scoped app storage.

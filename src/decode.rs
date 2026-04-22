@@ -26,7 +26,9 @@ pub struct ImageData {
 const MAX_TEXTURE_DIM: u32 = 16384;
 const DECODE_CACHE_MAGIC: &[u8; 8] = b"PHOCACHE";
 const DECODE_CACHE_SCHEMA_VERSION: u32 = 3;
-const DECODE_CACHE_CONTRACT_VERSION: u64 = 3;
+// Older persisted RAW cache entries were observed at bogus oversized dimensions, so force a
+// one-time rebuild rather than trusting pre-fix cache content across sessions.
+const DECODE_CACHE_CONTRACT_VERSION: u64 = 4;
 const DECODE_CACHE_DIR_NAME: &str = "decoded-cache";
 const DECODE_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DECODE_CACHE_TRIM_TARGET_BYTES: u64 = 1_536 * 1024 * 1024;
@@ -39,8 +41,12 @@ static PHOTO_REPO_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 static TEST_DECODE_CACHE_DIR_OVERRIDE: OnceLock<std::sync::Mutex<Option<Option<PathBuf>>>> =
     OnceLock::new();
 #[cfg(test)]
+static TEST_DECODE_CACHE_DIR_GUARD: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+#[cfg(test)]
 static TEST_PHOTO_REPO_ROOT_OVERRIDE: OnceLock<std::sync::Mutex<Option<Option<PathBuf>>>> =
     OnceLock::new();
+#[cfg(test)]
+static TEST_PHOTO_REPO_ROOT_GUARD: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceFingerprint {
@@ -161,6 +167,21 @@ pub fn decode_image(path: &Path) -> Result<Arc<ImageData>, String> {
     decode_image_with_cache_dir(path, cache_dir.as_deref())
 }
 
+pub fn source_dimensions(path: &Path) -> Result<(u32, u32), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "svg" | "svgz" => svg_source_dimensions(path),
+        _ if nav::is_raw_file(path) => raw_source_dimensions(path),
+        _ => image::image_dimensions(path)
+            .map_err(|e| format!("Failed to inspect image dimensions: {e}")),
+    }
+}
+
 pub fn warm_persisted_decoded_cache(path: &Path) -> Result<bool, String> {
     if !supports_persisted_decoded_cache(path) {
         return Ok(false);
@@ -175,7 +196,7 @@ fn decode_image_cache_dir(path: &Path) -> Option<PathBuf> {
         let override_dir = TEST_DECODE_CACHE_DIR_OVERRIDE
             .get_or_init(|| std::sync::Mutex::new(Some(None)))
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         return match override_dir {
             Some(cache_dir) => cache_dir,
@@ -282,9 +303,14 @@ fn load_or_decode_cached_full_image(
     if let (Some(cache_dir), Some(fingerprint)) = (cache_dir, fingerprint.as_ref()) {
         match source_content_hash(path, fingerprint.file_size) {
             Some(content_hash) => {
-                if let Err(error) =
-                    write_decoded_cache(cache_dir, fingerprint, content_hash, width, height, &pixels)
-                {
+                if let Err(error) = write_decoded_cache(
+                    cache_dir,
+                    fingerprint,
+                    content_hash,
+                    width,
+                    height,
+                    &pixels,
+                ) {
                     log::warn!(
                         "Decoded cache write failed for {}: {}",
                         path.display(),
@@ -356,21 +382,27 @@ fn photo_repo_root() -> Option<PathBuf> {
         let override_root = TEST_PHOTO_REPO_ROOT_OVERRIDE
             .get_or_init(|| std::sync::Mutex::new(None))
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         if let Some(repo_root) = override_root {
             return repo_root;
         }
     }
 
-    PHOTO_REPO_ROOT.get_or_init(discover_photo_repo_root).clone()
+    PHOTO_REPO_ROOT
+        .get_or_init(discover_photo_repo_root)
+        .clone()
 }
 
 fn discover_photo_repo_root() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| find_photo_repo_root(path.parent()?))
-        .or_else(|| std::env::current_dir().ok().and_then(|dir| find_photo_repo_root(&dir)))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|dir| find_photo_repo_root(&dir))
+        })
 }
 
 fn find_photo_repo_root(start: &Path) -> Option<PathBuf> {
@@ -394,6 +426,20 @@ fn decoded_cache_contract_hash() -> u64 {
 fn decoded_cache_temp_file_path(cache_path: &Path) -> PathBuf {
     let temp_id = NEXT_CACHE_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
     cache_path.with_extension(format!("tmp-{}-{temp_id}", std::process::id()))
+}
+
+fn maybe_prune_decoded_cache_after_write(
+    cache_dir: &Path,
+    writes_since_prune: u64,
+) -> Result<(), String> {
+    if writes_since_prune.is_multiple_of(DECODE_CACHE_PRUNE_WRITE_INTERVAL) {
+        prune_decoded_cache(
+            cache_dir,
+            DECODE_CACHE_MAX_BYTES,
+            DECODE_CACHE_TRIM_TARGET_BYTES,
+        )?;
+    }
+    Ok(())
 }
 
 fn write_decoded_cache(
@@ -478,13 +524,7 @@ fn write_decoded_cache(
     }
     write_result?;
     let writes_since_prune = CACHE_WRITES_SINCE_PRUNE.fetch_add(1, Ordering::Relaxed) + 1;
-    if writes_since_prune.is_multiple_of(DECODE_CACHE_PRUNE_WRITE_INTERVAL) {
-        prune_decoded_cache(
-            cache_dir,
-            DECODE_CACHE_MAX_BYTES,
-            DECODE_CACHE_TRIM_TARGET_BYTES,
-        )?;
-    }
+    maybe_prune_decoded_cache_after_write(cache_dir, writes_since_prune)?;
     Ok(())
 }
 
@@ -641,19 +681,46 @@ fn prune_decoded_cache(
     Ok(())
 }
 
-fn decode_svg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
+fn load_svg_tree(path: &Path) -> Result<resvg::usvg::Tree, String> {
     let data = std::fs::read(path).map_err(|e| format!("Failed to read SVG: {e}"))?;
-    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default())
-        .map_err(|e| format!("Failed to parse SVG: {e}"))?;
+    resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default())
+        .map_err(|e| format!("Failed to parse SVG: {e}"))
+}
 
+fn svg_tree_dimensions(tree: &resvg::usvg::Tree) -> Result<(u32, u32), String> {
     let size = tree.size();
-    let mut w = size.width() as u32;
-    let mut h = size.height() as u32;
-
-    // Clamp to reasonable size
-    if w == 0 || h == 0 {
+    let width = size.width() as u32;
+    let height = size.height() as u32;
+    if width == 0 || height == 0 {
         return Err("SVG has zero dimensions".to_string());
     }
+    Ok((width, height))
+}
+
+fn svg_source_dimensions(path: &Path) -> Result<(u32, u32), String> {
+    let tree = load_svg_tree(path)?;
+    svg_tree_dimensions(&tree)
+}
+
+fn raw_source_dimensions(path: &Path) -> Result<(u32, u32), String> {
+    with_raw_decoder(path, |rawfile, decoder, params| {
+        let rawimage = decoder
+            .raw_image(rawfile, params, true)
+            .map_err(|e| format!("Failed to read RAW dimensions: {e}"))?;
+        let width = u32::try_from(rawimage.width)
+            .map_err(|_| format!("RAW width {} exceeded u32", rawimage.width))?;
+        let height = u32::try_from(rawimage.height)
+            .map_err(|_| format!("RAW height {} exceeded u32", rawimage.height))?;
+        Ok((width, height))
+    })
+}
+
+fn decode_svg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
+    let tree = load_svg_tree(path)?;
+    let size = tree.size();
+    let (mut w, mut h) = svg_tree_dimensions(&tree)?;
+
+    // Clamp to reasonable size
     if w > MAX_TEXTURE_DIM || h > MAX_TEXTURE_DIM {
         let scale = MAX_TEXTURE_DIM as f32 / w.max(h) as f32;
         w = (w as f32 * scale) as u32;
@@ -751,16 +818,9 @@ fn decode_jpeg_thumbnail(path: &Path, max_dim: u32) -> Result<(Vec<u8>, u32, u32
 }
 
 fn decode_svg_thumbnail(path: &Path, max_dim: u32) -> Result<(Vec<u8>, u32, u32), String> {
-    let data = std::fs::read(path).map_err(|e| format!("Failed to read SVG: {e}"))?;
-    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default())
-        .map_err(|e| format!("Failed to parse SVG: {e}"))?;
-
+    let tree = load_svg_tree(path)?;
     let size = tree.size();
-    let orig_w = size.width() as u32;
-    let orig_h = size.height() as u32;
-    if orig_w == 0 || orig_h == 0 {
-        return Err("SVG has zero dimensions".to_string());
-    }
+    let (orig_w, orig_h) = svg_tree_dimensions(&tree)?;
 
     // Render directly at thumbnail size
     let scale = max_dim as f32 / orig_w.max(orig_h) as f32;
@@ -1101,30 +1161,46 @@ mod tests {
         cache_dir: Option<Option<&Path>>,
         f: impl FnOnce() -> T,
     ) -> T {
-        let override_lock = TEST_DECODE_CACHE_DIR_OVERRIDE
-            .get_or_init(|| std::sync::Mutex::new(Some(None)));
-        let mut guard = override_lock.lock().unwrap();
+        let _guard = TEST_DECODE_CACHE_DIR_GUARD
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let override_lock =
+            TEST_DECODE_CACHE_DIR_OVERRIDE.get_or_init(|| std::sync::Mutex::new(Some(None)));
+        let mut guard = override_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = guard.clone();
         *guard = cache_dir.map(|path| path.map(Path::to_path_buf));
         drop(guard);
 
         let result = f();
 
-        *override_lock.lock().unwrap() = previous;
+        *override_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous;
         result
     }
 
     fn with_test_photo_repo_root<T>(repo_root: Option<Option<&Path>>, f: impl FnOnce() -> T) -> T {
-        let override_lock = TEST_PHOTO_REPO_ROOT_OVERRIDE
-            .get_or_init(|| std::sync::Mutex::new(None));
-        let mut guard = override_lock.lock().unwrap();
+        let _guard = TEST_PHOTO_REPO_ROOT_GUARD
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let override_lock =
+            TEST_PHOTO_REPO_ROOT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
+        let mut guard = override_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = guard.clone();
         *guard = repo_root.map(|path| path.map(Path::to_path_buf));
         drop(guard);
 
         let result = f();
 
-        *override_lock.lock().unwrap() = previous;
+        *override_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous;
         result
     }
 
@@ -1136,6 +1212,43 @@ mod tests {
         let result = decode_image(&path).unwrap();
         assert_eq!(result.width, 64);
         assert_eq!(result.height, 48);
+    }
+
+    #[test]
+    fn source_dimensions_report_raw_container_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng(dir.path(), "source.dng", 24, 12);
+
+        let dimensions = source_dimensions(&path).unwrap();
+
+        assert_eq!(dimensions, (24, 12));
+    }
+
+    #[test]
+    fn source_dimensions_report_png_file_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_png(dir.path(), "source.png", 64, 48);
+
+        let dimensions = source_dimensions(&path).unwrap();
+
+        assert_eq!(dimensions, (64, 48));
+    }
+
+    #[test]
+    fn source_dimensions_report_svg_intrinsic_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_svg(dir.path(), "source.svg");
+
+        let dimensions = source_dimensions(&path).unwrap();
+
+        assert_eq!(dimensions, (200, 100));
+    }
+
+    #[test]
+    fn source_dimensions_return_an_error_for_missing_files() {
+        let result = source_dimensions(Path::new("/no/such/file.png"));
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1451,7 +1564,11 @@ mod tests {
     fn decode_image_uses_the_public_repo_local_cache_entrypoint() {
         let repo_root = tempfile::tempdir().unwrap();
         std::fs::write(repo_root.path().join("AGENTS.md"), "test repo").unwrap();
-        std::fs::write(repo_root.path().join("Cargo.toml"), "[package]\nname = \"photo\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(
+            repo_root.path().join("Cargo.toml"),
+            "[package]\nname = \"photo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         std::fs::create_dir(repo_root.path().join(".git")).unwrap();
         std::fs::create_dir(repo_root.path().join("src")).unwrap();
         std::fs::write(repo_root.path().join("src").join("decode.rs"), "// marker").unwrap();
@@ -1465,7 +1582,8 @@ mod tests {
             with_test_photo_repo_root(Some(Some(repo_root.path())), || {
                 let first = decode_image(&svg).unwrap();
                 assert!(cache_file.exists());
-                let first_cache_modified = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
+                let first_cache_modified =
+                    std::fs::metadata(&cache_file).unwrap().modified().unwrap();
 
                 let second = decode_image(&svg).unwrap();
                 let second_cache_modified =
@@ -1501,7 +1619,8 @@ mod tests {
             with_test_photo_repo_root(Some(Some(repo_root.path())), || {
                 let first = decode_image(&raw).unwrap();
                 assert!(cache_file.exists());
-                let first_cache_modified = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
+                let first_cache_modified =
+                    std::fs::metadata(&cache_file).unwrap().modified().unwrap();
 
                 let second = decode_image(&raw).unwrap();
                 let second_cache_modified =
@@ -1572,7 +1691,11 @@ mod tests {
         let repo_root = tempfile::tempdir().unwrap();
         let nested = repo_root.path().join("target").join("debug");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(repo_root.path().join("Cargo.toml"), "[package]\nname = \"not-photo\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(
+            repo_root.path().join("Cargo.toml"),
+            "[package]\nname = \"not-photo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         std::fs::create_dir(repo_root.path().join(".git")).unwrap();
 
         assert_eq!(find_photo_repo_root(&nested), None);
@@ -1753,9 +1876,15 @@ mod tests {
         std::fs::create_dir(&cache_path).unwrap();
 
         let content_hash = source_content_hash(&source, fingerprint.file_size).unwrap();
-        let error =
-            write_decoded_cache(cache_dir.path(), &fingerprint, content_hash, 1, 1, &[1, 2, 3, 4])
-                .expect_err("finalize failure should surface");
+        let error = write_decoded_cache(
+            cache_dir.path(),
+            &fingerprint,
+            content_hash,
+            1,
+            1,
+            &[1, 2, 3, 4],
+        )
+        .expect_err("finalize failure should surface");
 
         assert!(error.contains("Failed to finalize cache file"));
 
@@ -1886,30 +2015,29 @@ mod tests {
 
     #[test]
     fn write_decoded_cache_triggers_periodic_pruning() {
-        let source_dir = tempfile::tempdir().unwrap();
         let cache_dir = tempfile::tempdir().unwrap();
-        let stale_path = cache_dir.path().join("stale.rgba");
-        File::create(&stale_path).unwrap().set_len(DECODE_CACHE_MAX_BYTES + 1).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-
-        let source = source_dir.path().join("frame.svg");
-        std::fs::write(&source, b"<svg />").unwrap();
+        let source = create_test_svg(cache_dir.path(), "frame.svg");
         let fingerprint = SourceFingerprint::from_path(&source).unwrap();
-        let content_hash = source_content_hash(&source, fingerprint.file_size).unwrap();
-        let previous = CACHE_WRITES_SINCE_PRUNE.swap(DECODE_CACHE_PRUNE_WRITE_INTERVAL - 1, Ordering::Relaxed);
-
-        let result = write_decoded_cache(
-            cache_dir.path(),
-            &fingerprint,
-            content_hash,
-            1,
-            1,
-            &[1, 2, 3, 4],
-        );
-
-        CACHE_WRITES_SINCE_PRUNE.store(previous, Ordering::Relaxed);
-
-        result.unwrap();
+        let stale_path = cache_dir.path().join("stale.rgba");
+        File::create(&stale_path)
+            .unwrap()
+            .set_len(DECODE_CACHE_MAX_BYTES + 1)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        for _ in 0..DECODE_CACHE_PRUNE_WRITE_INTERVAL {
+            write_decoded_cache(
+                cache_dir.path(),
+                &fingerprint,
+                source_content_hash(&source, fingerprint.file_size).unwrap(),
+                2,
+                2,
+                &[3; 16],
+            )
+            .unwrap();
+            if !stale_path.exists() {
+                break;
+            }
+        }
         assert!(!stale_path.exists());
     }
 }

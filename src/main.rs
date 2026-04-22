@@ -354,11 +354,14 @@ fn metadata_matches_fingerprint(path: &Path, fingerprint: SourceFileFingerprint)
 struct SessionFullImageCacheEntry {
     fingerprint: SourceFileFingerprint,
     image: Arc<ImageData>,
+    base_source: BaseImageSource,
+    logical_dimensions: (u32, u32),
     bytes: usize,
 }
 
 struct SessionFullImageCacheHit {
     image: Arc<ImageData>,
+    logical_dimensions: (u32, u32),
     _write_guard: File,
 }
 
@@ -367,6 +370,7 @@ struct LoadedFullImage {
     image: Arc<ImageData>,
     fingerprint: Option<SourceFileFingerprint>,
     base_source: BaseImageSource,
+    logical_dimensions: (u32, u32),
 }
 
 struct LoadedLocalEditCacheVariant {
@@ -404,11 +408,25 @@ impl SessionFullImageCache {
         }
     }
 
-    fn get(&mut self, path: &Path) -> Option<SessionFullImageCacheHit> {
-        let (cached_fingerprint, image) = match self.entries.get(path) {
-            Some(entry) => (entry.fingerprint, entry.image.clone()),
-            None => return None,
-        };
+    fn get(
+        &mut self,
+        path: &Path,
+        expected_base_source: BaseImageSource,
+    ) -> Option<SessionFullImageCacheHit> {
+        let (cached_fingerprint, image, base_source, logical_dimensions) =
+            match self.entries.get(path) {
+                Some(entry) => (
+                    entry.fingerprint,
+                    entry.image.clone(),
+                    entry.base_source,
+                    entry.logical_dimensions,
+                ),
+                None => return None,
+            };
+        if base_source != expected_base_source {
+            self.remove(path);
+            return None;
+        }
 
         let mut guard = open_cache_validation_handle(path)?;
         let metadata = guard.metadata().ok()?;
@@ -435,6 +453,7 @@ impl SessionFullImageCache {
         self.touch(path);
         Some(SessionFullImageCacheHit {
             image,
+            logical_dimensions,
             _write_guard: guard,
         })
     }
@@ -443,13 +462,26 @@ impl SessionFullImageCache {
         self.entries.contains_key(path)
     }
 
+    fn entry_matches_base_source(&self, path: &Path, expected_base_source: BaseImageSource) -> bool {
+        self.entries
+            .get(path)
+            .is_some_and(|entry| entry.base_source == expected_base_source)
+    }
+
     fn metadata_matches_path(&self, path: &Path) -> bool {
         self.entries
             .get(path)
             .is_some_and(|entry| metadata_matches_fingerprint(path, entry.fingerprint))
     }
 
-    fn insert(&mut self, path: &Path, fingerprint: SourceFileFingerprint, image: Arc<ImageData>) {
+    fn insert(
+        &mut self,
+        path: &Path,
+        fingerprint: SourceFileFingerprint,
+        image: Arc<ImageData>,
+        base_source: BaseImageSource,
+        logical_dimensions: (u32, u32),
+    ) {
         self.remove(path);
 
         let bytes = image.pixels.len();
@@ -461,6 +493,8 @@ impl SessionFullImageCache {
             SessionFullImageCacheEntry {
                 fingerprint,
                 image,
+                base_source,
+                logical_dimensions,
                 bytes,
             },
         );
@@ -495,6 +529,27 @@ impl SessionFullImageCache {
                 self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
             }
         }
+    }
+}
+
+fn loaded_image_logical_dimensions(
+    path: &Path,
+    base_source: BaseImageSource,
+    image: &ImageData,
+) -> (u32, u32) {
+    match base_source {
+        BaseImageSource::Original => match decode::source_dimensions(path) {
+            Ok(dimensions) => dimensions,
+            Err(error) => {
+                log::warn!(
+                    "Failed to read source dimensions for {}: {}",
+                    path.display(),
+                    error
+                );
+                (image.width, image.height)
+            }
+        },
+        BaseImageSource::PersistedLocalEdit => (image.width, image.height),
     }
 }
 
@@ -597,6 +652,7 @@ struct App {
     edit_histories: std::collections::HashMap<PathBuf, edit::UndoHistory>,
     base_image_sources: std::collections::HashMap<PathBuf, BaseImageSource>,
     current_image_path: Option<PathBuf>,
+    current_image_source_dimensions: Option<(u32, u32)>,
     lens_db: lens::LensDatabase,
     current_lens_profile: Option<lens::LensProfile>,
     current_exif: Option<lens::ExifInfo>,
@@ -738,6 +794,7 @@ impl App {
             edit_histories: std::collections::HashMap::new(),
             base_image_sources: std::collections::HashMap::new(),
             current_image_path: None,
+            current_image_source_dimensions: None,
             lens_db: lens::LensDatabase::load_bundled(),
             current_lens_profile: None,
             current_exif: None,
@@ -873,7 +930,9 @@ impl App {
                 match result {
                     Ok(loaded) => {
                         if let Some(path) = self.current_image_path.clone() {
-                            self.base_image_sources.insert(path, loaded.base_source);
+                            self.base_image_sources
+                                .insert(path.clone(), loaded.base_source);
+                            self.current_image_source_dimensions = Some(loaded.logical_dimensions);
                         }
                         let reset_view = self.detail_load.on_full_image_loaded();
                         if let Some(fingerprint) = loaded.fingerprint {
@@ -1875,6 +1934,7 @@ impl App {
         self.rebuild_library_indices();
         self.reset_library_navigation_state();
         self.current_image_path = None;
+        self.current_image_source_dimensions = None;
         self.image = None;
     }
 
@@ -1900,6 +1960,7 @@ impl App {
         self.reset_library_navigation_state();
         if self.current_image_path.as_ref() == Some(&removed.path) {
             self.current_image_path = None;
+            self.current_image_source_dimensions = None;
             self.image = None;
         }
         Some(removed)
@@ -2214,10 +2275,13 @@ impl App {
                             }
                         };
                         drop(guard);
+                        let logical_dimensions =
+                            loaded_image_logical_dimensions(&path, base_source, &image);
                         Ok(LoadedFullImage {
                             image,
                             fingerprint,
                             base_source,
+                            logical_dimensions,
                         })
                     })
                     .await
@@ -2255,15 +2319,34 @@ impl App {
         let Some(path) = self.current_image_path.as_deref() else {
             return;
         };
-        self.session_full_image_cache
-            .insert(path, fingerprint, image);
+        let base_source = self.current_base_image_source();
+        let logical_dimensions = self
+            .current_image_source_dimensions
+            .unwrap_or((image.width, image.height));
+        self.session_full_image_cache.insert(
+            path,
+            fingerprint,
+            image,
+            base_source,
+            logical_dimensions,
+        );
     }
 
-    fn displayed_full_image_for_path(&self, path: &Path) -> Option<Arc<ImageData>> {
+    fn displayed_full_image_for_path(
+        &self,
+        path: &Path,
+        expected_base_source: BaseImageSource,
+    ) -> Option<Arc<ImageData>> {
         if self.current_image_path.as_deref() != Some(path) {
             return None;
         }
         if !self.session_full_image_cache.contains_path(path) {
+            return None;
+        }
+        if !self
+            .session_full_image_cache
+            .entry_matches_base_source(path, expected_base_source)
+        {
             return None;
         }
         if !self.session_full_image_cache.metadata_matches_path(path) {
@@ -2276,9 +2359,14 @@ impl App {
     }
 
     fn start_load(&mut self, path: PathBuf) -> Task<Message> {
-        let displayed_full_image = self.displayed_full_image_for_path(&path);
+        let preferred_source = self.preferred_base_image_source(&path);
+        let displayed_full_image = self.displayed_full_image_for_path(&path, preferred_source);
+        let displayed_logical_dimensions = displayed_full_image
+            .as_ref()
+            .and(self.current_image_source_dimensions);
         let request_id = self.detail_load.begin_request();
         self.current_image_path = Some(path.clone());
+        self.current_image_source_dimensions = None;
         self.error = None;
         self.save_status = None;
         self.current_exif = None;
@@ -2287,20 +2375,22 @@ impl App {
         }
 
         if let Some(image) = displayed_full_image {
+            self.current_image_source_dimensions =
+                Some(displayed_logical_dimensions.unwrap_or((image.width, image.height)));
             let reset_view = self.detail_load.on_full_image_loaded();
             self.apply_loaded_image(image, reset_view);
             return Self::exif_load_task(path, request_id);
         }
 
-        let cached_full_image = self.session_full_image_cache.get(&path);
+        let cached_full_image = self.session_full_image_cache.get(&path, preferred_source);
         if let Some(hit) = cached_full_image {
+            self.current_image_source_dimensions = Some(hit.logical_dimensions);
             let reset_view = self.detail_load.on_full_image_loaded();
             self.apply_loaded_image(hit.image, reset_view);
             return Self::exif_load_task(path, request_id);
         }
 
         self.image = None;
-        let preferred_source = self.preferred_base_image_source(&path);
         if nav::is_raw_file(&path)
             && !matches!(preferred_source, BaseImageSource::PersistedLocalEdit)
         {
@@ -2884,8 +2974,11 @@ impl App {
     }
 
     fn current_display_dimensions(&self, img: &decode::ImageData) -> (u32, u32) {
+        let (base_width, base_height) = self
+            .current_image_source_dimensions
+            .unwrap_or((img.width, img.height));
         let (display_w, display_h) =
-            edit::rotated_dimensions(img.width, img.height, self.current_rotation());
+            edit::rotated_dimensions(base_width, base_height, self.current_rotation());
         edit::cropped_dimensions(display_w, display_h, self.visible_crop())
     }
 
@@ -4122,6 +4215,7 @@ mod tests {
             file_size: 2_000_000,
         }));
         app.current_image_path = Some(path.to_path_buf());
+        app.current_image_source_dimensions = Some((width, height));
         app.base_image_sources
             .insert(path.to_path_buf(), BaseImageSource::Original);
         app
@@ -4146,10 +4240,13 @@ mod tests {
     }
 
     fn loaded_full_image(path: &Path, image: Arc<decode::ImageData>) -> LoadedFullImage {
+        let logical_dimensions = decode::source_dimensions(path)
+            .unwrap_or((image.width, image.height));
         LoadedFullImage {
             image,
             fingerprint: SourceFileFingerprint::from_path(path),
             base_source: BaseImageSource::Original,
+            logical_dimensions,
         }
     }
 
@@ -5460,6 +5557,152 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_uses_source_dimensions_when_loaded_buffer_is_scaled() {
+        let path = PathBuf::from("frame.arw");
+        let mut app = detail_app_with_image(&path, 16_384, 10_923);
+        app.current_image_source_dimensions = Some((9_728, 6_656));
+
+        let mut history = edit::UndoHistory::new();
+        history.current.rotate_clockwise();
+        history.commit();
+        app.edit_histories.insert(path, history);
+
+        let status = app.status_bar_text();
+        assert!(status.contains("6656\u{00d7}9728"));
+        assert!(!status.contains("10923\u{00d7}16384"));
+        assert!(!status.contains("16384\u{00d7}10923"));
+    }
+
+    #[test]
+    fn image_loaded_recovers_missing_source_dimensions_after_successful_original_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.png");
+        let pixels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 255, 0, 255, 255, 0,
+            255, 255, 255,
+        ];
+        write_test_png(&path, 3, 2, &pixels);
+
+        let mut app = detail_app_with_image(&path, 5, 4);
+        app.current_image_source_dimensions = None;
+        let request_id = app.detail_load.begin_request();
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id,
+            result: Ok(loaded_full_image(&path, test_image(5, 4))),
+        });
+
+        assert_eq!(app.current_image_source_dimensions, Some((3, 2)));
+        let status = app.status_bar_text();
+        assert!(status.contains("3\u{00d7}2"));
+        assert!(!status.contains("5\u{00d7}4"));
+    }
+
+    #[test]
+    fn session_full_image_cache_hit_restores_cached_source_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.png");
+        let pixels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 255, 0, 255, 255, 0,
+            255, 255, 255,
+        ];
+        write_test_png(&path, 3, 2, &pixels);
+
+        let mut app = detail_app_with_image(&path, 5, 4);
+        app.current_image_source_dimensions = Some((3, 2));
+        let fingerprint = SourceFileFingerprint::from_path(&path).unwrap();
+        app.cache_full_image_for_current_path(fingerprint, test_image(5, 4));
+        app.image = None;
+        app.current_image_source_dimensions = None;
+
+        let _ = app.start_load(path.clone());
+
+        assert_eq!(app.current_image_source_dimensions, Some((3, 2)));
+        let status = app.status_bar_text();
+        assert!(status.contains("3\u{00d7}2"));
+        assert!(!status.contains("5\u{00d7}4"));
+    }
+
+    #[test]
+    fn displayed_full_image_fast_path_does_not_reuse_a_stale_base_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.png");
+        let pixels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 255, 0, 255, 255, 0,
+            255, 255, 255,
+        ];
+        write_test_png(&path, 3, 2, &pixels);
+
+        let mut app = detail_app_with_image(&path, 5, 4);
+        app.current_image_source_dimensions = Some((3, 2));
+        let fingerprint = SourceFileFingerprint::from_path(&path).unwrap();
+        app.cache_full_image_for_current_path(fingerprint, test_image(5, 4));
+        app.base_image_sources
+            .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+
+        let _ = app.start_load(path.clone());
+
+        assert_eq!(app.status_bar_text(), "  Loading…");
+        assert!(app.image.is_none());
+        assert!(!app.session_full_image_cache.contains_path(&path));
+    }
+
+    #[test]
+    fn session_full_image_cache_invalidates_hits_when_base_source_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.png");
+        let pixels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 255, 0, 255, 255, 0,
+            255, 255, 255,
+        ];
+        write_test_png(&path, 3, 2, &pixels);
+
+        let mut cache = SessionFullImageCache::new(2, 64);
+        cache.insert(
+            &path,
+            SourceFileFingerprint::from_path(&path).unwrap(),
+            test_image_with_bytes(5, 4, 80),
+            BaseImageSource::Original,
+            (3, 2),
+        );
+
+        assert!(cache
+            .get(&path, BaseImageSource::PersistedLocalEdit)
+            .is_none());
+        assert!(!cache.contains_path(&path));
+    }
+
+    #[test]
+    fn clearing_library_entries_clears_current_image_source_dimensions() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+
+        app.clear_library_entries();
+
+        assert!(app.current_image_source_dimensions.is_none());
+    }
+
+    #[test]
+    fn removing_the_current_library_entry_clears_current_image_source_dimensions() {
+        let path = PathBuf::from("frame.png");
+        let mut app = detail_app_with_image(&path, 200, 100);
+        app.replace_library_entries(vec![LibraryEntry {
+            path: path.clone(),
+            filename: "frame.png".to_string(),
+            thumbnail_image: None,
+            thumbnail_handle: None,
+        }]);
+        app.current_image_path = Some(path);
+        app.current_image_source_dimensions = Some((200, 100));
+        app.image = Some(test_image(200, 100));
+
+        let removed = app.remove_library_entry(0);
+
+        assert!(removed.is_some());
+        assert!(app.current_image_source_dimensions.is_none());
+    }
+
+    #[test]
     fn crop_mode_status_and_actual_size_use_the_visible_full_image() {
         let path = PathBuf::from("frame.png");
         let mut app = detail_app_with_image(&path, 200, 100);
@@ -6137,23 +6380,29 @@ mod tests {
             &first,
             SourceFileFingerprint::from_path(&first).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
         cache.insert(
             &second,
             SourceFileFingerprint::from_path(&second).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
-        assert!(cache.get(&first).is_some());
+        assert!(cache.get(&first, BaseImageSource::Original).is_some());
 
         cache.insert(
             &third,
             SourceFileFingerprint::from_path(&third).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
 
-        assert!(cache.get(&first).is_some());
-        assert!(cache.get(&second).is_none());
-        assert!(cache.get(&third).is_some());
+        assert!(cache.get(&first, BaseImageSource::Original).is_some());
+        assert!(cache.get(&second, BaseImageSource::Original).is_none());
+        assert!(cache.get(&third, BaseImageSource::Original).is_some());
     }
 
     #[test]
@@ -6171,21 +6420,27 @@ mod tests {
             &first,
             SourceFileFingerprint::from_path(&first).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
         cache.insert(
             &second,
             SourceFileFingerprint::from_path(&second).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
         cache.insert(
             &third,
             SourceFileFingerprint::from_path(&third).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
 
-        assert!(cache.get(&first).is_none());
-        assert!(cache.get(&second).is_some());
-        assert!(cache.get(&third).is_some());
+        assert!(cache.get(&first, BaseImageSource::Original).is_none());
+        assert!(cache.get(&second, BaseImageSource::Original).is_some());
+        assert!(cache.get(&third, BaseImageSource::Original).is_some());
     }
 
     #[test]
@@ -6201,15 +6456,19 @@ mod tests {
             &first,
             SourceFileFingerprint::from_path(&first).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
         cache.insert(
             &second,
             SourceFileFingerprint::from_path(&second).unwrap(),
             test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
         );
 
-        assert!(cache.get(&first).is_some());
-        assert!(cache.get(&second).is_some());
+        assert!(cache.get(&first, BaseImageSource::Original).is_some());
+        assert!(cache.get(&second, BaseImageSource::Original).is_some());
     }
 
     #[test]
@@ -6223,9 +6482,15 @@ mod tests {
         std::fs::write(&path, b"new").unwrap();
 
         let mut cache = SessionFullImageCache::new(2, 64);
-        cache.insert(&path, old_fingerprint, test_image_with_bytes(2, 1, 8));
+        cache.insert(
+            &path,
+            old_fingerprint,
+            test_image_with_bytes(2, 1, 8),
+            BaseImageSource::Original,
+            (2, 1),
+        );
 
-        assert!(cache.get(&path).is_none());
+        assert!(cache.get(&path, BaseImageSource::Original).is_none());
     }
 
     #[test]
