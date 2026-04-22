@@ -553,6 +553,33 @@ fn loaded_image_logical_dimensions(
     }
 }
 
+/// Draws a thumbnail inside a fixed square slot using `ContentFit::Contain`.
+fn thumbnail_slot_with_renderer<'a, RendererT>(
+    handle: ImageHandle,
+    slot_size: f32,
+) -> Element<'a, Message, iced::Theme, RendererT>
+where
+    RendererT: iced::advanced::Renderer
+        + iced::advanced::image::Renderer<Handle = ImageHandle>
+        + 'a,
+{
+    container(
+        Image::new(handle)
+            .width(slot_size)
+            .height(slot_size)
+            .content_fit(iced::ContentFit::Contain),
+    )
+    .width(slot_size)
+    .height(slot_size)
+    .center_x(Length::Shrink)
+    .center_y(Length::Shrink)
+    .into()
+}
+
+fn thumbnail_slot(handle: ImageHandle, slot_size: f32) -> Element<'static, Message> {
+    thumbnail_slot_with_renderer::<iced::Renderer>(handle, slot_size)
+}
+
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
@@ -2703,16 +2730,7 @@ impl App {
         thumb_size: f32,
     ) -> Element<'static, Message> {
         let thumb: Element<'static, Message> = if let Some(handle) = handle {
-            container(
-                Image::new(handle.clone())
-                    .width(thumb_size)
-                    .height(thumb_size),
-            )
-            .width(thumb_size)
-            .height(thumb_size)
-            .center_x(Length::Shrink)
-            .center_y(Length::Shrink)
-            .into()
+            thumbnail_slot(handle.clone(), thumb_size)
         } else {
             container(text("...").size(24).color(TEXT_DIM))
                 .width(thumb_size)
@@ -3415,12 +3433,7 @@ impl App {
             .get(drag.photo_index)
             .map(|e| &e.thumbnail_handle)
         {
-            container(Image::new(handle.clone()).width(60).height(60))
-                .width(60)
-                .height(60)
-                .center_x(Length::Shrink)
-                .center_y(Length::Shrink)
-                .into()
+            thumbnail_slot(handle.clone(), 60.0)
         } else {
             text(label.clone()).size(11).color(TEXT_PRIMARY).into()
         };
@@ -4296,6 +4309,239 @@ mod tests {
             } => (*width, *height, pixels.to_vec()),
             _ => panic!("expected an RGBA image handle"),
         }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct BoundsParagraph;
+
+    impl iced::advanced::text::Paragraph for BoundsParagraph {
+        type Font = iced::Font;
+
+        fn with_text(_text: iced::advanced::text::Text<&str, Self::Font>) -> Self {
+            Self
+        }
+
+        fn with_spans<Link>(
+            _text: iced::advanced::text::Text<
+                &[iced::advanced::text::Span<'_, Link, Self::Font>],
+                Self::Font,
+            >,
+        ) -> Self {
+            Self
+        }
+
+        fn resize(&mut self, _new_bounds: iced::Size) {}
+
+        fn compare(
+            &self,
+            _text: iced::advanced::text::Text<(), Self::Font>,
+        ) -> iced::advanced::text::Difference {
+            iced::advanced::text::Difference::None
+        }
+
+        fn horizontal_alignment(&self) -> iced::alignment::Horizontal {
+            iced::alignment::Horizontal::Left
+        }
+
+        fn vertical_alignment(&self) -> iced::alignment::Vertical {
+            iced::alignment::Vertical::Top
+        }
+
+        fn min_bounds(&self) -> iced::Size {
+            iced::Size::ZERO
+        }
+
+        fn hit_test(&self, _point: iced::Point) -> Option<iced::advanced::text::Hit> {
+            None
+        }
+
+        fn hit_span(&self, _point: iced::Point) -> Option<usize> {
+            None
+        }
+
+        fn span_bounds(&self, _index: usize) -> Vec<iced::Rectangle> {
+            vec![]
+        }
+
+        fn grapheme_position(&self, _line: usize, _index: usize) -> Option<iced::Point> {
+            None
+        }
+    }
+
+    #[derive(Default)]
+    struct BoundsCapturingRenderer {
+        drawn_images: Vec<iced::Rectangle>,
+    }
+
+    impl iced::advanced::Renderer for BoundsCapturingRenderer {
+        fn start_layer(&mut self, _bounds: iced::Rectangle) {}
+
+        fn end_layer(&mut self) {}
+
+        fn start_transformation(&mut self, _transformation: iced::Transformation) {}
+
+        fn end_transformation(&mut self) {}
+
+        fn fill_quad(
+            &mut self,
+            _quad: iced::advanced::renderer::Quad,
+            _background: impl Into<iced::Background>,
+        ) {
+        }
+
+        fn clear(&mut self) {}
+    }
+
+    impl iced::advanced::text::Renderer for BoundsCapturingRenderer {
+        type Font = iced::Font;
+        type Paragraph = BoundsParagraph;
+        type Editor = ();
+
+        const ICON_FONT: Self::Font = iced::Font::DEFAULT;
+        const CHECKMARK_ICON: char = '0';
+        const ARROW_DOWN_ICON: char = '0';
+
+        fn default_font(&self) -> Self::Font {
+            iced::Font::DEFAULT
+        }
+
+        fn default_size(&self) -> iced::Pixels {
+            iced::Pixels(16.0)
+        }
+
+        fn fill_paragraph(
+            &mut self,
+            _paragraph: &Self::Paragraph,
+            _position: iced::Point,
+            _color: iced::Color,
+            _clip_bounds: iced::Rectangle,
+        ) {
+        }
+
+        fn fill_editor(
+            &mut self,
+            _editor: &Self::Editor,
+            _position: iced::Point,
+            _color: iced::Color,
+            _clip_bounds: iced::Rectangle,
+        ) {
+        }
+
+        fn fill_text(
+            &mut self,
+            _text: iced::advanced::text::Text<String, Self::Font>,
+            _position: iced::Point,
+            _color: iced::Color,
+            _clip_bounds: iced::Rectangle,
+        ) {
+        }
+    }
+
+    impl iced::advanced::image::Renderer for BoundsCapturingRenderer {
+        type Handle = ImageHandle;
+
+        fn measure_image(&self, handle: &Self::Handle) -> iced::Size<u32> {
+            match handle {
+                ImageHandle::Rgba { width, height, .. } => iced::Size::new(*width, *height),
+                ImageHandle::Path(..) | ImageHandle::Bytes(..) => {
+                    // The thumbnail slot only ever receives decoded RGBA handles in this app.
+                    panic!("thumbnail tests expect RGBA handles")
+                }
+            }
+        }
+
+        fn draw_image(
+            &mut self,
+            _image: iced::advanced::image::Image<Self::Handle>,
+            bounds: iced::Rectangle,
+        ) {
+            self.drawn_images.push(bounds);
+        }
+    }
+
+    fn capture_drawn_image_bounds(
+        element: Element<'static, Message, iced::Theme, BoundsCapturingRenderer>,
+        max_size: iced::Size,
+    ) -> Vec<iced::Rectangle> {
+        use iced::advanced::widget::Tree;
+        use iced::advanced::{layout, renderer, Widget};
+
+        let mut tree = Tree::new(element.as_widget());
+        let mut renderer = BoundsCapturingRenderer::default();
+        let limits = layout::Limits::new(iced::Size::ZERO, max_size);
+        let node = Widget::layout(element.as_widget(), &mut tree, &renderer, &limits);
+        let layout = layout::Layout::new(&node);
+        let viewport = node.bounds();
+
+        // `iced_widget::image::draw` forwards the final contained drawing
+        // rectangle to `Renderer::draw_image`, not the outer square slot.
+        Widget::draw(
+            element.as_widget(),
+            &tree,
+            &mut renderer,
+            &Theme::Dark,
+            &renderer::Style::default(),
+            layout,
+            mouse::Cursor::Unavailable,
+            &viewport,
+        );
+
+        renderer.drawn_images
+    }
+
+    #[test]
+    fn thumbnail_slot_draws_wide_images_without_stretching() {
+        let bounds = capture_drawn_image_bounds(
+            thumbnail_slot_with_renderer::<BoundsCapturingRenderer>(
+                ImageHandle::from_rgba(300, 150, opaque_black_pixels(300, 150)),
+                150.0,
+            ),
+            iced::Size::new(150.0, 150.0),
+        );
+
+        assert_eq!(bounds.len(), 1);
+        assert!((bounds[0].x - 0.0).abs() < 0.01);
+        assert!((bounds[0].width - 150.0).abs() < 0.01);
+        assert!((bounds[0].height - 75.0).abs() < 0.01);
+        assert!((bounds[0].y - 37.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn thumbnail_slot_draws_tall_images_without_stretching() {
+        let bounds = capture_drawn_image_bounds(
+            thumbnail_slot_with_renderer::<BoundsCapturingRenderer>(
+                ImageHandle::from_rgba(
+                120,
+                240,
+                opaque_black_pixels(120, 240),
+                ),
+                60.0,
+            ),
+            iced::Size::new(60.0, 60.0),
+        );
+
+        assert_eq!(bounds.len(), 1);
+        assert!((bounds[0].width - 30.0).abs() < 0.01);
+        assert!((bounds[0].height - 60.0).abs() < 0.01);
+        assert!((bounds[0].x - 15.0).abs() < 0.01);
+        assert!((bounds[0].y - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn thumbnail_slot_draws_square_images_at_full_slot_size() {
+        let bounds = capture_drawn_image_bounds(
+            thumbnail_slot_with_renderer::<BoundsCapturingRenderer>(
+                ImageHandle::from_rgba(240, 240, opaque_black_pixels(240, 240)),
+                150.0,
+            ),
+            iced::Size::new(150.0, 150.0),
+        );
+
+        assert_eq!(bounds.len(), 1);
+        assert!((bounds[0].x - 0.0).abs() < 0.01);
+        assert!((bounds[0].y - 0.0).abs() < 0.01);
+        assert!((bounds[0].width - 150.0).abs() < 0.01);
+        assert!((bounds[0].height - 150.0).abs() < 0.01);
     }
 
     fn persist_test_local_edit(
