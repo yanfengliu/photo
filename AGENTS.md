@@ -53,9 +53,10 @@
 - Codex:
   - `git diff [branch] | codex exec --model gpt-5.4 --model-reasoning-effort xhigh --sandbox read-only --ask-for-approval never --ephemeral <base_prompt>`
 - Gemini:
-  - `git diff [branch] | gemini -p <base_prompt> --model gemini-3-pro --thinking high`.
+  - `git diff [branch] | gemini -p <base_prompt> --model gemini-3.1-pro-preview --thinking high`.
 - Claude:
   - `git diff [branch] | claude -p --append-system-prompt <base_prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
+- If any of the commands doesn't work, look up its doc online and update with what works.
 
 ## Git
 
