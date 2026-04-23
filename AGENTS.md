@@ -1,6 +1,6 @@
 ## Core rules
 
-- Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus exclusively on gameplay experience and game mechanisms.
+- Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus exclusively on app experience and mechanisms.
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
 - Use a subagent to implement the plan such that the tests pass. For example, if the tech stack uses node, it should make sure `npx vitest run`, `npx tsc --noEmit`, and `npx vite build` pass.
@@ -9,6 +9,8 @@
   - Apply the change.
   - Capture an after screenshot.
   - Generate a pixel diff and use that as verification alongside the normal test/build gates.
+
+## Code review
 - Use all of Codex / Gemini / Claude as code reviewer subagents to independently review every change on the following aspects:
   1. Design.
     - Can easily scale, generalize, debug, be understood and reasoned about, and stay lean.
@@ -18,23 +20,23 @@
     - No: god class, large files, duplicated logic, inconsistent implementations, violation of boundaries.
     - Prefer composition over inheritance.
     - Clean up dead code.
+    - Do not change app mechanics or behavior unless explicitly asked.
   5. Documentation.
     - Dev logs should be updated and maintained.
     - References to code should be up to date.
     - No outdated comments.
     - Learnings from debugging and friction points should be documented in `docs/learning/lessons.md`. The file should be actively maintained to not become long, tedious, or outdated.
 - Reviews might take a long time depending on the amount of changes you made. Be patient and wait for the result.
-- After addressing review comments, ask the reviewer to verify that you have successfully done so. This is basically a second round of full review.
+- `base_prompt` for the code review agent: "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."
+- Optionally, use the @ symbol within `base_prompt` to include directory context for the best reasoning results.
 - Codex:
-  - `git diff [branch] | codex exec --model gpt-5.4 --model-reasoning-effort xhigh --sandbox read-only --ask-for-approval never --ephemeral "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."`
+  - `git diff [branch] | codex exec --model gpt-5.4 --model-reasoning-effort xhigh --sandbox read-only --ask-for-approval never --ephemeral <base_prompt>`
 - Gemini:
-  - `git diff [branch] | gemini -p "@src You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text." --model gemini-3-pro --thinking high` (Use the @ symbol within the prompt to include directory context for the best reasoning results).
+  - `git diff [branch] | gemini -p <base_prompt> --model gemini-3-pro --thinking high`.
 - Claude:
-  - `git diff [branch] | claude -p --append-system-prompt "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text." --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
-- Write down the reviewer feedback from previous round(s) and ask the reviewer to base their new review on this info.
-- The reviewers should check `docs/learning/lessons.md`.
-- Prefer small functions and files, reusable utilities, composition over inheritance, and dead-code cleanup.
-- Do not change game mechanics or behavior unless explicitly asked.
+  - `git diff [branch] | claude -p --append-system-prompt <base_prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
+- After addressing review comments, ask the reviewer to verify that you have successfully done so. This is basically another round of full review.
+- Write down the reviewer feedback from previous round(s) under `code_review/` as temp files. The reviewer should consider this info + `docs/learning/lessons.md` + your diff. After you summarize reviewer feedbacks into devlog, delete the temp files.
 
 ## Command and git rules
 
@@ -51,9 +53,9 @@
 
 - Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` at session start.
 - Key directories:
-  - `src`: game code.
+  - `src`: app code.
   - `docs`: architecture, devlogs, reviews.
-  - `design`: game and mechanism notes.
+  - `design`: app and mechanism notes.
 
 ## Architecture
 
