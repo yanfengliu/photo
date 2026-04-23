@@ -957,12 +957,7 @@ impl shader::Primitive for ImagePrimitive {
             }
 
             if blur_plan.generate_blur {
-                if let (
-                    Some(source_view),
-                    Some(blur_pipeline),
-                    Some(blur_bgl),
-                    Some(blur_ubuf),
-                ) = (
+                if let (Some(source_view), Some(blur_pipeline), Some(blur_bgl), Some(blur_ubuf)) = (
                     res.texture_view.as_ref(),
                     &res.blur_pipeline,
                     &res.blur_bind_group_layout,
