@@ -97,5 +97,5 @@
 
 ## Debugging
 
-- When debugging, use `docs/debugging/template.md` to record your process. Create a new file per debugging session and use it to iterate until you solve the problem.
+- When debugging, use `docs/debugging/template.md` to record your process. Create a new file per debugging session and use it to iterate until you solve the problem. If a future session makes you realize that your previous debug sessions on the same topic did not fully solve the problem, update past docs to avoid misunderstandings.
 - Clean up the temporary files (such as stack dump, test results) created during debugging after you are done.
