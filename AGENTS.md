@@ -4,6 +4,11 @@
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
 - Use a subagent to implement the plan such that the tests pass. For example, if the tech stack uses node, it should make sure `npx vitest run`, `npx tsc --noEmit`, and `npx vite build` pass.
+- When the change is visual:
+  - Capture a before screenshot.
+  - Apply the change.
+  - Capture an after screenshot.
+  - Generate a pixel diff and use that as verification alongside the normal test/build gates.
 - Use all of Codex / Gemini / Claude as code reviewer subagents to independently review every change on the following aspects:
   1. Design.
     - Can easily scale, generalize, debug, be understood and reasoned about, and stay lean.
