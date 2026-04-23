@@ -4,6 +4,7 @@
 /decoded-cache
 /local-edits/
 /local-edits.json
+/code_review/
 *.exe
 *.pdb
 *.dll
