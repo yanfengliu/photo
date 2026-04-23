@@ -3,6 +3,7 @@
 Keep this file short, current, and actionable.
 
 ## Active Lessons
+- 2026-04-22 - If a RAW pipeline exposes orientation metadata separately from its pixel buffers, apply that orientation consistently to embedded previews, full decode output, and reported source dimensions before treating width and height as the display contract; otherwise portrait RAW images can render or report squashed even when the square-slot UI containment is correct.
 - 2026-04-22 - If thumbnails live in fixed square slots, make `iced` image containment explicit at the widget layer and lock it down with draw-bounds tests on the real thumbnail surfaces; otherwise a layout tweak can quietly reintroduce stretched Library or drag-preview thumbnails.
 - 2026-04-22 - If the UI reports image dimensions, track the logical base-image dimensions separately from the decoded GPU/upload buffer and carry them back on the async load result; otherwise texture-limit downscales can make the UI lie, and a quick fix can accidentally move expensive source inspection onto the UI thread.
 - 2026-04-21 - If a persisted local cache stores both a full image and a thumbnail, tag them with the same generation and only trust a thumbnail that matches its full sibling; otherwise partial writes can make Library and Detail disagree after restart.

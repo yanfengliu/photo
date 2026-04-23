@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use image25::DynamicImage as RawDynamicImage;
-use rawler::decoders::{Decoder, RawDecodeParams};
+use rawler::decoders::{Decoder, Orientation, RawDecodeParams};
 use rawler::imgop::develop::RawDevelop;
 use rawler::rawsource::RawSource;
 
@@ -26,9 +26,10 @@ pub struct ImageData {
 const MAX_TEXTURE_DIM: u32 = 16384;
 const DECODE_CACHE_MAGIC: &[u8; 8] = b"PHOCACHE";
 const DECODE_CACHE_SCHEMA_VERSION: u32 = 3;
-// Older persisted RAW cache entries were observed at bogus oversized dimensions, so force a
-// one-time rebuild rather than trusting pre-fix cache content across sessions.
-const DECODE_CACHE_CONTRACT_VERSION: u64 = 4;
+// Older persisted RAW cache entries were observed at bogus oversized dimensions, and RAW
+// orientation is now applied during decode, so force a one-time rebuild rather than trusting
+// pre-fix cache content across sessions.
+const DECODE_CACHE_CONTRACT_VERSION: u64 = 5;
 const DECODE_CACHE_DIR_NAME: &str = "decoded-cache";
 const DECODE_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DECODE_CACHE_TRIM_TARGET_BYTES: u64 = 1_536 * 1024 * 1024;
@@ -124,8 +125,99 @@ impl EmbeddedImageKind {
     }
 }
 
-fn raw_dynamic_image_to_rgba(image: RawDynamicImage, max_dim: u32) -> (Vec<u8>, u32, u32) {
+fn apply_raw_orientation(image: RawDynamicImage, orientation: Orientation) -> RawDynamicImage {
+    match orientation {
+        Orientation::Normal | Orientation::Unknown => image,
+        Orientation::HorizontalFlip => image.fliph(),
+        Orientation::Rotate180 => image.rotate180(),
+        Orientation::VerticalFlip => image.flipv(),
+        Orientation::Transpose => image.rotate90().fliph(),
+        Orientation::Rotate90 => image.rotate90(),
+        Orientation::Transverse => image.rotate90().flipv(),
+        Orientation::Rotate270 => image.rotate270(),
+    }
+}
+
+fn oriented_dimensions(width: u32, height: u32, orientation: Orientation) -> (u32, u32) {
+    match orientation {
+        Orientation::Transpose
+        | Orientation::Rotate90
+        | Orientation::Transverse
+        | Orientation::Rotate270 => (height, width),
+        Orientation::Normal
+        | Orientation::HorizontalFlip
+        | Orientation::Rotate180
+        | Orientation::VerticalFlip
+        | Orientation::Unknown => (width, height),
+    }
+}
+
+fn raw_orientation_from_metadata(
+    decoder: &dyn Decoder,
+    rawfile: &RawSource,
+    params: &RawDecodeParams,
+) -> Option<Orientation> {
+    match decoder.raw_metadata(rawfile, params) {
+        Ok(metadata) => metadata
+            .exif
+            .orientation
+            .map(Orientation::from_u16)
+            .filter(|orientation| *orientation != Orientation::Unknown),
+        Err(error) => {
+            log::warn!("Failed to read RAW orientation metadata: {error}");
+            None
+        }
+    }
+}
+
+fn resolved_raw_orientation(
+    metadata_orientation: Option<Orientation>,
+    fallback_orientation: Orientation,
+) -> Orientation {
+    metadata_orientation
+        .or_else(|| (fallback_orientation != Orientation::Unknown).then_some(fallback_orientation))
+        .unwrap_or(Orientation::Unknown)
+}
+
+fn raw_orientation_from_image(
+    decoder: &dyn Decoder,
+    rawfile: &RawSource,
+    params: &RawDecodeParams,
+) -> Option<Orientation> {
+    decoder
+        .raw_image(rawfile, params, true)
+        .ok()
+        .and_then(|rawimage| {
+            (rawimage.orientation != Orientation::Unknown).then_some(rawimage.orientation)
+        })
+}
+
+fn embedded_raw_orientation(
+    decoder: &dyn Decoder,
+    rawfile: &RawSource,
+    params: &RawDecodeParams,
+    metadata_orientation: Option<Orientation>,
+) -> Orientation {
+    // Keep embedded previews on the fast EXIF path when metadata is available, but fall back to
+    // the RAW sensor orientation when EXIF orientation is missing or unreadable so the Library
+    // thumbnail, staged preview, and full decode stay aligned on the same file.
+    let fallback_orientation = metadata_orientation
+        .is_none()
+        .then(|| raw_orientation_from_image(decoder, rawfile, params))
+        .flatten()
+        .unwrap_or(Orientation::Unknown);
+    resolved_raw_orientation(metadata_orientation, fallback_orientation)
+}
+
+fn raw_dynamic_image_to_rgba(
+    image: RawDynamicImage,
+    max_dim: u32,
+    orientation: Orientation,
+) -> (Vec<u8>, u32, u32) {
+    // Bounding both axes before the orientation transform keeps the final image within
+    // `max_dim` even when a 90-degree rotation swaps width and height afterward.
     let image = image.thumbnail(max_dim, max_dim);
+    let image = apply_raw_orientation(image, orientation);
     let rgba = image.to_rgba8();
     let (w, h) = rgba.dimensions();
     (rgba.into_raw(), w, h)
@@ -148,6 +240,7 @@ fn decode_embedded_image_kind(
     params: &RawDecodeParams,
     max_dim: u32,
     kind: EmbeddedImageKind,
+    orientation: Orientation,
 ) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
     let result = match kind {
         EmbeddedImageKind::Thumbnail => decoder.thumbnail_image(rawfile, params),
@@ -156,7 +249,11 @@ fn decode_embedded_image_kind(
     };
 
     match result {
-        Ok(Some(image)) => Ok(Some(raw_dynamic_image_to_rgba(image, max_dim))),
+        Ok(Some(image)) => Ok(Some(raw_dynamic_image_to_rgba(
+            image,
+            max_dim,
+            orientation,
+        ))),
         Ok(None) => Ok(None),
         Err(e) => Err(format!("Failed to extract RAW {}: {e}", kind.label())),
     }
@@ -704,6 +801,7 @@ fn svg_source_dimensions(path: &Path) -> Result<(u32, u32), String> {
 
 fn raw_source_dimensions(path: &Path) -> Result<(u32, u32), String> {
     with_raw_decoder(path, |rawfile, decoder, params| {
+        let metadata_orientation = raw_orientation_from_metadata(decoder, rawfile, params);
         let rawimage = decoder
             .raw_image(rawfile, params, true)
             .map_err(|e| format!("Failed to read RAW dimensions: {e}"))?;
@@ -711,7 +809,11 @@ fn raw_source_dimensions(path: &Path) -> Result<(u32, u32), String> {
             .map_err(|_| format!("RAW width {} exceeded u32", rawimage.width))?;
         let height = u32::try_from(rawimage.height)
             .map_err(|_| format!("RAW height {} exceeded u32", rawimage.height))?;
-        Ok((width, height))
+        Ok(oriented_dimensions(
+            width,
+            height,
+            resolved_raw_orientation(metadata_orientation, rawimage.orientation),
+        ))
     })
 }
 
@@ -866,16 +968,27 @@ fn decode_raw(
 ) -> Result<(Vec<u8>, u32, u32), String> {
     with_raw_decoder(path, |rawfile, decoder, params| {
         let mut last_optional_error: Option<String> = None;
+        let metadata_orientation = raw_orientation_from_metadata(decoder, rawfile, params);
+        let embedded_orientation =
+            embedded_raw_orientation(decoder, rawfile, params, metadata_orientation);
 
-        let mut take_embedded_image =
-            |kind| match decode_embedded_image_kind(decoder, rawfile, params, max_dim, kind) {
+        let mut take_embedded_image = |kind| {
+            match decode_embedded_image_kind(
+                decoder,
+                rawfile,
+                params,
+                max_dim,
+                kind,
+                embedded_orientation,
+            ) {
                 Ok(Some(image)) => Some(image),
                 Ok(None) => None,
                 Err(e) => {
                     last_optional_error = Some(e);
                     None
                 }
-            };
+            }
+        };
 
         let format_error = |primary: String, optional: Option<String>| match optional {
             Some(optional) => format!("{primary} (after {optional})"),
@@ -886,13 +999,14 @@ fn decode_raw(
             let rawimage = decoder
                 .raw_image(rawfile, params, false)
                 .map_err(|e| format!("Failed to read RAW pixel data: {e}"))?;
+            let orientation = resolved_raw_orientation(metadata_orientation, rawimage.orientation);
             let image = RawDevelop::default()
                 .develop_intermediate(&rawimage)
                 .map_err(|e| format!("Failed to develop RAW pixel data: {e}"))?
                 .to_dynamic_image()
                 .ok_or_else(|| "Failed to convert RAW output to an image".to_string())?;
 
-            Ok(raw_dynamic_image_to_rgba(image, max_dim))
+            Ok(raw_dynamic_image_to_rgba(image, max_dim, orientation))
         };
 
         let embedded_kinds = if prefer_thumbnail {
@@ -940,13 +1054,23 @@ fn decode_raw_embedded_preview(
 ) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
     with_raw_decoder(path, |rawfile, decoder, params| {
         let mut last_error: Option<String> = None;
+        let metadata_orientation = raw_orientation_from_metadata(decoder, rawfile, params);
+        let orientation =
+            embedded_raw_orientation(decoder, rawfile, params, metadata_orientation);
 
         for kind in [
             EmbeddedImageKind::FullImage,
             EmbeddedImageKind::Preview,
             EmbeddedImageKind::Thumbnail,
         ] {
-            match decode_embedded_image_kind(decoder, rawfile, params, max_dim, kind) {
+            match decode_embedded_image_kind(
+                decoder,
+                rawfile,
+                params,
+                max_dim,
+                kind,
+                orientation,
+            ) {
                 Ok(Some(image)) => return Ok(Some(image)),
                 Ok(None) => {}
                 Err(e) => last_error = Some(e),
@@ -968,8 +1092,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use rawler::decoders::Orientation;
     use rawler::dng::writer::DngWriter;
     use rawler::dng::{DngCompression, DNG_VERSION_V1_4};
+    use rawler::tags::TiffCommonTag;
 
     fn create_test_png(dir: &Path, name: &str, w: u32, h: u32) -> PathBuf {
         let path = dir.join(name);
@@ -1006,6 +1132,59 @@ mod tests {
         dng.close().unwrap();
 
         path
+    }
+
+    fn create_test_raw_dng_with_orientation(
+        dir: &Path,
+        name: &str,
+        w: u32,
+        h: u32,
+        orientation: Orientation,
+    ) -> PathBuf {
+        let path = dir.join(name);
+        let pixels: Vec<u8> = (0..(w * h))
+            .flat_map(|index| {
+                let value = (index % 255) as u8;
+                [value, value.saturating_add(16), value.saturating_add(32)]
+            })
+            .collect();
+
+        let file = File::create(&path).unwrap();
+        let mut dng = DngWriter::new(file, DNG_VERSION_V1_4).unwrap();
+        {
+            let mut raw = dng.subframe_on_root(0);
+            raw.ifd_mut()
+                .add_tag(TiffCommonTag::Orientation, orientation.to_u16());
+            raw.rgb_image_u8(
+                &pixels,
+                w as usize,
+                h as usize,
+                DngCompression::Uncompressed,
+                1,
+            )
+            .unwrap();
+            raw.finalize().unwrap();
+        }
+        dng.close().unwrap();
+
+        path
+    }
+
+    fn raw_dynamic_image_from_pixels(w: u32, h: u32, pixels: &[[u8; 3]]) -> RawDynamicImage {
+        let pixels: Vec<u8> = pixels.iter().copied().flat_map(|rgb| rgb).collect();
+        RawDynamicImage::ImageRgb8(image25::RgbImage::from_raw(w, h, pixels).unwrap())
+    }
+
+    fn oriented_image_data(
+        image: &ImageData,
+        orientation: Orientation,
+    ) -> (Vec<u8>, u32, u32) {
+        let image = RawDynamicImage::ImageRgba8(
+            image25::RgbaImage::from_raw(image.width, image.height, image.pixels.clone()).unwrap(),
+        );
+        let image = apply_raw_orientation(image, orientation).to_rgba8();
+        let (width, height) = image.dimensions();
+        (image.into_raw(), width, height)
     }
 
     fn create_test_raw_dng_with_full_image(
@@ -1124,6 +1303,56 @@ mod tests {
             raw.finalize().unwrap();
         }
         dng.thumbnail(&thumbnail).unwrap();
+        dng.close().unwrap();
+
+        path
+    }
+
+    fn create_test_raw_dng_with_oriented_preview(
+        dir: &Path,
+        name: &str,
+        raw_w: u32,
+        raw_h: u32,
+        preview_w: u32,
+        preview_h: u32,
+        orientation: Orientation,
+        preview_pixels: &[[u8; 3]],
+    ) -> PathBuf {
+        let path = dir.join(name);
+        let raw_pixels: Vec<u8> = std::iter::repeat([16, 96, 32])
+            .take((raw_w * raw_h) as usize)
+            .flat_map(|rgb| rgb)
+            .collect();
+        let preview_pixels: Vec<u8> = preview_pixels
+            .iter()
+            .copied()
+            .flat_map(|rgb| rgb)
+            .collect();
+        let preview = RawDynamicImage::ImageRgb8(
+            image25::RgbImage::from_raw(preview_w, preview_h, preview_pixels).unwrap(),
+        );
+
+        let file = File::create(&path).unwrap();
+        let mut dng = DngWriter::new(file, DNG_VERSION_V1_4).unwrap();
+        {
+            let mut raw = dng.subframe_on_root(0);
+            raw.ifd_mut()
+                .add_tag(TiffCommonTag::Orientation, orientation.to_u16());
+            raw.rgb_image_u8(
+                &raw_pixels,
+                raw_w as usize,
+                raw_h as usize,
+                DngCompression::Uncompressed,
+                1,
+            )
+            .unwrap();
+            raw.finalize().unwrap();
+        }
+        {
+            let mut preview_frame = dng.subframe(1);
+            preview_frame.preview(&preview, 1.0).unwrap();
+            preview_frame.finalize().unwrap();
+        }
         dng.close().unwrap();
 
         path
@@ -1392,6 +1621,68 @@ mod tests {
     }
 
     #[test]
+    fn decode_raw_thumbnail_applies_orientation_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let normal_path = create_test_raw_dng_with_oriented_preview(
+            dir.path(),
+            "preview-normal.dng",
+            24,
+            12,
+            2,
+            1,
+            Orientation::Normal,
+            &[[255, 0, 0], [0, 255, 0]],
+        );
+        let path = create_test_raw_dng_with_oriented_preview(
+            dir.path(),
+            "preview-rotated.dng",
+            24,
+            12,
+            2,
+            1,
+            Orientation::Rotate90,
+            &[[255, 0, 0], [0, 255, 0]],
+        );
+
+        let normal = decode_thumbnail(&normal_path, 10).unwrap();
+        let result = decode_thumbnail(&path, 10).unwrap();
+        let expected = oriented_image_data(&normal, Orientation::Rotate90);
+        assert_eq!((result.width, result.height), (expected.1, expected.2));
+        assert_eq!(result.pixels, expected.0);
+    }
+
+    #[test]
+    fn decode_raw_thumbnail_applies_horizontal_flip_orientation_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let normal_path = create_test_raw_dng_with_oriented_preview(
+            dir.path(),
+            "preview-flip-normal.dng",
+            24,
+            12,
+            2,
+            1,
+            Orientation::Normal,
+            &[[255, 0, 0], [0, 255, 0]],
+        );
+        let path = create_test_raw_dng_with_oriented_preview(
+            dir.path(),
+            "preview-flip-horizontal.dng",
+            24,
+            12,
+            2,
+            1,
+            Orientation::HorizontalFlip,
+            &[[255, 0, 0], [0, 255, 0]],
+        );
+
+        let normal = decode_thumbnail(&normal_path, 10).unwrap();
+        let result = decode_thumbnail(&path, 10).unwrap();
+        let expected = oriented_image_data(&normal, Orientation::HorizontalFlip);
+        assert_eq!((result.width, result.height), (expected.1, expected.2));
+        assert_eq!(result.pixels, expected.0);
+    }
+
+    #[test]
     fn decode_raw_thumbnail_prefers_embedded_preview_when_available() {
         let dir = tempfile::tempdir().unwrap();
         let path = create_test_raw_dng_with_preview(
@@ -1429,6 +1720,31 @@ mod tests {
         assert!(result.width <= MAX_TEXTURE_DIM);
         assert!(result.height <= MAX_TEXTURE_DIM);
         assert_rgb_close(&result.pixels, [220, 40, 60], 12);
+    }
+
+    #[test]
+    fn decode_raw_image_applies_orientation_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let normal_path = create_test_raw_dng_with_orientation(
+            dir.path(),
+            "full-normal.dng",
+            24,
+            12,
+            Orientation::Normal,
+        );
+        let path = create_test_raw_dng_with_orientation(
+            dir.path(),
+            "full-rotated.dng",
+            24,
+            12,
+            Orientation::Rotate270,
+        );
+
+        let normal = decode_image(&normal_path).unwrap();
+        let result = decode_image(&path).unwrap();
+        let expected = oriented_image_data(&normal, Orientation::Rotate270);
+        assert_eq!((result.width, result.height), (expected.1, expected.2));
+        assert_eq!(result.pixels, expected.0);
     }
 
     #[test]
@@ -1509,6 +1825,128 @@ mod tests {
 
         assert_rgb_close(&preview.pixels, [200, 150, 100], 2);
         assert_rgb_close(&thumbnail.pixels, [90, 45, 180], 2);
+    }
+
+    #[test]
+    fn decode_embedded_preview_applies_orientation_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let normal_path = create_test_raw_dng_with_oriented_preview(
+            dir.path(),
+            "embedded-preview-normal.dng",
+            24,
+            12,
+            2,
+            1,
+            Orientation::Normal,
+            &[[255, 0, 0], [0, 255, 0]],
+        );
+        let path = create_test_raw_dng_with_oriented_preview(
+            dir.path(),
+            "embedded-preview-rotated.dng",
+            24,
+            12,
+            2,
+            1,
+            Orientation::Rotate90,
+            &[[255, 0, 0], [0, 255, 0]],
+        );
+
+        let normal = decode_embedded_preview(&normal_path).unwrap().unwrap();
+        let result = decode_embedded_preview(&path).unwrap().unwrap();
+        let expected = oriented_image_data(&normal, Orientation::Rotate90);
+        assert_eq!((result.width, result.height), (expected.1, expected.2));
+        assert_eq!(result.pixels, expected.0);
+    }
+
+    #[test]
+    fn raw_source_dimensions_apply_orientation_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng_with_orientation(
+            dir.path(),
+            "dims-rotated.dng",
+            24,
+            12,
+            Orientation::Rotate90,
+        );
+
+        assert_eq!(source_dimensions(&path).unwrap(), (12, 24));
+    }
+
+    #[test]
+    fn resolved_raw_orientation_prefers_metadata_over_fallback_orientation() {
+        assert_eq!(
+            resolved_raw_orientation(Some(Orientation::Rotate270), Orientation::Rotate90),
+            Orientation::Rotate270
+        );
+    }
+
+    #[test]
+    fn resolved_raw_orientation_falls_back_when_metadata_is_missing() {
+        assert_eq!(
+            resolved_raw_orientation(None, Orientation::Rotate90),
+            Orientation::Rotate90
+        );
+    }
+
+    #[test]
+    fn raw_dynamic_image_to_rgba_applies_rotate180_orientation_without_swapping_axes() {
+        let result = raw_dynamic_image_to_rgba(
+            raw_dynamic_image_from_pixels(2, 1, &[[255, 0, 0], [0, 255, 0]]),
+            2,
+            Orientation::Rotate180,
+        );
+
+        assert_eq!((result.1, result.2), (2, 1));
+        assert_rgb_close(&result.0[0..4], [0, 255, 0], 2);
+        assert_rgb_close(&result.0[4..8], [255, 0, 0], 2);
+    }
+
+    #[test]
+    fn raw_dynamic_image_to_rgba_applies_rotate90_orientation_and_swaps_axes() {
+        let result = raw_dynamic_image_to_rgba(
+            raw_dynamic_image_from_pixels(
+                2,
+                2,
+                &[
+                    [255, 0, 0],
+                    [0, 255, 0],
+                    [0, 0, 255],
+                    [255, 255, 0],
+                ],
+            ),
+            2,
+            Orientation::Rotate90,
+        );
+
+        assert_eq!((result.1, result.2), (2, 2));
+        assert_rgb_close(&result.0[0..4], [0, 0, 255], 2);
+        assert_rgb_close(&result.0[4..8], [255, 0, 0], 2);
+        assert_rgb_close(&result.0[8..12], [255, 255, 0], 2);
+        assert_rgb_close(&result.0[12..16], [0, 255, 0], 2);
+    }
+
+    #[test]
+    fn raw_dynamic_image_to_rgba_applies_transpose_orientation_and_swaps_axes() {
+        let result = raw_dynamic_image_to_rgba(
+            raw_dynamic_image_from_pixels(
+                2,
+                2,
+                &[
+                    [255, 0, 0],
+                    [0, 255, 0],
+                    [0, 0, 255],
+                    [255, 255, 0],
+                ],
+            ),
+            2,
+            Orientation::Transpose,
+        );
+
+        assert_eq!((result.1, result.2), (2, 2));
+        assert_rgb_close(&result.0[0..4], [255, 0, 0], 2);
+        assert_rgb_close(&result.0[4..8], [0, 0, 255], 2);
+        assert_rgb_close(&result.0[8..12], [0, 255, 0], 2);
+        assert_rgb_close(&result.0[12..16], [255, 255, 0], 2);
     }
 
     #[test]
