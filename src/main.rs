@@ -69,18 +69,37 @@ const FULL_IMAGE_SESSION_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
 const FULL_IMAGE_SESSION_CACHE_MIN_RECENT_ENTRIES: usize = 2;
 const LOCAL_EDIT_CACHE_DIR_NAME: &str = "local-edits";
 const LOCAL_EDIT_CACHE_MAGIC: &[u8; 8] = b"PHOEDITS";
-const LOCAL_EDIT_CACHE_SCHEMA_VERSION: u32 = 2;
+const LOCAL_EDIT_CACHE_SCHEMA_VERSION: u32 = 3;
+// Magic + schema + generation + source metadata + path/dimension metadata before the variable path/pixels.
+const LOCAL_EDIT_CACHE_SCHEMA_V2_FIXED_HEADER_BYTES: u64 = LOCAL_EDIT_CACHE_MAGIC.len() as u64
+    + (std::mem::size_of::<u64>() as u64 * 4)
+    + (std::mem::size_of::<u32>() as u64 * 5);
+const LOCAL_EDIT_CACHE_SCHEMA_V3_FIXED_HEADER_BYTES: u64 =
+    LOCAL_EDIT_CACHE_SCHEMA_V2_FIXED_HEADER_BYTES + (std::mem::size_of::<u32>() as u64 * 2);
 const LOCAL_EDIT_THUMBNAIL_MAX_DIM: u32 = 200;
 const SOURCE_FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
 const FILE_SHARE_READ: u32 = 0x00000001;
 static NEXT_LOCAL_EDIT_CACHE_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_LOCAL_EDIT_CACHE_GENERATION_NONCE: AtomicU64 = AtomicU64::new(0);
+// Serializes paired full/thumbnail cache mutations so readers never observe a mixed generation.
+static LOCAL_EDIT_CACHE_IO_GUARD: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 #[cfg(test)]
 static TEST_PHOTO_REPO_ROOT_OVERRIDE: std::sync::OnceLock<
     std::sync::Mutex<Option<Option<PathBuf>>>,
 > = std::sync::OnceLock::new();
 #[cfg(test)]
 static TEST_PHOTO_REPO_ROOT_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_HOOK: std::sync::OnceLock<
+    Mutex<Option<Box<dyn FnOnce() + Send>>>,
+> = std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_LOCAL_EDIT_THUMBNAIL_FAST_PATH_HOOK: std::sync::OnceLock<
+    Mutex<Option<Box<dyn FnOnce() + Send>>>,
+> = std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_WRITE_ERROR: std::sync::OnceLock<Mutex<Option<String>>> =
     std::sync::OnceLock::new();
 
 fn rotation_icon_label<'a, ThemeT, RendererT>(
@@ -275,6 +294,7 @@ struct LocalEditPersistRequest {
     request_id: u64,
     path: PathBuf,
     image: Arc<ImageData>,
+    logical_dimensions: (u32, u32),
     state: edit::EditState,
     vig: [f32; 3],
     base_source: BaseImageSource,
@@ -375,7 +395,38 @@ struct LoadedFullImage {
 
 struct LoadedLocalEditCacheVariant {
     generation_id: u64,
+    logical_dimensions: (u32, u32),
     image: Arc<ImageData>,
+}
+
+struct LoadedLocalEditCacheVariantHeader {
+    generation_id: u64,
+    width: u32,
+    height: u32,
+}
+
+struct LoadedPersistedLocalEdit {
+    image: Arc<ImageData>,
+    logical_dimensions: (u32, u32),
+}
+
+struct ValidatedLocalEditCacheHeader {
+    generation_id: u64,
+    width: u32,
+    height: u32,
+    logical_dimensions: Option<(u32, u32)>,
+    source_file_size: u64,
+}
+
+enum LocalEditThumbnailRepairDecision {
+    Missing,
+    Return(Arc<ImageData>),
+    Derive { generation_id: u64 },
+}
+
+enum FinalizeLocalEditThumbnailRepair {
+    Return(Arc<ImageData>),
+    Retry,
 }
 
 struct SessionFullImageCache {
@@ -462,7 +513,11 @@ impl SessionFullImageCache {
         self.entries.contains_key(path)
     }
 
-    fn entry_matches_base_source(&self, path: &Path, expected_base_source: BaseImageSource) -> bool {
+    fn entry_matches_base_source(
+        &self,
+        path: &Path,
+        expected_base_source: BaseImageSource,
+    ) -> bool {
         self.entries
             .get(path)
             .is_some_and(|entry| entry.base_source == expected_base_source)
@@ -553,15 +608,24 @@ fn loaded_image_logical_dimensions(
     }
 }
 
+fn display_dimensions_for_edit_state(
+    base_dimensions: (u32, u32),
+    rotation: edit::QuarterTurns,
+    crop: Option<edit::CropRect>,
+) -> (u32, u32) {
+    let (display_w, display_h) =
+        edit::rotated_dimensions(base_dimensions.0, base_dimensions.1, rotation);
+    edit::cropped_dimensions(display_w, display_h, crop)
+}
+
 /// Draws a thumbnail inside a fixed square slot using `ContentFit::Contain`.
 fn thumbnail_slot_with_renderer<'a, RendererT>(
     handle: ImageHandle,
     slot_size: f32,
 ) -> Element<'a, Message, iced::Theme, RendererT>
 where
-    RendererT: iced::advanced::Renderer
-        + iced::advanced::image::Renderer<Handle = ImageHandle>
-        + 'a,
+    RendererT:
+        iced::advanced::Renderer + iced::advanced::image::Renderer<Handle = ImageHandle> + 'a,
 {
     container(
         Image::new(handle)
@@ -1105,6 +1169,12 @@ impl App {
                         self.library_index = Some(index);
                         self.tab = Tab::Detail;
                         let path = entry.path.clone();
+                        if self.try_reopen_current_library_image_without_reload(&path) {
+                            return Task::none();
+                        }
+                        if self.current_image_path.as_deref() == Some(path.as_path()) {
+                            self.reset_transient_detail_reopen_state();
+                        }
                         return self.start_load(path);
                     }
                 }
@@ -2098,6 +2168,9 @@ impl App {
             return None;
         }
         let vig = self.current_lens_vignetting(state.lens_correction);
+        let base_dimensions = self
+            .current_image_source_dimensions
+            .unwrap_or((image.width, image.height));
         let request_id = self
             .local_edit_persist_in_flight
             .as_ref()
@@ -2115,6 +2188,11 @@ impl App {
             request_id,
             path,
             image,
+            logical_dimensions: display_dimensions_for_edit_state(
+                base_dimensions,
+                state.rotation,
+                state.crop,
+            ),
             state,
             vig,
             base_source,
@@ -2285,34 +2363,9 @@ impl App {
         Task::perform(
             async move {
                 let result: Result<LoadedFullImage, String> =
-                    tokio::task::spawn_blocking(move || {
-                        let mut guard = open_cache_validation_handle(&path);
-                        let fingerprint = guard.as_mut().and_then(SourceFileFingerprint::from_file);
-                        let (image, base_source) = match preferred_source {
-                            BaseImageSource::PersistedLocalEdit => {
-                                match load_persisted_local_edit_image(&path) {
-                                    Ok(Some(image)) => (image, BaseImageSource::PersistedLocalEdit),
-                                    Ok(None) | Err(_) => {
-                                        (decode::decode_image(&path)?, BaseImageSource::Original)
-                                    }
-                                }
-                            }
-                            BaseImageSource::Original => {
-                                (decode::decode_image(&path)?, BaseImageSource::Original)
-                            }
-                        };
-                        drop(guard);
-                        let logical_dimensions =
-                            loaded_image_logical_dimensions(&path, base_source, &image);
-                        Ok(LoadedFullImage {
-                            image,
-                            fingerprint,
-                            base_source,
-                            logical_dimensions,
-                        })
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    tokio::task::spawn_blocking(move || load_full_image(&path, preferred_source))
+                        .await
+                        .map_err(|e| e.to_string())?;
                 result
             },
             move |result| Message::ImageLoaded { request_id, result },
@@ -2385,7 +2438,35 @@ impl App {
         self.image.clone()
     }
 
+    fn try_reopen_current_library_image_without_reload(&mut self, path: &Path) -> bool {
+        let preferred_source = self.preferred_base_image_source(path);
+        if self
+            .displayed_full_image_for_path(path, preferred_source)
+            .is_none()
+        {
+            return false;
+        }
+
+        self.clear_library_drag_state();
+        self.reset_transient_detail_reopen_state();
+        true
+    }
+
+    fn clear_library_drag_state(&mut self) {
+        self.drag_state = None;
+        self.sidebar_hover_collection = None;
+    }
+
+    fn reset_transient_detail_reopen_state(&mut self) {
+        self.error = None;
+        self.save_status = None;
+        self.zoom = 1.0;
+        self.offset = [0.0, 0.0];
+        self.crop_mode = false;
+    }
+
     fn start_load(&mut self, path: PathBuf) -> Task<Message> {
+        self.clear_library_drag_state();
         let preferred_source = self.preferred_base_image_source(&path);
         let displayed_full_image = self.displayed_full_image_for_path(&path, preferred_source);
         let displayed_logical_dimensions = displayed_full_image
@@ -2992,12 +3073,14 @@ impl App {
     }
 
     fn current_display_dimensions(&self, img: &decode::ImageData) -> (u32, u32) {
-        let (base_width, base_height) = self
+        let base_dimensions = self
             .current_image_source_dimensions
             .unwrap_or((img.width, img.height));
-        let (display_w, display_h) =
-            edit::rotated_dimensions(base_width, base_height, self.current_rotation());
-        edit::cropped_dimensions(display_w, display_h, self.visible_crop())
+        display_dimensions_for_edit_state(
+            base_dimensions,
+            self.current_rotation(),
+            self.visible_crop(),
+        )
     }
 
     fn current_canvas_size(&self) -> [f32; 2] {
@@ -3739,6 +3822,7 @@ fn with_test_photo_repo_root<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_test_local_edit_thumbnail_hooks();
     let storage = TEST_PHOTO_REPO_ROOT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
     *storage
         .lock()
@@ -3747,6 +3831,7 @@ fn with_test_photo_repo_root<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
     *storage
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    clear_test_local_edit_thumbnail_hooks();
     result
 }
 
@@ -3808,11 +3893,119 @@ fn next_local_edit_cache_generation_id() -> u64 {
     u64::try_from(mixed.min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
 }
 
+fn local_edit_cache_io_lock() -> &'static Mutex<()> {
+    LOCAL_EDIT_CACHE_IO_GUARD.get_or_init(|| Mutex::new(()))
+}
+
+fn with_local_edit_cache_io_lock<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let _guard = local_edit_cache_io_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
+}
+
+#[cfg(test)]
+fn set_test_local_edit_thumbnail_repair_hook(hook: impl FnOnce() + Send + 'static) {
+    *TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(hook));
+}
+
+#[cfg(test)]
+fn set_test_local_edit_thumbnail_fast_path_hook(hook: impl FnOnce() + Send + 'static) {
+    *TEST_LOCAL_EDIT_THUMBNAIL_FAST_PATH_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(hook));
+}
+
+#[cfg(test)]
+fn run_test_local_edit_thumbnail_repair_hook() {
+    if let Some(hook) = TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn run_test_local_edit_thumbnail_fast_path_hook() {
+    if let Some(hook) = TEST_LOCAL_EDIT_THUMBNAIL_FAST_PATH_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn set_test_local_edit_thumbnail_repair_write_error(error: impl Into<String>) {
+    *TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_WRITE_ERROR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.into());
+}
+
+#[cfg(test)]
+fn clear_test_local_edit_thumbnail_hooks() {
+    *TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *TEST_LOCAL_EDIT_THUMBNAIL_FAST_PATH_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_WRITE_ERROR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+fn write_repaired_local_edit_thumbnail(
+    cache_dir: &Path,
+    path: &Path,
+    generation_id: u64,
+    image: &edit::RenderedImage,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(error) = TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_WRITE_ERROR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        return Err(error);
+    }
+
+    write_local_edit_cache_variant_with_generation_to(
+        cache_dir,
+        path,
+        LocalEditCacheVariant::Thumbnail,
+        generation_id,
+        image,
+    )
+}
+
 fn persisted_local_edit_exists(path: &Path, variant: LocalEditCacheVariant) -> bool {
     let Some(cache_dir) = local_edit_cache_dir() else {
         return false;
     };
     local_edit_cache_file_path(&cache_dir, path, variant).exists()
+}
+
+fn local_edit_cache_fixed_header_bytes(schema_version: u32) -> Result<u64, String> {
+    match schema_version {
+        2 => Ok(LOCAL_EDIT_CACHE_SCHEMA_V2_FIXED_HEADER_BYTES),
+        3 => Ok(LOCAL_EDIT_CACHE_SCHEMA_V3_FIXED_HEADER_BYTES),
+        _ => Err("Local edit cache schema mismatch".to_string()),
+    }
 }
 
 fn write_u32(writer: &mut impl Write, value: u32) -> Result<(), String> {
@@ -3854,7 +4047,14 @@ fn thumbnail_from_rendered_image(
     let source =
         image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.pixels.clone())
             .ok_or_else(|| "Failed to build thumbnail source image".to_string())?;
-    let thumb = image::imageops::thumbnail(&source, max_dim, max_dim);
+    let (thumb_width, thumb_height) =
+        thumbnail_dimensions_for_image(rendered.width, rendered.height, max_dim);
+    let thumb = image::imageops::resize(
+        &source,
+        thumb_width,
+        thumb_height,
+        image::imageops::FilterType::Triangle,
+    );
     let (width, height) = thumb.dimensions();
     Ok(edit::RenderedImage {
         pixels: thumb.into_raw(),
@@ -3882,6 +4082,53 @@ fn rendered_thumbnail_image_for_local_edit_request(
     }))
 }
 
+fn thumbnail_dimensions_for_image(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
+    if width == 0 || height == 0 || max_dim == 0 {
+        return (width.min(max_dim), height.min(max_dim));
+    }
+
+    if width <= max_dim && height <= max_dim {
+        return (width, height);
+    }
+
+    let max_side = u64::from(width.max(height));
+    let max_dim = u64::from(max_dim);
+    (
+        ((u64::from(width) * max_dim) / max_side)
+            .try_into()
+            .unwrap_or(u32::MAX)
+            .max(1),
+        ((u64::from(height) * max_dim) / max_side)
+            .try_into()
+            .unwrap_or(u32::MAX)
+            .max(1),
+    )
+}
+
+fn legacy_local_edit_logical_dimensions(
+    path: &Path,
+    variant: LocalEditCacheVariant,
+    actual_dimensions: (u32, u32),
+) -> (u32, u32) {
+    if !matches!(variant, LocalEditCacheVariant::Full) {
+        return actual_dimensions;
+    }
+
+    let Ok(source_dimensions) = decode::source_dimensions(path) else {
+        return actual_dimensions;
+    };
+
+    if actual_dimensions == (source_dimensions.1, source_dimensions.0) {
+        return actual_dimensions;
+    }
+
+    if actual_dimensions.0 > source_dimensions.0 || actual_dimensions.1 > source_dimensions.1 {
+        source_dimensions
+    } else {
+        actual_dimensions
+    }
+}
+
 #[cfg(test)]
 fn write_local_edit_cache_variant_to(
     cache_dir: &Path,
@@ -3904,6 +4151,24 @@ fn write_local_edit_cache_variant_with_generation_to(
     variant: LocalEditCacheVariant,
     generation_id: u64,
     image: &edit::RenderedImage,
+) -> Result<(), String> {
+    write_local_edit_cache_variant_with_generation_and_logical_dimensions_to(
+        cache_dir,
+        path,
+        variant,
+        generation_id,
+        image,
+        (image.width, image.height),
+    )
+}
+
+fn write_local_edit_cache_variant_with_generation_and_logical_dimensions_to(
+    cache_dir: &Path,
+    path: &Path,
+    variant: LocalEditCacheVariant,
+    generation_id: u64,
+    image: &edit::RenderedImage,
+    logical_dimensions: (u32, u32),
 ) -> Result<(), String> {
     let Some((file_size, modified_secs, modified_nanos)) = source_file_state(path) else {
         return Err("Failed to read source file metadata".to_string());
@@ -3936,6 +4201,8 @@ fn write_local_edit_cache_variant_with_generation_to(
         write_u32(&mut writer, path_len)?;
         write_u32(&mut writer, image.width)?;
         write_u32(&mut writer, image.height)?;
+        write_u32(&mut writer, logical_dimensions.0)?;
+        write_u32(&mut writer, logical_dimensions.1)?;
         write_u64(&mut writer, pixel_len)?;
         writer
             .write_all(path_bytes)
@@ -3965,19 +4232,150 @@ fn remove_persisted_local_edit(path: &Path) -> Result<(), String> {
         return Ok(());
     };
 
-    for variant in [
-        LocalEditCacheVariant::Full,
-        LocalEditCacheVariant::Thumbnail,
-    ] {
-        let cache_path = local_edit_cache_file_path(&cache_dir, path, variant);
-        if let Err(error) = std::fs::remove_file(&cache_path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("Failed to remove local edit cache: {error}"));
+    with_local_edit_cache_io_lock(|| {
+        for variant in [
+            LocalEditCacheVariant::Full,
+            LocalEditCacheVariant::Thumbnail,
+        ] {
+            let cache_path = local_edit_cache_file_path(&cache_dir, path, variant);
+            if let Err(error) = std::fs::remove_file(&cache_path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("Failed to remove local edit cache: {error}"));
+                }
             }
         }
+
+        Ok(())
+    })
+}
+
+fn load_persisted_local_edit_variant_header(
+    path: &Path,
+    variant: LocalEditCacheVariant,
+) -> Result<Option<LoadedLocalEditCacheVariantHeader>, String> {
+    let Some(cache_dir) = local_edit_cache_dir() else {
+        return Ok(None);
+    };
+    let Some((file_size, modified_secs, modified_nanos)) = source_file_state(path) else {
+        return Ok(None);
+    };
+    let path_key = normalized_source_path_key(path);
+    let cache_path = local_edit_cache_file_path_for_path_key(&cache_dir, &path_key, variant);
+    if !cache_path.exists() {
+        return Ok(None);
     }
 
-    Ok(())
+    let read_result: Result<LoadedLocalEditCacheVariantHeader, String> = (|| {
+        let file =
+            File::open(&cache_path).map_err(|e| format!("Failed to open local edit cache: {e}"))?;
+        let cache_file_len = file
+            .metadata()
+            .map_err(|e| format!("Failed to stat local edit cache: {e}"))?
+            .len();
+        let mut reader = BufReader::new(file);
+        let header = read_validated_local_edit_cache_header(
+            &mut reader,
+            &path_key,
+            file_size,
+            modified_secs,
+            modified_nanos,
+            cache_file_len,
+        )?;
+        Ok(LoadedLocalEditCacheVariantHeader {
+            generation_id: header.generation_id,
+            width: header.width,
+            height: header.height,
+        })
+    })();
+
+    match read_result {
+        Ok(header) => Ok(Some(header)),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_validated_local_edit_cache_header(
+    reader: &mut BufReader<File>,
+    path_key: &str,
+    file_size: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+    cache_file_len: u64,
+) -> Result<ValidatedLocalEditCacheHeader, String> {
+    let mut magic = [0u8; LOCAL_EDIT_CACHE_MAGIC.len()];
+    reader
+        .read_exact(&mut magic)
+        .map_err(|e| format!("Failed to read local edit cache: {e}"))?;
+    if &magic != LOCAL_EDIT_CACHE_MAGIC {
+        return Err("Local edit cache magic mismatch".to_string());
+    }
+
+    let schema_version = read_u32(reader)?;
+    let fixed_header_bytes = local_edit_cache_fixed_header_bytes(schema_version)?;
+
+    let generation_id = read_u64(reader)?;
+    let cached_file_size = read_u64(reader)?;
+    let cached_modified_secs = read_u64(reader)?;
+    let cached_modified_nanos = read_u32(reader)?;
+    let path_len = read_u32(reader)? as usize;
+    let width = read_u32(reader)?;
+    let height = read_u32(reader)?;
+    let logical_dimensions = if schema_version >= 3 {
+        let logical_width = read_u32(reader)?;
+        let logical_height = read_u32(reader)?;
+        if logical_width == 0 || logical_height == 0 {
+            return Err("Local edit cache logical dimensions were invalid".to_string());
+        }
+        Some((logical_width, logical_height))
+    } else {
+        None
+    };
+    let pixel_len = read_u64(reader)?;
+
+    if cached_file_size != file_size
+        || cached_modified_secs != modified_secs
+        || cached_modified_nanos != modified_nanos
+    {
+        return Err("Local edit cache source metadata mismatch".to_string());
+    }
+
+    let expected_pixel_len = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|count| count.checked_mul(4))
+        .ok_or_else(|| "Local edit cache dimensions overflowed".to_string())?;
+    if pixel_len != expected_pixel_len {
+        return Err("Local edit cache pixel length mismatch".to_string());
+    }
+
+    let path_len =
+        u64::try_from(path_len).map_err(|_| "Local edit cache path too long".to_string())?;
+    let expected_file_len = fixed_header_bytes
+        .checked_add(path_len)
+        .and_then(|len| len.checked_add(pixel_len))
+        .ok_or_else(|| "Local edit cache file length overflowed".to_string())?;
+    if cache_file_len != expected_file_len {
+        return Err("Local edit cache file length mismatch".to_string());
+    }
+
+    let mut cached_path = vec![
+        0u8;
+        usize::try_from(path_len)
+            .map_err(|_| "Local edit cache path too long".to_string())?
+    ];
+    reader
+        .read_exact(&mut cached_path)
+        .map_err(|e| format!("Failed to read local edit cache path: {e}"))?;
+    if cached_path != path_key.as_bytes() {
+        return Err("Local edit cache path key mismatch".to_string());
+    }
+
+    Ok(ValidatedLocalEditCacheHeader {
+        generation_id,
+        width,
+        height,
+        logical_dimensions,
+        source_file_size: file_size,
+    })
 }
 
 fn load_persisted_local_edit_variant(
@@ -3995,122 +4393,479 @@ fn load_persisted_local_edit_variant(
     if !cache_path.exists() {
         return Ok(None);
     }
-
     let read_result: Result<LoadedLocalEditCacheVariant, String> = (|| {
         let file =
             File::open(&cache_path).map_err(|e| format!("Failed to open local edit cache: {e}"))?;
+        let cache_file_len = file
+            .metadata()
+            .map_err(|e| format!("Failed to stat local edit cache: {e}"))?
+            .len();
         let mut reader = BufReader::new(file);
+        let header = read_validated_local_edit_cache_header(
+            &mut reader,
+            &path_key,
+            file_size,
+            modified_secs,
+            modified_nanos,
+            cache_file_len,
+        )?;
 
-        let mut magic = [0u8; LOCAL_EDIT_CACHE_MAGIC.len()];
-        reader
-            .read_exact(&mut magic)
-            .map_err(|e| format!("Failed to read local edit cache: {e}"))?;
-        if &magic != LOCAL_EDIT_CACHE_MAGIC {
-            return Err("Local edit cache magic mismatch".to_string());
-        }
-
-        if read_u32(&mut reader)? != LOCAL_EDIT_CACHE_SCHEMA_VERSION {
-            return Err("Local edit cache schema mismatch".to_string());
-        }
-
-        let generation_id = read_u64(&mut reader)?;
-        let cached_file_size = read_u64(&mut reader)?;
-        let cached_modified_secs = read_u64(&mut reader)?;
-        let cached_modified_nanos = read_u32(&mut reader)?;
-        let path_len = read_u32(&mut reader)? as usize;
-        let width = read_u32(&mut reader)?;
-        let height = read_u32(&mut reader)?;
-        let pixel_len = read_u64(&mut reader)?;
-
-        if cached_file_size != file_size
-            || cached_modified_secs != modified_secs
-            || cached_modified_nanos != modified_nanos
-        {
-            return Err("Local edit cache source metadata mismatch".to_string());
-        }
-
-        let mut cached_path = vec![0u8; path_len];
-        reader
-            .read_exact(&mut cached_path)
-            .map_err(|e| format!("Failed to read local edit cache path: {e}"))?;
-        if cached_path != path_key.as_bytes() {
-            return Err("Local edit cache path key mismatch".to_string());
-        }
-
-        let expected_len = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|count| count.checked_mul(4))
-            .ok_or_else(|| "Local edit cache dimensions overflowed".to_string())?;
-        if pixel_len != expected_len {
-            return Err("Local edit cache pixel length mismatch".to_string());
-        }
-
-        let pixel_len = usize::try_from(pixel_len)
-            .map_err(|_| "Local edit cache pixel length exceeded usize".to_string())?;
+        let pixel_len = usize::try_from(
+            u64::from(header.width)
+                .checked_mul(u64::from(header.height))
+                .and_then(|count| count.checked_mul(4))
+                .ok_or_else(|| "Local edit cache dimensions overflowed".to_string())?,
+        )
+        .map_err(|_| "Local edit cache pixel length exceeded usize".to_string())?;
         let mut pixels = vec![0u8; pixel_len];
         reader
             .read_exact(&mut pixels)
             .map_err(|e| format!("Failed to read local edit cache pixels: {e}"))?;
 
         Ok(LoadedLocalEditCacheVariant {
-            generation_id,
+            generation_id: header.generation_id,
+            logical_dimensions: header.logical_dimensions.unwrap_or_else(|| {
+                legacy_local_edit_logical_dimensions(path, variant, (header.width, header.height))
+            }),
             image: Arc::new(ImageData {
                 pixels,
-                width,
-                height,
-                file_size,
+                width: header.width,
+                height: header.height,
+                file_size: header.source_file_size,
             }),
         })
     })();
 
     match read_result {
         Ok(image) => Ok(Some(image)),
-        Err(error) => {
-            let _ = std::fs::remove_file(&cache_path);
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
+#[cfg(test)]
 fn load_persisted_local_edit_image(path: &Path) -> Result<Option<Arc<ImageData>>, String> {
+    Ok(load_persisted_local_edit(path)?.map(|entry| entry.image))
+}
+
+fn load_persisted_local_edit(path: &Path) -> Result<Option<LoadedPersistedLocalEdit>, String> {
     Ok(
-        load_persisted_local_edit_variant(path, LocalEditCacheVariant::Full)?
-            .map(|entry| entry.image),
+        load_persisted_local_edit_variant(path, LocalEditCacheVariant::Full)?.map(|entry| {
+            LoadedPersistedLocalEdit {
+                image: entry.image,
+                logical_dimensions: entry.logical_dimensions,
+            }
+        }),
     )
 }
 
-fn load_library_thumbnail_base_image(path: &Path, max_dim: u32) -> Result<Arc<ImageData>, String> {
-    let full_entry = match load_persisted_local_edit_variant(path, LocalEditCacheVariant::Full) {
-        Ok(Some(image)) => Some(image),
-        Ok(None) | Err(_) => None,
-    };
+fn persisted_thumbnail_matches_generation_and_dimensions(
+    thumbnail_entry: &LoadedLocalEditCacheVariant,
+    generation_id: u64,
+    expected_dimensions: (u32, u32),
+) -> bool {
+    thumbnail_entry.generation_id == generation_id
+        && thumbnail_entry.image.width == expected_dimensions.0
+        && thumbnail_entry.image.height == expected_dimensions.1
+}
 
-    if let Some(full_entry) = full_entry {
-        if let Ok(Some(thumbnail_entry)) =
-            load_persisted_local_edit_variant(path, LocalEditCacheVariant::Thumbnail)
-        {
-            if thumbnail_entry.generation_id == full_entry.generation_id {
-                return Ok(thumbnail_entry.image);
+fn load_repaired_local_edit_thumbnail(
+    path: &Path,
+    max_dim: u32,
+) -> Result<Option<Arc<ImageData>>, String> {
+    for _attempt in 0..8 {
+        let repair_decision = with_local_edit_cache_io_lock(|| {
+            #[cfg(test)]
+            run_test_local_edit_thumbnail_repair_hook();
+
+            let full_header = match load_persisted_local_edit_variant_header(
+                path,
+                LocalEditCacheVariant::Full,
+            ) {
+                Ok(Some(header)) => Some(header),
+                Ok(None) => None,
+                Err(error) => {
+                    log::debug!(
+                            "Ignoring persisted local edit full cache while repairing thumbnail for {}: {}",
+                            path.display(),
+                            error
+                        );
+                    None
+                }
+            };
+            let Some(full_header) = full_header else {
+                return Ok(LocalEditThumbnailRepairDecision::Missing);
+            };
+
+            let expected_dimensions =
+                thumbnail_dimensions_for_image(full_header.width, full_header.height, max_dim);
+            let thumbnail_header = match load_persisted_local_edit_variant_header(
+                path,
+                LocalEditCacheVariant::Thumbnail,
+            ) {
+                Ok(Some(header)) => Some(header),
+                Ok(None) => None,
+                Err(error) => {
+                    log::debug!(
+                        "Ignoring persisted local edit thumbnail cache while repairing {}: {}",
+                        path.display(),
+                        error
+                    );
+                    None
+                }
+            };
+            if let Some(thumbnail_header) = thumbnail_header {
+                if thumbnail_header.generation_id == full_header.generation_id
+                    && thumbnail_header.width == expected_dimensions.0
+                    && thumbnail_header.height == expected_dimensions.1
+                {
+                    let thumbnail_entry = match load_persisted_local_edit_variant(
+                        path,
+                        LocalEditCacheVariant::Thumbnail,
+                    ) {
+                        Ok(Some(image)) => Some(image),
+                        Ok(None) => None,
+                        Err(error) => {
+                            log::debug!(
+                                    "Ignoring persisted local edit thumbnail cache while repairing {}: {}",
+                                    path.display(),
+                                    error
+                                );
+                            None
+                        }
+                    };
+                    if let Some(thumbnail_entry) = thumbnail_entry {
+                        if persisted_thumbnail_matches_generation_and_dimensions(
+                            &thumbnail_entry,
+                            full_header.generation_id,
+                            expected_dimensions,
+                        ) {
+                            return Ok(LocalEditThumbnailRepairDecision::Return(
+                                thumbnail_entry.image,
+                            ));
+                        }
+                    }
+                }
             }
+
+            Ok(LocalEditThumbnailRepairDecision::Derive {
+                generation_id: full_header.generation_id,
+            })
+        })?;
+
+        let generation_id = match repair_decision {
+            LocalEditThumbnailRepairDecision::Missing => return Ok(None),
+            LocalEditThumbnailRepairDecision::Return(image) => return Ok(Some(image)),
+            LocalEditThumbnailRepairDecision::Derive { generation_id } => generation_id,
+        };
+
+        let full_entry = match load_persisted_local_edit_variant(path, LocalEditCacheVariant::Full)
+        {
+            Ok(Some(image)) => Some(image),
+            Ok(None) => None,
+            Err(error) => {
+                log::debug!(
+                    "Ignoring persisted local edit full cache while deriving repair for {}: {}",
+                    path.display(),
+                    error
+                );
+                None
+            }
+        };
+        let Some(full_entry) = full_entry else {
+            continue;
+        };
+        if full_entry.generation_id != generation_id {
+            continue;
         }
 
-        let thumb = thumbnail_from_rendered_image(
+        let full_image = full_entry.image;
+
+        let derived_thumb = thumbnail_from_rendered_image(
             &edit::RenderedImage {
-                pixels: full_entry.image.pixels.clone(),
-                width: full_entry.image.width,
-                height: full_entry.image.height,
+                pixels: full_image.pixels.clone(),
+                width: full_image.width,
+                height: full_image.height,
             },
             max_dim,
         )?;
-        return Ok(Arc::new(ImageData {
-            pixels: thumb.pixels,
-            width: thumb.width,
-            height: thumb.height,
-            file_size: full_entry.image.file_size,
-        }));
+        let repaired_thumb = Arc::new(ImageData {
+            pixels: derived_thumb.pixels.clone(),
+            width: derived_thumb.width,
+            height: derived_thumb.height,
+            file_size: full_image.file_size,
+        });
+
+        let finalize = with_local_edit_cache_io_lock(|| {
+            let full_header = match load_persisted_local_edit_variant_header(
+                path,
+                LocalEditCacheVariant::Full,
+            ) {
+                Ok(Some(header)) => Some(header),
+                Ok(None) => None,
+                Err(error) => {
+                    log::debug!(
+                        "Ignoring persisted local edit full cache header while finalizing repair for {}: {}",
+                        path.display(),
+                        error
+                    );
+                    None
+                }
+            };
+            let Some(full_header) = full_header else {
+                return Ok(FinalizeLocalEditThumbnailRepair::Retry);
+            };
+
+            let expected_dimensions =
+                thumbnail_dimensions_for_image(full_header.width, full_header.height, max_dim);
+            let thumbnail_entry = match load_persisted_local_edit_variant(
+                path,
+                LocalEditCacheVariant::Thumbnail,
+            ) {
+                Ok(Some(image)) => Some(image),
+                Ok(None) => None,
+                Err(error) => {
+                    log::debug!(
+                        "Ignoring persisted local edit thumbnail cache while finalizing repair for {}: {}",
+                        path.display(),
+                        error
+                    );
+                    None
+                }
+            };
+            if let Some(thumbnail_entry) = thumbnail_entry {
+                if persisted_thumbnail_matches_generation_and_dimensions(
+                    &thumbnail_entry,
+                    full_header.generation_id,
+                    expected_dimensions,
+                ) {
+                    return Ok(FinalizeLocalEditThumbnailRepair::Return(
+                        thumbnail_entry.image,
+                    ));
+                }
+            }
+
+            if full_header.generation_id != generation_id {
+                return Ok(FinalizeLocalEditThumbnailRepair::Retry);
+            }
+
+            if let Some(cache_dir) = local_edit_cache_dir() {
+                if let Err(error) = write_repaired_local_edit_thumbnail(
+                    &cache_dir,
+                    path,
+                    generation_id,
+                    &derived_thumb,
+                ) {
+                    log::warn!(
+                        "Failed to repair stale local edit thumbnail for {}: {}",
+                        path.display(),
+                        error
+                    );
+                }
+            }
+
+            Ok(FinalizeLocalEditThumbnailRepair::Return(
+                repaired_thumb.clone(),
+            ))
+        })?;
+
+        match finalize {
+            FinalizeLocalEditThumbnailRepair::Return(image) => return Ok(Some(image)),
+            FinalizeLocalEditThumbnailRepair::Retry => continue,
+        };
+    }
+
+    let full_header =
+        match load_persisted_local_edit_variant_header(path, LocalEditCacheVariant::Full) {
+            Ok(Some(header)) => Some(header),
+            Ok(None) => None,
+            Err(error) => {
+                log::debug!(
+                "Ignoring persisted local edit full cache header after repair retries for {}: {}",
+                path.display(),
+                error
+            );
+                None
+            }
+        };
+    if let Some(full_header) = full_header {
+        let expected_dimensions =
+            thumbnail_dimensions_for_image(full_header.width, full_header.height, max_dim);
+        let thumbnail_entry =
+            match load_persisted_local_edit_variant(path, LocalEditCacheVariant::Thumbnail) {
+                Ok(Some(image)) => Some(image),
+                Ok(None) => None,
+                Err(error) => {
+                    log::debug!(
+                    "Ignoring persisted local edit thumbnail cache after repair retries for {}: {}",
+                    path.display(),
+                    error
+                );
+                    None
+                }
+            };
+        if let Some(thumbnail_entry) = thumbnail_entry {
+            if persisted_thumbnail_matches_generation_and_dimensions(
+                &thumbnail_entry,
+                full_header.generation_id,
+                expected_dimensions,
+            ) {
+                return Ok(Some(thumbnail_entry.image));
+            }
+        }
+
+        let full_entry = match load_persisted_local_edit_variant(path, LocalEditCacheVariant::Full)
+        {
+            Ok(Some(image)) => Some(image),
+            Ok(None) => None,
+            Err(error) => {
+                log::debug!(
+                    "Ignoring persisted local edit full cache after repair retries for {}: {}",
+                    path.display(),
+                    error
+                );
+                None
+            }
+        };
+        if let Some(full_entry) = full_entry {
+            if full_entry.generation_id == full_header.generation_id {
+                let derived_thumb = thumbnail_from_rendered_image(
+                    &edit::RenderedImage {
+                        pixels: full_entry.image.pixels.clone(),
+                        width: full_entry.image.width,
+                        height: full_entry.image.height,
+                    },
+                    max_dim,
+                )?;
+                return Ok(Some(Arc::new(ImageData {
+                    pixels: derived_thumb.pixels,
+                    width: derived_thumb.width,
+                    height: derived_thumb.height,
+                    file_size: full_entry.image.file_size,
+                })));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn load_library_thumbnail_base_image(path: &Path, max_dim: u32) -> Result<Arc<ImageData>, String> {
+    let thumbnail_header =
+        match load_persisted_local_edit_variant_header(path, LocalEditCacheVariant::Thumbnail) {
+            Ok(Some(header)) => Some(header),
+            Ok(None) => None,
+            Err(error) => {
+                log::debug!(
+                    "Ignoring persisted local edit thumbnail cache header for {}: {}",
+                    path.display(),
+                    error
+                );
+                None
+            }
+        };
+    let full_header =
+        match load_persisted_local_edit_variant_header(path, LocalEditCacheVariant::Full) {
+            Ok(Some(header)) => Some(header),
+            Ok(None) => None,
+            Err(error) => {
+                log::debug!(
+                    "Ignoring persisted local edit full cache header for {}: {}",
+                    path.display(),
+                    error
+                );
+                None
+            }
+        };
+
+    if let (Some(thumbnail_header), Some(full_header)) = (&thumbnail_header, &full_header) {
+        let expected_dimensions =
+            thumbnail_dimensions_for_image(full_header.width, full_header.height, max_dim);
+        if thumbnail_header.generation_id == full_header.generation_id
+            && thumbnail_header.width == expected_dimensions.0
+            && thumbnail_header.height == expected_dimensions.1
+        {
+            #[cfg(test)]
+            run_test_local_edit_thumbnail_fast_path_hook();
+
+            let thumbnail_entry =
+                match load_persisted_local_edit_variant(path, LocalEditCacheVariant::Thumbnail) {
+                    Ok(Some(image)) => Some(image),
+                    Ok(None) => None,
+                    Err(error) => {
+                        log::debug!(
+                            "Ignoring persisted local edit thumbnail cache for {}: {}",
+                            path.display(),
+                            error
+                        );
+                        None
+                    }
+                };
+            if let Some(thumbnail_entry) = thumbnail_entry {
+                if persisted_thumbnail_matches_generation_and_dimensions(
+                    &thumbnail_entry,
+                    full_header.generation_id,
+                    expected_dimensions,
+                ) {
+                    return Ok(thumbnail_entry.image);
+                }
+            }
+        }
+    }
+
+    if full_header.is_some() {
+        if let Some(repaired_thumb) = load_repaired_local_edit_thumbnail(path, max_dim)? {
+            return Ok(repaired_thumb);
+        }
     }
 
     decode::decode_thumbnail(path, max_dim)
+}
+
+fn load_full_image(
+    path: &Path,
+    preferred_source: BaseImageSource,
+) -> Result<LoadedFullImage, String> {
+    let mut guard = open_cache_validation_handle(path);
+    let fingerprint = guard.as_mut().and_then(SourceFileFingerprint::from_file);
+    let (image, base_source, logical_dimensions) = match preferred_source {
+        BaseImageSource::PersistedLocalEdit => match load_persisted_local_edit(path) {
+            Ok(Some(loaded)) => (
+                loaded.image,
+                BaseImageSource::PersistedLocalEdit,
+                loaded.logical_dimensions,
+            ),
+            Ok(None) => {
+                let image = decode::decode_image(path)?;
+                let logical_dimensions =
+                    loaded_image_logical_dimensions(path, BaseImageSource::Original, &image);
+                (image, BaseImageSource::Original, logical_dimensions)
+            }
+            Err(error) => {
+                log::debug!(
+                    "Falling back to the original source for {} after persisted local edit load failed: {}",
+                    path.display(),
+                    error
+                );
+                let image = decode::decode_image(path)?;
+                let logical_dimensions =
+                    loaded_image_logical_dimensions(path, BaseImageSource::Original, &image);
+                (image, BaseImageSource::Original, logical_dimensions)
+            }
+        },
+        BaseImageSource::Original => {
+            let image = decode::decode_image(path)?;
+            let logical_dimensions =
+                loaded_image_logical_dimensions(path, BaseImageSource::Original, &image);
+            (image, BaseImageSource::Original, logical_dimensions)
+        }
+    };
+    drop(guard);
+    Ok(LoadedFullImage {
+        image,
+        fingerprint,
+        base_source,
+        logical_dimensions,
+    })
 }
 
 fn persist_local_edit(request: &LocalEditPersistRequest) -> Result<(), String> {
@@ -4130,22 +4885,25 @@ fn persist_local_edit(request: &LocalEditPersistRequest) -> Result<(), String> {
         request.vig,
     );
     let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)?;
-    let generation_id = next_local_edit_cache_generation_id();
-    write_local_edit_cache_variant_with_generation_to(
-        &cache_dir,
-        &request.path,
-        LocalEditCacheVariant::Full,
-        generation_id,
-        &full,
-    )?;
-    write_local_edit_cache_variant_with_generation_to(
-        &cache_dir,
-        &request.path,
-        LocalEditCacheVariant::Thumbnail,
-        generation_id,
-        &thumb,
-    )?;
-    Ok(())
+    with_local_edit_cache_io_lock(|| {
+        let generation_id = next_local_edit_cache_generation_id();
+        write_local_edit_cache_variant_with_generation_and_logical_dimensions_to(
+            &cache_dir,
+            &request.path,
+            LocalEditCacheVariant::Full,
+            generation_id,
+            &full,
+            request.logical_dimensions,
+        )?;
+        write_local_edit_cache_variant_with_generation_to(
+            &cache_dir,
+            &request.path,
+            LocalEditCacheVariant::Thumbnail,
+            generation_id,
+            &thumb,
+        )?;
+        Ok(())
+    })
 }
 
 fn save_library(library: &[LibraryEntry]) {
@@ -4197,6 +4955,21 @@ mod tests {
         let mut pixels = vec![0; pixel_count.saturating_mul(4)];
         for alpha in pixels.iter_mut().skip(3).step_by(4) {
             *alpha = 255;
+        }
+        pixels
+    }
+
+    fn patterned_rgba_pixels(width: u32, height: u32) -> Vec<u8> {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.extend_from_slice(&[
+                    ((x * 3 + y) % 256) as u8,
+                    ((y * 5 + x) % 256) as u8,
+                    ((x * 7 + y * 11) % 256) as u8,
+                    255,
+                ]);
+            }
         }
         pixels
     }
@@ -4253,8 +5026,8 @@ mod tests {
     }
 
     fn loaded_full_image(path: &Path, image: Arc<decode::ImageData>) -> LoadedFullImage {
-        let logical_dimensions = decode::source_dimensions(path)
-            .unwrap_or((image.width, image.height));
+        let logical_dimensions =
+            decode::source_dimensions(path).unwrap_or((image.width, image.height));
         LoadedFullImage {
             image,
             fingerprint: SourceFileFingerprint::from_path(path),
@@ -4510,11 +5283,7 @@ mod tests {
     fn thumbnail_slot_draws_tall_images_without_stretching() {
         let bounds = capture_drawn_image_bounds(
             thumbnail_slot_with_renderer::<BoundsCapturingRenderer>(
-                ImageHandle::from_rgba(
-                120,
-                240,
-                opaque_black_pixels(120, 240),
-                ),
+                ImageHandle::from_rgba(120, 240, opaque_black_pixels(120, 240)),
                 60.0,
             ),
             iced::Size::new(60.0, 60.0),
@@ -4550,15 +5319,59 @@ mod tests {
         state: edit::EditState,
         base_source: BaseImageSource,
     ) {
+        let base_dimensions =
+            decode::source_dimensions(path).unwrap_or((image.width, image.height));
         persist_local_edit(&LocalEditPersistRequest {
             request_id: 1,
             path: path.to_path_buf(),
             image,
+            logical_dimensions: display_dimensions_for_edit_state(
+                base_dimensions,
+                state.rotation,
+                state.crop,
+            ),
             state,
             vig: [0.0; 3],
             base_source,
         })
         .unwrap();
+    }
+
+    fn write_legacy_local_edit_cache_variant_with_generation_to(
+        cache_dir: &Path,
+        path: &Path,
+        variant: LocalEditCacheVariant,
+        generation_id: u64,
+        image: &edit::RenderedImage,
+    ) {
+        let (file_size, modified_secs, modified_nanos) =
+            source_file_state(path).expect("legacy cache source file metadata");
+        let path_key = normalized_source_path_key(path);
+        let final_path = local_edit_cache_file_path_for_path_key(cache_dir, &path_key, variant);
+        let temp_path = local_edit_cache_temp_file_path(&final_path);
+
+        std::fs::create_dir_all(cache_dir).unwrap();
+
+        let file = File::create(&temp_path).unwrap();
+        let mut writer = BufWriter::new(file);
+        let path_bytes = path_key.as_bytes();
+        let path_len = u32::try_from(path_bytes.len()).unwrap();
+        let pixel_len = u64::try_from(image.pixels.len()).unwrap();
+
+        writer.write_all(LOCAL_EDIT_CACHE_MAGIC).unwrap();
+        write_u32(&mut writer, 2).unwrap();
+        write_u64(&mut writer, generation_id).unwrap();
+        write_u64(&mut writer, file_size).unwrap();
+        write_u64(&mut writer, modified_secs).unwrap();
+        write_u32(&mut writer, modified_nanos).unwrap();
+        write_u32(&mut writer, path_len).unwrap();
+        write_u32(&mut writer, image.width).unwrap();
+        write_u32(&mut writer, image.height).unwrap();
+        write_u64(&mut writer, pixel_len).unwrap();
+        writer.write_all(path_bytes).unwrap();
+        writer.write_all(&image.pixels).unwrap();
+        writer.flush().unwrap();
+        std::fs::rename(temp_path, final_path).unwrap();
     }
 
     #[test]
@@ -4914,6 +5727,397 @@ mod tests {
             assert_eq!(thumbnail.height, rotated.height);
             assert_eq!(thumbnail.pixels, rotated.pixels);
         });
+    }
+
+    #[test]
+    fn library_thumbnail_ignores_a_generation_mismatch_even_when_dimensions_match() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
+
+        let expected_full = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(300, 200),
+            width: 300,
+            height: 200,
+        };
+        let stale_thumb = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(200, 133),
+            width: 200,
+            height: 133,
+        };
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            write_local_edit_cache_variant_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Thumbnail,
+                &stale_thumb,
+            )
+            .unwrap();
+            write_local_edit_cache_variant_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Full,
+                &expected_full,
+            )
+            .unwrap();
+
+            let thumbnail =
+                load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+            let expected =
+                thumbnail_from_rendered_image(&expected_full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+
+            assert_eq!(thumbnail.width, expected.width);
+            assert_eq!(thumbnail.height, expected.height);
+            assert_eq!(thumbnail.pixels, expected.pixels);
+        });
+    }
+
+    #[test]
+    fn library_thumbnail_ignores_a_same_generation_persisted_thumbnail_when_its_aspect_ratio_disagrees_with_the_full_copy(
+    ) {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
+        let wide_full_pixels = patterned_rgba_pixels(400, 200);
+        let wide_full = edit::RenderedImage {
+            pixels: wide_full_pixels,
+            width: 400,
+            height: 200,
+        };
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            let generation_id = next_local_edit_cache_generation_id();
+            let square_thumb = edit::RenderedImage {
+                pixels: opaque_black_pixels(2, 2),
+                width: 2,
+                height: 2,
+            };
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Full,
+                generation_id,
+                &wide_full,
+            )
+            .unwrap();
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Thumbnail,
+                generation_id,
+                &square_thumb,
+            )
+            .unwrap();
+            let loaded =
+                load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+            let repaired =
+                load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
+                    .unwrap()
+                    .expect("repaired persisted thumbnail");
+            let expected =
+                thumbnail_from_rendered_image(&wide_full, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+
+            assert_eq!(loaded.width, 200);
+            assert_eq!(loaded.height, 100);
+            assert_eq!(loaded.pixels, expected.pixels);
+            assert_eq!(repaired.image.width, 200);
+            assert_eq!(repaired.image.height, 100);
+            assert_eq!(repaired.image.pixels, expected.pixels);
+        });
+    }
+
+    #[test]
+    fn library_thumbnail_fast_path_rechecks_generation_before_returning() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
+        let stale_full = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(400, 200),
+            width: 400,
+            height: 200,
+        };
+        let fresh_full = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(300, 200),
+            width: 300,
+            height: 200,
+        };
+        let stale_thumb =
+            thumbnail_from_rendered_image(&stale_full, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+        let fresh_thumb =
+            thumbnail_from_rendered_image(&fresh_full, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            let stale_generation = next_local_edit_cache_generation_id();
+            let fresh_generation = next_local_edit_cache_generation_id();
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Full,
+                stale_generation,
+                &stale_full,
+            )
+            .unwrap();
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Thumbnail,
+                stale_generation,
+                &stale_thumb,
+            )
+            .unwrap();
+
+            let cache_dir_for_hook = cache_dir.clone();
+            let image_path_for_hook = image_path.clone();
+            let fresh_full_pixels = fresh_full.pixels.clone();
+            let fresh_thumb_pixels = fresh_thumb.pixels.clone();
+            let fresh_thumb_width = fresh_thumb.width;
+            let fresh_thumb_height = fresh_thumb.height;
+            set_test_local_edit_thumbnail_fast_path_hook(move || {
+                let fresh_full = edit::RenderedImage {
+                    pixels: fresh_full_pixels,
+                    width: 300,
+                    height: 200,
+                };
+                let fresh_thumb = edit::RenderedImage {
+                    pixels: fresh_thumb_pixels,
+                    width: fresh_thumb_width,
+                    height: fresh_thumb_height,
+                };
+                write_local_edit_cache_variant_with_generation_to(
+                    &cache_dir_for_hook,
+                    &image_path_for_hook,
+                    LocalEditCacheVariant::Full,
+                    fresh_generation,
+                    &fresh_full,
+                )
+                .unwrap();
+                write_local_edit_cache_variant_with_generation_to(
+                    &cache_dir_for_hook,
+                    &image_path_for_hook,
+                    LocalEditCacheVariant::Thumbnail,
+                    fresh_generation,
+                    &fresh_thumb,
+                )
+                .unwrap();
+            });
+
+            let loaded =
+                load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+            let persisted =
+                load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
+                    .unwrap()
+                    .expect("fresh persisted thumbnail");
+
+            assert_eq!(loaded.width, fresh_thumb.width);
+            assert_eq!(loaded.height, fresh_thumb.height);
+            assert_eq!(loaded.pixels, fresh_thumb.pixels);
+            assert_eq!(persisted.generation_id, fresh_generation);
+            assert_eq!(persisted.image.width, fresh_thumb.width);
+            assert_eq!(persisted.image.height, fresh_thumb.height);
+            assert_eq!(persisted.image.pixels, fresh_thumb.pixels);
+        });
+    }
+
+    #[test]
+    fn library_thumbnail_rechecks_local_edit_cache_inside_the_repair_lock() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
+        let stale_full = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(400, 200),
+            width: 400,
+            height: 200,
+        };
+        let fresh_full = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(300, 200),
+            width: 300,
+            height: 200,
+        };
+        let fresh_thumb =
+            thumbnail_from_rendered_image(&fresh_full, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            let stale_generation = next_local_edit_cache_generation_id();
+            let fresh_generation = next_local_edit_cache_generation_id();
+            let stale_thumb = edit::RenderedImage {
+                pixels: opaque_black_pixels(2, 2),
+                width: 2,
+                height: 2,
+            };
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Full,
+                stale_generation,
+                &stale_full,
+            )
+            .unwrap();
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Thumbnail,
+                stale_generation,
+                &stale_thumb,
+            )
+            .unwrap();
+
+            let cache_dir_for_hook = cache_dir.clone();
+            let image_path_for_hook = image_path.clone();
+            let fresh_full_pixels = fresh_full.pixels.clone();
+            let fresh_thumb_pixels = fresh_thumb.pixels.clone();
+            let fresh_thumb_width = fresh_thumb.width;
+            let fresh_thumb_height = fresh_thumb.height;
+            set_test_local_edit_thumbnail_repair_hook(move || {
+                let fresh_full = edit::RenderedImage {
+                    pixels: fresh_full_pixels,
+                    width: 300,
+                    height: 200,
+                };
+                let fresh_thumb = edit::RenderedImage {
+                    pixels: fresh_thumb_pixels,
+                    width: fresh_thumb_width,
+                    height: fresh_thumb_height,
+                };
+                write_local_edit_cache_variant_with_generation_to(
+                    &cache_dir_for_hook,
+                    &image_path_for_hook,
+                    LocalEditCacheVariant::Full,
+                    fresh_generation,
+                    &fresh_full,
+                )
+                .unwrap();
+                write_local_edit_cache_variant_with_generation_to(
+                    &cache_dir_for_hook,
+                    &image_path_for_hook,
+                    LocalEditCacheVariant::Thumbnail,
+                    fresh_generation,
+                    &fresh_thumb,
+                )
+                .unwrap();
+            });
+
+            let loaded =
+                load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+            let repaired =
+                load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
+                    .unwrap()
+                    .expect("fresh persisted thumbnail");
+
+            assert_eq!(loaded.width, fresh_thumb.width);
+            assert_eq!(loaded.height, fresh_thumb.height);
+            assert_eq!(loaded.pixels, fresh_thumb.pixels);
+            assert_eq!(repaired.generation_id, fresh_generation);
+            assert_eq!(repaired.image.width, fresh_thumb.width);
+            assert_eq!(repaired.image.height, fresh_thumb.height);
+            assert_eq!(repaired.image.pixels, fresh_thumb.pixels);
+        });
+    }
+
+    #[test]
+    fn library_thumbnail_still_loads_when_repair_write_fails() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+        write_test_png(&image_path, 2, 1, &pixels);
+        let wide_full = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(400, 200),
+            width: 400,
+            height: 200,
+        };
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            let generation_id = next_local_edit_cache_generation_id();
+            let square_thumb = edit::RenderedImage {
+                pixels: opaque_black_pixels(2, 2),
+                width: 2,
+                height: 2,
+            };
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Full,
+                generation_id,
+                &wide_full,
+            )
+            .unwrap();
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &image_path,
+                LocalEditCacheVariant::Thumbnail,
+                generation_id,
+                &square_thumb,
+            )
+            .unwrap();
+            set_test_local_edit_thumbnail_repair_write_error("simulated repair write failure");
+
+            let loaded =
+                load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                    .unwrap();
+            let persisted =
+                load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
+                    .unwrap()
+                    .expect("stale persisted thumbnail remains");
+            let expected =
+                thumbnail_from_rendered_image(&wide_full, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+
+            assert_eq!(loaded.width, expected.width);
+            assert_eq!(loaded.height, expected.height);
+            assert_eq!(loaded.pixels, expected.pixels);
+            assert_eq!(persisted.image.width, square_thumb.width);
+            assert_eq!(persisted.image.height, square_thumb.height);
+            assert_eq!(persisted.image.pixels, square_thumb.pixels);
+        });
+    }
+
+    #[test]
+    fn thumbnail_from_rendered_image_preserves_portrait_aspect_ratio_when_downscaling() {
+        let portrait = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(200, 400),
+            width: 200,
+            height: 400,
+        };
+
+        let thumbnail = thumbnail_from_rendered_image(&portrait, 200).unwrap();
+
+        assert_eq!(thumbnail.width, 100);
+        assert_eq!(thumbnail.height, 200);
+    }
+
+    #[test]
+    fn thumbnail_from_rendered_image_keeps_original_size_when_already_within_bounds() {
+        let image = edit::RenderedImage {
+            pixels: patterned_rgba_pixels(120, 80),
+            width: 120,
+            height: 80,
+        };
+
+        let thumbnail = thumbnail_from_rendered_image(&image, 200).unwrap();
+
+        assert_eq!(thumbnail.width, 120);
+        assert_eq!(thumbnail.height, 80);
+        assert_eq!(thumbnail.pixels, image.pixels);
+    }
+
+    #[test]
+    fn thumbnail_dimensions_for_image_handles_zero_safely() {
+        assert_eq!(thumbnail_dimensions_for_image(0, 0, 0), (0, 0));
+        assert_eq!(thumbnail_dimensions_for_image(0, 400, 200), (0, 200));
+        assert_eq!(thumbnail_dimensions_for_image(400, 0, 200), (200, 0));
     }
 
     #[test]
@@ -5820,6 +7024,161 @@ mod tests {
     }
 
     #[test]
+    fn persisted_local_edit_reopen_uses_persisted_logical_dimensions_in_status_text() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let path = repo_root.path().join("frame.png");
+        write_test_png(&path, 3, 2, &patterned_rgba_pixels(3, 2));
+
+        let mut state = edit::EditState::default();
+        state.exposure = 1.0;
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            persist_local_edit(&LocalEditPersistRequest {
+                request_id: 1,
+                path: path.clone(),
+                image: test_image(6, 4),
+                logical_dimensions: (3, 2),
+                state,
+                vig: [0.0; 3],
+                base_source: BaseImageSource::Original,
+            })
+            .unwrap();
+
+            let loaded = load_full_image(&path, BaseImageSource::PersistedLocalEdit).unwrap();
+            assert_eq!(loaded.base_source, BaseImageSource::PersistedLocalEdit);
+            assert_eq!(loaded.image.width, 6);
+            assert_eq!(loaded.image.height, 4);
+            assert_eq!(loaded.logical_dimensions, (3, 2));
+
+            let (mut app, _) = App::new();
+            app.tab = Tab::Detail;
+            app.current_image_path = Some(path.clone());
+            let request_id = app.detail_load.begin_request();
+
+            let _ = app.update(Message::ImageLoaded {
+                request_id,
+                result: Ok(loaded),
+            });
+
+            let status = app.status_bar_text();
+            assert!(status.contains("3\u{00d7}2"));
+            assert!(!status.contains("6\u{00d7}4"));
+        });
+    }
+
+    #[test]
+    fn legacy_persisted_local_edit_prefers_source_dimensions_when_baked_pixels_exceed_the_source() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let path = repo_root.path().join("frame.png");
+        write_test_png(&path, 6, 9, &patterned_rgba_pixels(6, 9));
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            write_legacy_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &path,
+                LocalEditCacheVariant::Full,
+                next_local_edit_cache_generation_id(),
+                &edit::RenderedImage {
+                    pixels: patterned_rgba_pixels(16, 10),
+                    width: 16,
+                    height: 10,
+                },
+            );
+
+            let loaded = load_full_image(&path, BaseImageSource::PersistedLocalEdit).unwrap();
+            assert_eq!(loaded.base_source, BaseImageSource::PersistedLocalEdit);
+            assert_eq!(loaded.logical_dimensions, (6, 9));
+            assert_eq!(loaded.image.width, 16);
+            assert_eq!(loaded.image.height, 10);
+        });
+    }
+
+    #[test]
+    fn legacy_persisted_local_edit_keeps_baked_dimensions_when_the_aspect_ratio_changed() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let path = repo_root.path().join("frame.png");
+        write_test_png(&path, 4, 4, &patterned_rgba_pixels(4, 4));
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            write_legacy_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &path,
+                LocalEditCacheVariant::Full,
+                next_local_edit_cache_generation_id(),
+                &edit::RenderedImage {
+                    pixels: patterned_rgba_pixels(2, 4),
+                    width: 2,
+                    height: 4,
+                },
+            );
+
+            let loaded = load_full_image(&path, BaseImageSource::PersistedLocalEdit).unwrap();
+            assert_eq!(loaded.base_source, BaseImageSource::PersistedLocalEdit);
+            assert_eq!(loaded.logical_dimensions, (2, 4));
+            assert_eq!(loaded.image.width, 2);
+            assert_eq!(loaded.image.height, 4);
+        });
+    }
+
+    #[test]
+    fn legacy_persisted_local_edit_keeps_baked_dimensions_when_a_crop_preserves_aspect_ratio() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let path = repo_root.path().join("frame.png");
+        write_test_png(&path, 6, 4, &patterned_rgba_pixels(6, 4));
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            write_legacy_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &path,
+                LocalEditCacheVariant::Full,
+                next_local_edit_cache_generation_id(),
+                &edit::RenderedImage {
+                    pixels: patterned_rgba_pixels(3, 2),
+                    width: 3,
+                    height: 2,
+                },
+            );
+
+            let loaded = load_full_image(&path, BaseImageSource::PersistedLocalEdit).unwrap();
+            assert_eq!(loaded.base_source, BaseImageSource::PersistedLocalEdit);
+            assert_eq!(loaded.logical_dimensions, (3, 2));
+            assert_eq!(loaded.image.width, 3);
+            assert_eq!(loaded.image.height, 2);
+        });
+    }
+
+    #[test]
+    fn legacy_persisted_local_edit_keeps_baked_dimensions_when_rotation_swapped_the_axes() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let path = repo_root.path().join("frame.png");
+        write_test_png(&path, 6, 9, &patterned_rgba_pixels(6, 9));
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+            write_legacy_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &path,
+                LocalEditCacheVariant::Full,
+                next_local_edit_cache_generation_id(),
+                &edit::RenderedImage {
+                    pixels: patterned_rgba_pixels(9, 6),
+                    width: 9,
+                    height: 6,
+                },
+            );
+
+            let loaded = load_full_image(&path, BaseImageSource::PersistedLocalEdit).unwrap();
+            assert_eq!(loaded.base_source, BaseImageSource::PersistedLocalEdit);
+            assert_eq!(loaded.logical_dimensions, (9, 6));
+            assert_eq!(loaded.image.width, 9);
+            assert_eq!(loaded.image.height, 6);
+        });
+    }
+
+    #[test]
     fn image_loaded_recovers_missing_source_dimensions_after_successful_original_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("frame.png");
@@ -6457,7 +7816,18 @@ mod tests {
         assert_eq!(app.zoom, 1.0);
         assert_eq!(app.offset, [0.0, 0.0]);
         assert!(!app.crop_mode);
-        assert!(app.current_save_request().is_some());
+        let request = app.current_save_request().expect("save request after reopen");
+        let saved = edit::save_edited_image(
+            &request.path,
+            &request.image.pixels,
+            request.image.width,
+            request.image.height,
+            &request.state,
+            request.vig,
+        )
+        .expect("save copy from reopened missing-source image");
+        assert!(saved.exists());
+        assert_eq!(saved.extension().and_then(|ext| ext.to_str()), Some("png"));
     }
 
     #[test]
@@ -6486,10 +7856,15 @@ mod tests {
 
         app.error = Some("stale error".to_string());
         app.save_status = Some("stale save".to_string());
-        app.current_exif = Some(lens::ExifInfo::default());
+        app.current_exif = Some(lens::ExifInfo {
+            lens_model: "Warm lens".to_string(),
+            ..lens::ExifInfo::default()
+        });
         app.zoom = 2.5;
         app.offset = [18.0, -9.0];
         app.crop_mode = true;
+        let request_id_before_reopen = app.detail_load.request_id;
+        let image_id_before_reopen = app.image_id;
 
         let _ = app.update(Message::SwitchTab(Tab::Library));
         std::fs::remove_file(&path).unwrap();
@@ -6501,17 +7876,124 @@ mod tests {
         assert_eq!(app.library_index, Some(0));
         assert!(!app.detail_load.is_loading());
         assert!(!app.detail_load.shows_embedded_preview());
+        assert!(app.drag_state.is_none());
+        assert_eq!(app.detail_load.request_id, request_id_before_reopen);
+        assert_eq!(app.image_id, image_id_before_reopen);
         assert_eq!(
             app.image.as_ref().map(|image| (image.width, image.height)),
             Some((6000, 3000))
         );
         assert!(app.error.is_none());
         assert!(app.save_status.is_none());
-        assert!(app.current_exif.is_none());
+        assert_eq!(
+            app.current_exif
+                .as_ref()
+                .map(|exif| exif.lens_model.as_str()),
+            Some("Warm lens")
+        );
         assert_eq!(app.zoom, 1.0);
         assert_eq!(app.offset, [0.0, 0.0]);
         assert!(!app.crop_mode);
-        assert!(app.current_save_request().is_some());
+        let request = app.current_save_request().expect("save request after reopen");
+        let saved = edit::save_edited_image(
+            &request.path,
+            &request.image.pixels,
+            request.image.width,
+            request.image.height,
+            &request.state,
+            request.vig,
+        )
+        .expect("save copy from reopened missing-source image");
+        assert!(saved.exists());
+        assert_eq!(saved.extension().and_then(|ext| ext.to_str()), Some("png"));
+    }
+
+    #[test]
+    fn opening_detail_from_library_clears_pending_drag_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.png");
+        write_test_png(&path, 3, 2, &patterned_rgba_pixels(3, 2));
+
+        let (mut app, _) = App::new();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
+        app.tab = Tab::Library;
+        app.replace_library_entries(vec![LibraryEntry {
+            path: path.clone(),
+            filename: "frame.png".to_string(),
+            thumbnail_image: None,
+            thumbnail_handle: None,
+        }]);
+        app.cursor_position = [120.0, 80.0];
+
+        let _ = app.update(Message::LibraryItemClicked(0));
+        assert!(app.drag_state.is_some());
+
+        let _ = app.update(Message::LibraryItemClicked(0));
+
+        assert_eq!(app.tab, Tab::Detail);
+        assert_eq!(app.library_index, Some(0));
+        assert!(app.drag_state.is_none());
+    }
+
+    #[test]
+    fn library_reopen_reloads_when_the_current_source_metadata_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.arw");
+        std::fs::write(&path, b"raw").unwrap();
+
+        let (mut app, _) = App::new();
+        app.collection_store = collection::CollectionStore::default();
+        app.active_collection = None;
+        app.context_menu = None;
+        app.tab = Tab::Detail;
+        app.replace_library_entries(vec![LibraryEntry {
+            path: path.clone(),
+            filename: "frame.arw".to_string(),
+            thumbnail_image: None,
+            thumbnail_handle: None,
+        }]);
+        app.current_image_path = Some(path.clone());
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id: app.detail_load.request_id,
+            result: Ok(loaded_full_image(&path, test_image(6000, 3000))),
+        });
+
+        app.error = Some("stale error".to_string());
+        app.save_status = Some("stale save".to_string());
+        app.current_exif = Some(lens::ExifInfo {
+            lens_model: "Warm lens".to_string(),
+            ..lens::ExifInfo::default()
+        });
+        app.zoom = 2.5;
+        app.offset = [18.0, -9.0];
+        app.crop_mode = true;
+        let request_id_before_reopen = app.detail_load.request_id;
+        let image_id_before_reopen = app.image_id;
+
+        let _ = app.update(Message::SwitchTab(Tab::Library));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"new").unwrap();
+
+        let _ = app.update(Message::LibraryItemClicked(0));
+        let _ = app.update(Message::LibraryItemClicked(0));
+
+        assert_eq!(app.tab, Tab::Detail);
+        assert_eq!(app.library_index, Some(0));
+        assert!(app.detail_load.is_loading());
+        assert!(!app.detail_load.shows_embedded_preview());
+        assert_eq!(app.detail_load.request_id, request_id_before_reopen + 1);
+        assert_eq!(app.image_id, image_id_before_reopen);
+        assert!(app.image.is_none());
+        assert!(app.error.is_none());
+        assert!(app.save_status.is_none());
+        assert!(app.current_exif.is_none());
+        assert!(app.current_save_request().is_none());
+        assert_eq!(app.zoom, 1.0);
+        assert_eq!(app.offset, [0.0, 0.0]);
+        assert!(!app.crop_mode);
     }
 
     #[test]
