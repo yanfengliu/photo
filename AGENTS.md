@@ -37,7 +37,7 @@
 
 ## Command and git rules
 
-- Always run the full test suite, not a subset.
+- Only run affected tests when you iterate. In the end run the full suite of tests to make sure you didn't accidentally break anything.
 - Do not use worktrees or branches; work directly on `main`.
 - Commit durable docs you add if you are not planning to remove them.
 - CRITICAL: Commit as soon as you have a coherent, self-contained unit of change.
