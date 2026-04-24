@@ -51,7 +51,7 @@
 - `base_prompt` for the code review agent: "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."
 - Optionally, use the @ symbol within `base_prompt` to include directory context for the best reasoning results.
 - Codex:
-  - `git diff [branch] | codex exec --model gpt-5.4 --model-reasoning-effort xhigh --sandbox read-only --ask-for-approval never --ephemeral <base_prompt>`
+  - `git diff [branch] | codex exec --model gpt-5.5 --model-reasoning-effort xhigh --sandbox read-only --ask-for-approval never --ephemeral <base_prompt>`
 - Gemini:
   - `git diff [branch] | gemini -p <base_prompt> --model gemini-3-pro --thinking high`.
 - Claude:
