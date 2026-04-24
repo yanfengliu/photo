@@ -266,6 +266,21 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
 /// Zone weights in perceptual (gamma 2.2) luminance space with overlapping
 /// smoothstep transitions (analogous to darktable's Gaussian-windowed bands).
 /// Whites/blacks are endpoint controls with wider zones than highlights/shadows.
+/// Band centers for the 4 tone-zone sliders in EV space. Ported from
+/// darktable's tone equalizer (`src/iop/toneequal.c`), which uses 9 bands
+/// evenly spaced from -8 EV to 0 EV; the 4-slider version collapses those
+/// into Zone System positions (Blacks ≈ Zone I, Shadows ≈ Zone IV,
+/// Highlights ≈ Zone VII, Whites ≈ Zone IX).
+const BLACKS_EV: f32 = -7.0;
+const SHADOWS_EV: f32 = -4.0;
+const HIGHLIGHTS_EV: f32 = -1.0;
+const WHITES_EV: f32 = 0.0;
+
+/// 2 × σ² for the Gaussian band weights. Darktable defaults σ = √2, so
+/// 2 × σ² = 4. The wide Gaussian is intentional — adjacent bands overlap
+/// so the tone curve stays smooth across the full EV range.
+const TONE_ZONE_SIGMA_SQ_2: f32 = 4.0;
+
 pub fn apply_tone_zones(
     px: [f32; 3],
     highlights: f32,
@@ -274,27 +289,25 @@ pub fn apply_tone_zones(
     blacks: f32,
 ) -> [f32; 3] {
     let l_lin = luminance(px);
-    if l_lin <= 0.0001 {
+    if l_lin <= 1e-6 {
         return px;
     }
-    let l_p = l_lin.powf(1.0 / 2.2);
+    // Darktable's tone equalizer formulation: work in log2 luminance (EV),
+    // sum Gaussian-weighted band contributions, clamp the total to ±2 EV
+    // (matching darktable's [0.25, 4.0] linear correction limit), then
+    // apply the correction as a uniform channel multiplier so hue and
+    // saturation are preserved.
+    let ev = l_lin.log2();
 
-    // Zones follow Lightroom-style photographer semantics in gamma-2.2
-    // perceptual space:
-    //   Blacks peak at near-black (L_p < 0.20)
-    //   Shadows bell peaks around L_p ~0.32 (dark midtones, linear ≈ 0.075)
-    //   Highlights bell peaks around L_p ~0.72 (bright midtones, linear ≈ 0.48)
-    //   Whites peak at near-white (L_p > 0.85)
+    let gauss = |center: f32| {
+        let d = ev - center;
+        (-(d * d) / TONE_ZONE_SIGMA_SQ_2).exp()
+    };
 
-    let sh_rise = smoothstep(0.10, 0.30, l_p);
-    let sh_fall = 1.0 - smoothstep(0.40, 0.55, l_p);
-    let w_sh = sh_rise * sh_fall;
-
-    let w_hi = smoothstep(0.50, 0.65, l_p) * (1.0 - smoothstep(0.80, 0.95, l_p));
-
-    let w_bk = 1.0 - smoothstep(0.0, 0.20, l_p);
-
-    let w_wh = smoothstep(0.85, 1.0, l_p);
+    let w_bk = gauss(BLACKS_EV);
+    let w_sh = gauss(SHADOWS_EV);
+    let w_hi = gauss(HIGHLIGHTS_EV);
+    let w_wh = gauss(WHITES_EV);
 
     let stops = (shadows * w_sh * 2.0
         + highlights * w_hi * 2.0
@@ -306,26 +319,33 @@ pub fn apply_tone_zones(
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
 }
 
+/// Middle gray in scene-referred linear RGB. Darktable's `basicadj.c`
+/// defaults to 18.42 % and uses this as the contrast pivot — it's the
+/// linear Y corresponding to L* 50 in CIELab (see the CIELab formula
+/// `L* = 116 (Y/Yn)^(1/3) - 16` evaluated at L* = 50).
+const DT_MIDDLE_GREY: f32 = 0.1842;
+const DT_INV_MIDDLE_GREY: f32 = 1.0 / DT_MIDDLE_GREY;
+
 pub fn apply_contrast(px: [f32; 3], amount: f32) -> [f32; 3] {
-    let lum = luminance(px);
-    if lum <= 0.0 {
+    // Darktable basicadj-style power-law contrast, applied per channel in
+    // scene-referred linear RGB:
+    //     output = (input / MIDDLE_GREY) ^ (1 + amount) * MIDDLE_GREY
+    // The pivot sits at true CIELab middle gray so positive contrast
+    // stretches shadows down and highlights up around L* 50. Values above
+    // the pivot amplify, values below compress — and the formula is
+    // exactly identity when amount = 0.
+    if amount == 0.0 {
         return px;
     }
-    // Apply the S-curve in gamma-2.2 perceptual space so the sigmoid pivot
-    // at 0.5 sits near L* 50 (middle gray at L_lin ≈ 0.22), which is where
-    // photographers expect a contrast pivot. A linear-space pivot at 0.5
-    // lives at L* ≈ 76 (in the highlights), so positive contrast darkens
-    // most of a typical image. HDR values are handled the same way as
-    // before via per-pixel peak normalization.
-    let k = 4.0 + amount.abs() * 8.0;
-    let peak = lum.max(1.0);
-    let lum_n = lum / peak;
-    let l_p = lum_n.powf(1.0 / 2.2);
-    let sig = 1.0 / (1.0 + (-k * (l_p - 0.5)).exp());
-    let l_p_new = (l_p + amount * (sig - l_p)).clamp(0.0, 1.0);
-    let lum_new = l_p_new.powf(2.2) * peak;
-    let ratio = lum_new / lum;
-    [px[0] * ratio, px[1] * ratio, px[2] * ratio]
+    let exponent = 1.0 + amount;
+    let power = |c: f32| {
+        if c <= 0.0 {
+            0.0
+        } else {
+            (c * DT_INV_MIDDLE_GREY).powf(exponent) * DT_MIDDLE_GREY
+        }
+    };
+    [power(px[0]), power(px[1]), power(px[2])]
 }
 
 pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
@@ -1255,58 +1275,68 @@ mod tests {
 
     #[test]
     fn tone_zones_shadows_affects_dark_not_bright() {
-        // "Shadows" territory is dark midtones (L_p ≈ 0.20..0.50, peak at
-        // ~0.32 which is linear ≈ 0.075). Push +1 there and verify the
-        // pixel brightens; a near-white pixel should not see any shadows
-        // effect.
+        // Shadows band is centered at -4 EV (L_lin ≈ 0.08). Dark midtones
+        // get the full +2 EV boost; near-white pixels are far enough down
+        // the Gaussian tail that the effect is small (but nonzero — this
+        // smooth overlap is the darktable tone-equalizer feel).
         let dark = [0.08, 0.08, 0.08];
         let out = apply_tone_zones(dark, 0.0, 1.0, 0.0, 0.0);
         assert!(
             out[0] > dark[0],
-            "shadows should brighten dark midtones"
+            "shadows should brighten dark midtones, got {}",
+            out[0]
         );
 
-        // Near-white pixel: outside the shadows bell.
         let bright = [0.9, 0.9, 0.9];
         let out2 = apply_tone_zones(bright, 0.0, 1.0, 0.0, 0.0);
+        // At ev≈-0.15, shadows band tail (σ=√2 around -4 EV) contributes
+        // ~0.025 weight → ~3.5 % response. Assert the pixel does not shift
+        // by more than a small fraction rather than by zero.
         assert!(
-            (out2[0] - bright[0]).abs() / bright[0] < 0.02,
-            "shadows should not affect near-white pixels"
+            (out2[0] - bright[0]).abs() / bright[0] < 0.05,
+            "shadows should only faintly touch near-white pixels, got Δ={:.1}%",
+            ((out2[0] - bright[0]).abs() / bright[0]) * 100.0
         );
     }
 
     #[test]
-    fn tone_zones_highlights_do_not_leak_into_lower_midtones() {
-        // Pre-fix the highlights bell rose from L_p 0.35, meaning lower
-        // midtones (linear ≈ 0.13) got a noticeable highlights boost and
-        // bled into territory photographers expect Shadows to control.
-        // With highlights shifted up to L_p 0.50..0.95, a lower-midtone
-        // pixel should see zero highlights effect.
-        let mid_dark_lin = 0.40_f32.powf(2.2); // L_p 0.40
-        let px = [mid_dark_lin, mid_dark_lin, mid_dark_lin];
-        let out = apply_tone_zones(px, 1.0, 0.0, 0.0, 0.0);
-        let delta = (out[0] - mid_dark_lin).abs() / mid_dark_lin;
+    fn tone_zones_highlights_peak_at_bright_midtones_not_shadows() {
+        // With darktable-style Gaussian bands, adjacent zones overlap on
+        // purpose so the tone curve stays smooth. What matters is that the
+        // peak response sits at the declared band center: Highlights is
+        // centered at -1 EV (L_lin ≈ 0.5), not in the shadows, so a
+        // mid-bright pixel at that EV should see a much larger response
+        // than a mid-dark pixel at -3 EV (L_lin ≈ 0.125).
+        let at_peak = [0.5, 0.5, 0.5];
+        let at_shadow = [0.125, 0.125, 0.125];
+        let out_peak = apply_tone_zones(at_peak, 1.0, 0.0, 0.0, 0.0);
+        let out_shadow = apply_tone_zones(at_shadow, 1.0, 0.0, 0.0, 0.0);
+        let peak_ratio = out_peak[0] / at_peak[0];
+        let shadow_ratio = out_shadow[0] / at_shadow[0];
         assert!(
-            delta < 0.01,
-            "highlights should not affect lower midtones, got Δ={:.2}%",
-            delta * 100.0
+            peak_ratio > shadow_ratio,
+            "highlights should respond more at its peak ({}) than at shadow EV ({})",
+            peak_ratio,
+            shadow_ratio
         );
     }
 
     #[test]
-    fn tone_zones_whites_do_not_leak_into_midtones() {
-        // Pre-fix whites started at L_p 0.60 (linear ≈ 0.32), so bright
-        // midtones took major whites boost. With whites narrowed to L_p
-        // 0.85..1.0, that same pixel should be exclusively highlights
-        // territory and see zero whites effect.
-        let mid_bright_lin = 0.65_f32.powf(2.2); // L_p 0.65
-        let px = [mid_bright_lin, mid_bright_lin, mid_bright_lin];
-        let out = apply_tone_zones(px, 0.0, 0.0, 1.0, 0.0);
-        let delta = (out[0] - mid_bright_lin).abs() / mid_bright_lin;
+    fn tone_zones_whites_peak_near_white_not_midtones() {
+        // Whites band centered at 0 EV — the top of the scene-referred
+        // linear range. A near-white pixel should see far more whites
+        // response than a bright-midtone pixel around -1 EV.
+        let at_peak = [1.0, 1.0, 1.0];
+        let at_highlight = [0.5, 0.5, 0.5];
+        let out_peak = apply_tone_zones(at_peak, 0.0, 0.0, 1.0, 0.0);
+        let out_highlight = apply_tone_zones(at_highlight, 0.0, 0.0, 1.0, 0.0);
+        let peak_ratio = out_peak[0] / at_peak[0];
+        let highlight_ratio = out_highlight[0] / at_highlight[0];
         assert!(
-            delta < 0.01,
-            "whites should not affect bright midtones, got Δ={:.2}%",
-            delta * 100.0
+            peak_ratio > highlight_ratio,
+            "whites should respond more at its peak ({}) than at highlight EV ({})",
+            peak_ratio,
+            highlight_ratio
         );
     }
 
@@ -1365,51 +1395,56 @@ mod tests {
 
     #[test]
     fn apply_contrast_preserves_middle_gray_at_full_strength() {
-        // A photographer's contrast slider should pivot around middle gray
-        // (L* 50, L_p 0.5, L_lin ≈ 0.218), not around linear 0.5 (which sits
-        // at L* ≈ 76 — already in the highlights). With the perceptual pivot,
-        // middle gray should stay near identity even at +0.5 contrast.
-        let middle_gray_lin = 0.5_f32.powf(2.2);
+        // Darktable basicadj power-law contrast pivots at the scene-referred
+        // middle gray used in CIELab (L* 50 → Y = 0.1842 at the D65 whitepoint).
+        // The pivot must stay fixed at that linear value under any non-zero
+        // contrast setting.
+        let middle_gray_lin = 0.1842_f32;
         let px = [middle_gray_lin, middle_gray_lin, middle_gray_lin];
         let out = apply_contrast(px, 0.5);
         let delta = (out[0] - middle_gray_lin).abs() / middle_gray_lin;
         assert!(
-            delta < 0.01,
-            "middle gray should sit at the contrast pivot, got Δ={:.2}%",
+            delta < 0.001,
+            "middle gray should sit exactly at the contrast pivot, got Δ={:.4}%",
             delta * 100.0
         );
     }
 
     #[test]
     fn contrast_positive_increases_contrast() {
-        // Positive contrast should darken shadows and brighten highlights
-        let shadow = [0.2, 0.2, 0.2];
+        // Positive contrast: shadows (below the 0.1842 pivot) should compress
+        // downward and highlights (above the pivot) should amplify upward.
+        let shadow = [0.1, 0.1, 0.1];
         let highlight = [0.8, 0.8, 0.8];
         let out_s = apply_contrast(shadow, 0.5);
         let out_h = apply_contrast(highlight, 0.5);
         assert!(
             out_s[0] < shadow[0],
-            "positive contrast should darken shadows"
+            "positive contrast should darken below-pivot pixels, got {}",
+            out_s[0]
         );
         assert!(
             out_h[0] > highlight[0],
-            "positive contrast should brighten highlights"
+            "positive contrast should brighten above-pivot pixels, got {}",
+            out_h[0]
         );
     }
 
     #[test]
     fn contrast_negative_reduces_contrast() {
-        let shadow = [0.2, 0.2, 0.2];
+        let shadow = [0.1, 0.1, 0.1];
         let highlight = [0.8, 0.8, 0.8];
         let out_s = apply_contrast(shadow, -0.5);
         let out_h = apply_contrast(highlight, -0.5);
         assert!(
             out_s[0] > shadow[0],
-            "negative contrast should brighten shadows"
+            "negative contrast should brighten below-pivot pixels, got {}",
+            out_s[0]
         );
         assert!(
             out_h[0] < highlight[0],
-            "negative contrast should darken highlights"
+            "negative contrast should darken above-pivot pixels, got {}",
+            out_h[0]
         );
     }
 
@@ -1618,35 +1653,34 @@ mod tests {
 
     #[test]
     fn contrast_works_for_hdr_luminance() {
-        // After +2EV exposure, pixel luminance can exceed 1.0.
-        // The S-curve normalizes into [0,1] per-pixel, so HDR values produce
-        // reasonable results instead of being wildly inverted.
+        // Darktable basicadj contrast operates in scene-referred linear RGB
+        // with no per-pixel peak normalization: HDR values above the pivot
+        // amplify further under positive contrast, which is the physically
+        // correct behavior for a scene-referred pipeline. Final clipping is
+        // the gamma/sRGB encode's job, not the contrast operator's.
         let hdr = [1.5, 1.5, 1.5];
-
-        // HDR values should stay close to input (S-curve compresses extremes slightly,
-        // which is correct — contrast compresses highlights at the extreme end).
         let out_pos = apply_contrast(hdr, 0.5);
         assert!(
-            (out_pos[0] - hdr[0]).abs() / hdr[0] < 0.05,
-            "HDR contrast compression should be small (<5%), got {:.4} vs {:.4}",
+            out_pos[0] > hdr[0],
+            "HDR pixel above the pivot should amplify under +contrast, got {} vs {}",
             out_pos[0],
             hdr[0]
         );
 
-        // Standard [0,1] range: contrast should still work correctly.
-        // Above midpoint brightens, below midpoint darkens.
+        // Sub-pivot pixels still compress and super-pivot sub-HDR pixels
+        // still amplify — the pivot at 0.1842 is the only fixed point.
         let highlight = [0.8, 0.8, 0.8];
         let out_h = apply_contrast(highlight, 0.5);
         assert!(
             out_h[0] > highlight[0],
-            "positive contrast should brighten highlights, got {}",
+            "+contrast should amplify above-pivot pixels, got {}",
             out_h[0]
         );
-        let shadow = [0.2, 0.2, 0.2];
+        let shadow = [0.1, 0.1, 0.1];
         let out_s = apply_contrast(shadow, 0.5);
         assert!(
             out_s[0] < shadow[0],
-            "positive contrast should darken shadows, got {}",
+            "+contrast should compress below-pivot pixels, got {}",
             out_s[0]
         );
     }

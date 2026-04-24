@@ -193,50 +193,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     px = max(temp_mat * px, vec3(0.0));
 
-    // Zone-based tone adjustments (stop-based, ±2 stops max per slider).
-    // Matches darktable tone equalizer's ±2 stop clamp (correction 0.25x-4.0x).
-    // Zones live in gamma-2.2 perceptual space with Lightroom-style centers:
-    //   Blacks   peaks at near-black (L_p < 0.20)
-    //   Shadows  bell peaks around L_p ~0.32 (dark midtones, L_lin ≈ 0.075)
-    //   Highlights bell peaks around L_p ~0.72 (bright midtones, L_lin ≈ 0.48)
-    //   Whites   peaks at near-white (L_p > 0.85)
+    // Darktable tone-equalizer-style zone correction. Bands sit at Zone
+    // System EV positions: Blacks -7, Shadows -4, Highlights -1, Whites 0.
+    // Each band is a Gaussian in log2 luminance (σ = √2, so 2σ² = 4) and
+    // the sum of contributions is clamped to ±2 EV — matching darktable's
+    // [0.25, 4.0] linear correction limit. Uniform channel multiplier at
+    // the end preserves hue and saturation.
     if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
         let L_lin = lum(px);
-        if L_lin > 0.0001 {
-            let L_p = pow(L_lin, 1.0 / 2.2);
-
-            let sh_rise = smooth_step(0.10, 0.30, L_p);
-            let sh_fall = 1.0 - smooth_step(0.40, 0.55, L_p);
-            let w_sh = sh_rise * sh_fall;
-
-            let w_hi = smooth_step(0.50, 0.65, L_p) * (1.0 - smooth_step(0.80, 0.95, L_p));
-
-            let w_bk = 1.0 - smooth_step(0.0, 0.20, L_p);
-
-            let w_wh = smooth_step(0.85, 1.0, L_p);
-
-            let stops = clamp(u.shadows * w_sh * 2.0
-                      + u.highlights * w_hi * 2.0
-                      + u.blacks * w_bk * 2.0
-                      + u.whites * w_wh * 2.0, -2.0, 2.0);
-
+        if L_lin > 1e-6 {
+            let ev = log2(L_lin);
+            let d_bk = ev - (-7.0);
+            let d_sh = ev - (-4.0);
+            let d_hi = ev - (-1.0);
+            let d_wh = ev - 0.0;
+            let w_bk = exp(-(d_bk * d_bk) / 4.0);
+            let w_sh = exp(-(d_sh * d_sh) / 4.0);
+            let w_hi = exp(-(d_hi * d_hi) / 4.0);
+            let w_wh = exp(-(d_wh * d_wh) / 4.0);
+            let stops = clamp(
+                u.shadows * w_sh * 2.0
+                + u.highlights * w_hi * 2.0
+                + u.blacks * w_bk * 2.0
+                + u.whites * w_wh * 2.0,
+                -2.0, 2.0);
             px = px * pow(2.0, stops);
         }
     }
 
-    // Contrast: sigmoid S-curve in gamma-2.2 perceptual space so the pivot
-    // at L_p 0.5 sits near middle gray (L* 50). HDR values are handled the
-    // same way as before via per-pixel peak normalization.
-    let l2 = lum(px);
-    if l2 > 0.0 && u.contrast != 0.0 {
-        let k = 4.0 + abs(u.contrast) * 8.0;
-        let peak = max(l2, 1.0);
-        let l2n = l2 / peak;
-        let l_p = pow(l2n, 1.0 / 2.2);
-        let sig = 1.0 / (1.0 + exp(-k * (l_p - 0.5)));
-        let l_p_new = clamp(l_p + u.contrast * (sig - l_p), 0.0, 1.0);
-        let l_adj = pow(l_p_new, 2.2) * peak;
-        px = px * (l_adj / l2);
+    // Darktable basicadj-style power-law contrast applied per channel in
+    // scene-referred linear RGB, pivoting at middle gray (0.1842, which is
+    // the linear Y of CIELab L* 50). Values above the pivot amplify, values
+    // below compress, amount = 0 is exact identity.
+    if u.contrast != 0.0 {
+        let exponent = 1.0 + u.contrast;
+        let inv_grey = 1.0 / 0.1842;
+        px = vec3(
+            pow(max(px.r, 0.0) * inv_grey, exponent) * 0.1842,
+            pow(max(px.g, 0.0) * inv_grey, exponent) * 0.1842,
+            pow(max(px.b, 0.0) * inv_grey, exponent) * 0.1842,
+        );
     }
 
     // Vibrance: selective saturation adjustment.
