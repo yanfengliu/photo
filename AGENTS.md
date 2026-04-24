@@ -7,6 +7,7 @@
   - Apply the change.
   - Capture an after screenshot.
   - Generate a pixel diff and use that as verification alongside the normal test/build gates.
+- CRITICAL: Strictly follow the workflow from the superpowers skills, such as subagent implementation, plan writing, code reviews, etc. Also use the latest model with highest thinking effort from Codex and Gemini for second opinions during code review stage.
 
 ## Git
 
