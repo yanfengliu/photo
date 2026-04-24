@@ -110,8 +110,8 @@ pub struct EditState {
     pub shadows: f32,     // -100 to +100
     pub whites: f32,      // -100 to +100
     pub blacks: f32,      // -100 to +100
-    pub temperature: f32, // -30 to +30
-    pub tint: f32,        // -30 to +30
+    pub temperature: f32, // -60 to +60 (≈3200K..9800K via temperature_tint_matrix)
+    pub tint: f32,        // -60 to +60
     pub vibrance: f32,    // -100 to +100
     pub saturation: f32,  // -50 to +50
     pub clarity: f32,     // -50 to +50
@@ -363,8 +363,9 @@ pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
 }
 
 /// Bradford chromatic adaptation matrix for temperature/tint.
-/// Temperature: -100..+100 maps to ~3500K..~12000K shift from D65 (6500K).
-/// Tint: -100..+100 shifts green/magenta.
+/// Temperature: -60..+60 (UI range) maps to ~3200K..~9800K around D65 (6500K)
+/// at 55 K per unit.
+/// Tint: -60..+60 shifts yd chromaticity by ±0.012 (green/magenta).
 /// Returns a 3x3 row-major matrix for linear RGB transform.
 pub fn temperature_tint_matrix(temperature: f32, tint: f32) -> [f32; 9] {
     let kelvin = 6500.0 + temperature * 55.0;
@@ -470,6 +471,150 @@ pub fn apply_vignetting(px: [f32; 3], uv: [f32; 2], vig: [f32; 3]) -> [f32; 3] {
     [px[0] * correction, px[1] * correction, px[2] * correction]
 }
 
+/// Bundled lens correction parameters passed to the CPU save/render path.
+/// Mirrors the four lens-related uniforms sent to the GPU
+/// (`lens_dist_a/b/c`, `lens_vig_k1/k2/k3`, `lens_tca_r_scale`,
+/// `lens_tca_b_scale` in `assets/shaders/image.wgsl`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LensCorrection {
+    pub dist: [f32; 3],
+    pub vig: [f32; 3],
+    pub tca_r: f32,
+    pub tca_b: f32,
+}
+
+impl Default for LensCorrection {
+    fn default() -> Self {
+        Self {
+            dist: [0.0; 3],
+            vig: [0.0; 3],
+            tca_r: 1.0,
+            tca_b: 1.0,
+        }
+    }
+}
+
+impl LensCorrection {
+    fn has_distortion(&self) -> bool {
+        self.dist != [0.0; 3]
+    }
+
+    fn has_tca(&self) -> bool {
+        self.tca_r != 1.0 || self.tca_b != 1.0
+    }
+}
+
+/// UV remap matching `apply_distortion` in `assets/shaders/image.wgsl`.
+fn apply_distortion_uv(uv: [f32; 2], dist: [f32; 3]) -> [f32; 2] {
+    let dx = uv[0] - 0.5;
+    let dy = uv[1] - 0.5;
+    let r = (dx * dx + dy * dy).sqrt();
+    let r2 = r * r;
+    let r3 = r2 * r;
+    let a = dist[0];
+    let b = dist[1];
+    let c = dist[2];
+    let scale = a * r3 + b * r2 + c * r + 1.0 - a - b - c;
+    [0.5 + dx * scale, 0.5 + dy * scale]
+}
+
+/// Bilinear sample of the quarter-resolution linear-RGB blur atlas at
+/// full-resolution UV. Matches the GPU `textureSample(blur_tex, ...)` with
+/// `FilterMode::Linear` plus `AddressMode::ClampToEdge`.
+fn sample_blur_bilinear(blur: &[f32], bw: u32, bh: u32, u: f32, v: f32) -> [f32; 3] {
+    if bw == 0 || bh == 0 {
+        return [0.0; 3];
+    }
+    let w_minus_1 = (bw as i32 - 1).max(0);
+    let h_minus_1 = (bh as i32 - 1).max(0);
+    let src_x = u * bw as f32 - 0.5;
+    let src_y = v * bh as f32 - 0.5;
+    let x0 = (src_x.floor() as i32).clamp(0, w_minus_1);
+    let y0 = (src_y.floor() as i32).clamp(0, h_minus_1);
+    let x1 = (x0 + 1).min(w_minus_1);
+    let y1 = (y0 + 1).min(h_minus_1);
+    let fx = (src_x - x0 as f32).clamp(0.0, 1.0);
+    let fy = (src_y - y0 as f32).clamp(0.0, 1.0);
+
+    let fetch = |x: i32, y: i32| -> [f32; 3] {
+        let idx = ((y as u32 * bw + x as u32) * 3) as usize;
+        [blur[idx], blur[idx + 1], blur[idx + 2]]
+    };
+    let p00 = fetch(x0, y0);
+    let p10 = fetch(x1, y0);
+    let p01 = fetch(x0, y1);
+    let p11 = fetch(x1, y1);
+
+    let mut out = [0.0f32; 3];
+    for c in 0..3 {
+        let top = p00[c] * (1.0 - fx) + p10[c] * fx;
+        let bot = p01[c] * (1.0 - fx) + p11[c] * fx;
+        out[c] = top * (1.0 - fy) + bot * fy;
+    }
+    out
+}
+
+/// Bilinear RGBA sample with edge clamp. UV is in [0, 1] over the image.
+fn sample_rgba_bilinear(pixels: &[u8], width: u32, height: u32, u: f32, v: f32) -> [u8; 4] {
+    if width == 0 || height == 0 {
+        return [0, 0, 0, 0];
+    }
+    let w_minus_1 = (width as i32 - 1).max(0);
+    let h_minus_1 = (height as i32 - 1).max(0);
+    let src_x = u * width as f32 - 0.5;
+    let src_y = v * height as f32 - 0.5;
+    let x0 = (src_x.floor() as i32).clamp(0, w_minus_1);
+    let y0 = (src_y.floor() as i32).clamp(0, h_minus_1);
+    let x1 = (x0 + 1).min(w_minus_1);
+    let y1 = (y0 + 1).min(h_minus_1);
+    let fx = (src_x - x0 as f32).clamp(0.0, 1.0);
+    let fy = (src_y - y0 as f32).clamp(0.0, 1.0);
+
+    let fetch = |x: i32, y: i32| -> [f32; 4] {
+        let idx = ((y as u32 * width + x as u32) * 4) as usize;
+        [
+            pixels[idx] as f32,
+            pixels[idx + 1] as f32,
+            pixels[idx + 2] as f32,
+            pixels[idx + 3] as f32,
+        ]
+    };
+    let p00 = fetch(x0, y0);
+    let p10 = fetch(x1, y0);
+    let p01 = fetch(x0, y1);
+    let p11 = fetch(x1, y1);
+
+    let mut out = [0u8; 4];
+    for c in 0..4 {
+        let top = p00[c] * (1.0 - fx) + p10[c] * fx;
+        let bot = p01[c] * (1.0 - fx) + p11[c] * fx;
+        let val = top * (1.0 - fy) + bot * fy;
+        out[c] = val.round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+/// Per-channel TCA sample matching `apply_tca` in `assets/shaders/image.wgsl`.
+/// G/alpha come from the input `tex_uv`; R and B come from center-radial
+/// rescalings of that UV by `tca_r` and `tca_b`.
+fn sample_tca_rgba(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    tex_uv: [f32; 2],
+    tca_r: f32,
+    tca_b: f32,
+) -> [u8; 4] {
+    let dx = tex_uv[0] - 0.5;
+    let dy = tex_uv[1] - 0.5;
+    let uv_r = [0.5 + dx * tca_r, 0.5 + dy * tca_r];
+    let uv_b = [0.5 + dx * tca_b, 0.5 + dy * tca_b];
+    let r = sample_rgba_bilinear(pixels, width, height, uv_r[0], uv_r[1]);
+    let g = sample_rgba_bilinear(pixels, width, height, tex_uv[0], tex_uv[1]);
+    let b = sample_rgba_bilinear(pixels, width, height, uv_b[0], uv_b[1]);
+    [r[0], g[1], b[2], g[3]]
+}
+
 /// Apply all adjustments to a single pixel (sRGB u8 input -> sRGB u8 output).
 /// `blurred` is the corresponding blurred pixel for clarity/dehaze (linear RGB).
 /// `temp_matrix` is the precomputed Bradford CAT matrix.
@@ -493,6 +638,11 @@ pub fn apply_all(
 
     if state.temperature != 0.0 || state.tint != 0.0 {
         px = apply_temperature_tint(px, temp_matrix);
+        // Bradford CAT can rotate highly saturated pixels into slightly
+        // negative channels. Later luminance-dependent stages
+        // (tone zones, contrast, clarity) degenerate to identity when
+        // luminance goes non-positive, producing a visible regime cliff.
+        px = [px[0].max(0.0), px[1].max(0.0), px[2].max(0.0)];
     }
 
     let n = |v: f32| v / 100.0;
@@ -581,7 +731,7 @@ pub fn render_edited_image(
     width: u32,
     height: u32,
     state: &EditState,
-    vig: [f32; 3],
+    lens: LensCorrection,
 ) -> RenderedImage {
     let temp_matrix = temperature_tint_matrix(state.temperature, state.tint);
     let (rotated_pixels, rotated_width, rotated_height) =
@@ -596,25 +746,67 @@ pub fn render_edited_image(
     let cropped_width = x1.saturating_sub(x0).max(1);
     let cropped_height = y1.saturating_sub(y0).max(1);
 
+    let apply_distortion = state.lens_correction && lens.has_distortion();
+    let apply_tca = state.lens_correction && lens.has_tca();
+    let apply_vig = state.lens_correction && lens.vig != [0.0; 3];
+
     let mut output = Vec::with_capacity((cropped_width * cropped_height * 4) as usize);
     let w_f = rotated_width as f32;
     let h_f = rotated_height as f32;
+    let bw = (rotated_width / 4).max(1);
+    let bh = (rotated_height / 4).max(1);
     for y in y0..y1 {
         for x in x0..x1 {
-            let idx = ((y * rotated_width + x) * 4) as usize;
-            let srgb = [
-                rotated_pixels[idx],
-                rotated_pixels[idx + 1],
-                rotated_pixels[idx + 2],
-                rotated_pixels[idx + 3],
-            ];
-            let bx = (x / 4).min((rotated_width / 4).saturating_sub(1));
-            let by = (y / 4).min((rotated_height / 4).saturating_sub(1));
-            let bw = (rotated_width / 4).max(1);
-            let bidx = ((by * bw + bx) * 3) as usize;
-            let blurred = [blur[bidx], blur[bidx + 1], blur[bidx + 2]];
-            let uv = [(x as f32 + 0.5) / w_f, (y as f32 + 0.5) / h_f];
-            let result = apply_all(srgb, state, &temp_matrix, blurred, uv, vig);
+            let uv_rot = [(x as f32 + 0.5) / w_f, (y as f32 + 0.5) / h_f];
+            let tex_uv = if apply_distortion {
+                apply_distortion_uv(uv_rot, lens.dist)
+            } else {
+                uv_rot
+            };
+            let srgb = if apply_tca {
+                sample_tca_rgba(
+                    rotated_pixels,
+                    rotated_width,
+                    rotated_height,
+                    tex_uv,
+                    lens.tca_r,
+                    lens.tca_b,
+                )
+            } else if apply_distortion {
+                sample_rgba_bilinear(
+                    rotated_pixels,
+                    rotated_width,
+                    rotated_height,
+                    tex_uv[0],
+                    tex_uv[1],
+                )
+            } else {
+                let idx = ((y * rotated_width + x) * 4) as usize;
+                [
+                    rotated_pixels[idx],
+                    rotated_pixels[idx + 1],
+                    rotated_pixels[idx + 2],
+                    rotated_pixels[idx + 3],
+                ]
+            };
+
+            // Blur sample at the pre-distortion UV, matching the GPU which
+            // also reads the blur texture with `viewport_uv_to_tex_uv(uv, rect)`
+            // before apply_distortion. Bilinear interpolation of the quarter-res
+            // atlas mirrors what the GPU's linear sampler does — nearest-cell
+            // integer indexing would produce stepwise artifacts at 4-pixel
+            // boundaries that the preview does not show.
+            let blurred = sample_blur_bilinear(&blur, bw, bh, uv_rot[0], uv_rot[1]);
+
+            // Vignette uses post-distortion UV on the GPU; match that here.
+            // Passing zero coefficients makes apply_all's own check skip the
+            // vignette branch, so there's no need to mutate state.
+            let (vig_uv, vig_coeffs) = if apply_vig {
+                (tex_uv, lens.vig)
+            } else {
+                (uv_rot, [0.0; 3])
+            };
+            let result = apply_all(srgb, state, &temp_matrix, blurred, vig_uv, vig_coeffs);
             output.extend_from_slice(&result);
         }
     }
@@ -629,16 +821,16 @@ pub fn render_edited_image(
 // -- Save --
 
 /// Apply all edits and save to disk. Returns the output path on success.
-/// `vig` is the lens vignetting coefficients [k1, k2, k3] (pass [0;3] if none).
+/// Pass [`LensCorrection::default`] if no lens profile is active.
 pub fn save_edited_image(
     original_path: &Path,
     pixels: &[u8],
     width: u32,
     height: u32,
     state: &EditState,
-    vig: [f32; 3],
+    lens: LensCorrection,
 ) -> Result<PathBuf, String> {
-    let rendered = render_edited_image(pixels, width, height, state, vig);
+    let rendered = render_edited_image(pixels, width, height, state, lens);
 
     let save_path = edited_save_path(original_path);
     let img = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.pixels)
@@ -648,10 +840,19 @@ pub fn save_edited_image(
     Ok(save_path)
 }
 
+/// 9-tap Gaussian weights shared with `assets/shaders/blur.wgsl`
+/// (sigma ≈ 2.5, radius 4). Indexed by absolute offset from the center tap.
+const CPU_BLUR_WEIGHTS: [f32; 5] = [0.2492, 0.1836, 0.1216, 0.0540, 0.0162];
+
 fn generate_cpu_blur(pixels: &[u8], width: u32, height: u32) -> Vec<f32> {
     let bw = (width / 4).max(1);
     let bh = (height / 4).max(1);
-    let mut blur = vec![0.0f32; (bw * bh * 3) as usize];
+
+    // Stage 1: 4x4 box downsample to a quarter-resolution linear-RGB atlas.
+    // The GPU path achieves the same effective downsample through bilinear
+    // sampling of the full-resolution source texture, so this downsample
+    // plus the separable Gaussian below mirrors the GPU blur pipeline.
+    let mut downsampled = vec![0.0f32; (bw * bh * 3) as usize];
     for by in 0..bh {
         for bx in 0..bw {
             let mut r = 0.0f32;
@@ -671,10 +872,72 @@ fn generate_cpu_blur(pixels: &[u8], width: u32, height: u32) -> Vec<f32> {
                     }
                 }
             }
+            let didx = ((by * bw + bx) * 3) as usize;
+            downsampled[didx] = r / count;
+            downsampled[didx + 1] = g / count;
+            downsampled[didx + 2] = b / count;
+        }
+    }
+
+    // Stage 2: separable 9-tap Gaussian horizontal pass, clamping to edge.
+    let mut intermediate = vec![0.0f32; (bw * bh * 3) as usize];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let mut r = 0.0f32;
+            let mut g = 0.0f32;
+            let mut b = 0.0f32;
+            for i in 0..CPU_BLUR_WEIGHTS.len() as i32 {
+                let w = CPU_BLUR_WEIGHTS[i as usize];
+                if i == 0 {
+                    let sidx = ((by * bw + bx) * 3) as usize;
+                    r += downsampled[sidx] * w;
+                    g += downsampled[sidx + 1] * w;
+                    b += downsampled[sidx + 2] * w;
+                } else {
+                    let x_pos = (bx as i32 + i).min(bw as i32 - 1).max(0) as u32;
+                    let x_neg = (bx as i32 - i).max(0).min(bw as i32 - 1) as u32;
+                    let idx_pos = ((by * bw + x_pos) * 3) as usize;
+                    let idx_neg = ((by * bw + x_neg) * 3) as usize;
+                    r += (downsampled[idx_pos] + downsampled[idx_neg]) * w;
+                    g += (downsampled[idx_pos + 1] + downsampled[idx_neg + 1]) * w;
+                    b += (downsampled[idx_pos + 2] + downsampled[idx_neg + 2]) * w;
+                }
+            }
+            let iidx = ((by * bw + bx) * 3) as usize;
+            intermediate[iidx] = r;
+            intermediate[iidx + 1] = g;
+            intermediate[iidx + 2] = b;
+        }
+    }
+
+    // Stage 3: separable 9-tap Gaussian vertical pass.
+    let mut blur = vec![0.0f32; (bw * bh * 3) as usize];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let mut r = 0.0f32;
+            let mut g = 0.0f32;
+            let mut b = 0.0f32;
+            for i in 0..CPU_BLUR_WEIGHTS.len() as i32 {
+                let w = CPU_BLUR_WEIGHTS[i as usize];
+                if i == 0 {
+                    let sidx = ((by * bw + bx) * 3) as usize;
+                    r += intermediate[sidx] * w;
+                    g += intermediate[sidx + 1] * w;
+                    b += intermediate[sidx + 2] * w;
+                } else {
+                    let y_pos = (by as i32 + i).min(bh as i32 - 1).max(0) as u32;
+                    let y_neg = (by as i32 - i).max(0).min(bh as i32 - 1) as u32;
+                    let idx_pos = ((y_pos * bw + bx) * 3) as usize;
+                    let idx_neg = ((y_neg * bw + bx) * 3) as usize;
+                    r += (intermediate[idx_pos] + intermediate[idx_neg]) * w;
+                    g += (intermediate[idx_pos + 1] + intermediate[idx_neg + 1]) * w;
+                    b += (intermediate[idx_pos + 2] + intermediate[idx_neg + 2]) * w;
+                }
+            }
             let bidx = ((by * bw + bx) * 3) as usize;
-            blur[bidx] = r / count;
-            blur[bidx + 1] = g / count;
-            blur[bidx + 2] = b / count;
+            blur[bidx] = r;
+            blur[bidx + 1] = g;
+            blur[bidx + 2] = b;
         }
     }
     blur
@@ -1155,7 +1418,7 @@ mod tests {
         let pixels = [32, 64, 96, 255];
 
         let out =
-            save_edited_image(&original, &pixels, 1, 1, &EditState::default(), [0.0; 3]).unwrap();
+            save_edited_image(&original, &pixels, 1, 1, &EditState::default(), LensCorrection::default()).unwrap();
 
         assert_eq!(out.extension().and_then(|ext| ext.to_str()), Some("png"));
         assert!(out.exists());
@@ -1169,7 +1432,7 @@ mod tests {
         let mut state = EditState::default();
         state.rotate_clockwise();
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1186,7 +1449,7 @@ mod tests {
         let mut state = EditState::default();
         state.rotate_counterclockwise();
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1204,7 +1467,7 @@ mod tests {
         state.rotate_clockwise();
         state.rotate_clockwise();
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 2);
@@ -1225,7 +1488,7 @@ mod tests {
             ..EditState::default()
         };
 
-        let out = save_edited_image(&original, &pixels, 2, 2, &state, [0.0; 3]).unwrap();
+        let out = save_edited_image(&original, &pixels, 2, 2, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1243,7 +1506,7 @@ mod tests {
         state.rotate_clockwise();
         state.crop = Some(CropRect::new(0.0, 0.0, 1.0, 0.5));
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1261,7 +1524,7 @@ mod tests {
             ..EditState::default()
         };
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 2);
@@ -1396,6 +1659,224 @@ mod tests {
             corner[0] > px[0],
             "vignetting should brighten corners, got {}",
             corner[0]
+        );
+    }
+
+    #[test]
+    fn cpu_save_applies_lens_distortion_and_tca() {
+        // Without distortion/TCA, the save path produced a single image.
+        // Once distortion and TCA are applied on CPU the way the GPU shader
+        // does, the output must differ for both a barrel-distortion profile
+        // and for a TCA-only profile, so saved files match the on-screen
+        // preview when lens correction is enabled.
+        const SIZE: u32 = 32;
+        let mut pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
+        // A diagonal gradient so bilinear sampling is visible.
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let idx = ((y * SIZE + x) * 4) as usize;
+                let r = ((x * 255 / (SIZE - 1)) as u8).min(255);
+                let g = ((y * 255 / (SIZE - 1)) as u8).min(255);
+                let b = ((x + y) * 255 / (2 * (SIZE - 1))) as u8;
+                pixels[idx] = r;
+                pixels[idx + 1] = g;
+                pixels[idx + 2] = b;
+                pixels[idx + 3] = 255;
+            }
+        }
+
+        let mut state = EditState::default();
+        state.lens_correction = true;
+
+        let identity = LensCorrection::default();
+        let out_identity = render_edited_image(&pixels, SIZE, SIZE, &state, identity);
+
+        // Barrel distortion with non-zero a/b/c. With lens_enabled=true and
+        // non-identity coefficients the remap should change interior pixels.
+        let with_distortion = LensCorrection {
+            dist: [0.1, -0.05, 0.02],
+            vig: [0.0; 3],
+            tca_r: 1.0,
+            tca_b: 1.0,
+        };
+        let out_distortion =
+            render_edited_image(&pixels, SIZE, SIZE, &state, with_distortion);
+        assert_ne!(
+            out_identity.pixels, out_distortion.pixels,
+            "non-identity lens distortion should change saved pixels"
+        );
+
+        // TCA only: red and blue sampling scales diverge, so R and B channels
+        // should shift relative to G even with no barrel distortion.
+        let with_tca = LensCorrection {
+            dist: [0.0; 3],
+            vig: [0.0; 3],
+            tca_r: 1.05,
+            tca_b: 0.95,
+        };
+        let out_tca = render_edited_image(&pixels, SIZE, SIZE, &state, with_tca);
+        assert_ne!(
+            out_identity.pixels, out_tca.pixels,
+            "non-identity TCA should change saved pixels"
+        );
+    }
+
+    #[test]
+    fn cpu_save_skips_lens_correction_when_disabled() {
+        // With lens_correction = false, passing non-trivial distortion/TCA
+        // must be a no-op: the save path only applies lens math when the
+        // user toggle is on.
+        let pixels = test_rgba_gradient(8, 8);
+        let state = EditState::default(); // lens_correction = false
+        let out_without = render_edited_image(&pixels, 8, 8, &state, LensCorrection::default());
+        let with_params = LensCorrection {
+            dist: [0.3, 0.2, 0.1],
+            vig: [0.5, 0.3, 0.1],
+            tca_r: 1.1,
+            tca_b: 0.9,
+        };
+        let out_with_params = render_edited_image(&pixels, 8, 8, &state, with_params);
+        assert_eq!(out_without.pixels, out_with_params.pixels);
+    }
+
+    fn test_rgba_gradient(w: u32, h: u32) -> Vec<u8> {
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 4) as usize;
+                pixels[idx] = ((x * 255 / w.max(1)) as u8).min(255);
+                pixels[idx + 1] = ((y * 255 / h.max(1)) as u8).min(255);
+                pixels[idx + 2] = 128;
+                pixels[idx + 3] = 255;
+            }
+        }
+        pixels
+    }
+
+    #[test]
+    fn generate_cpu_blur_applies_separable_gaussian_matching_gpu_kernel() {
+        // A 4x4 bright block centered in a 12x12 image lights up only the
+        // middle 1/4-res cell after box-downsampling. The subsequent
+        // separable 9-tap Gaussian (weights from assets/shaders/blur.wgsl)
+        // must spread that single bright cell into a 3x3 neighborhood with
+        // the same separable profile the GPU uses, so clarity/dehaze look
+        // the same in the save path as in the Detail-view preview.
+        const W: u32 = 12;
+        const H: u32 = 12;
+        let mut pixels = vec![0u8; (W * H * 4) as usize];
+        for y in 4..8u32 {
+            for x in 4..8u32 {
+                let idx = ((y * W + x) * 4) as usize;
+                pixels[idx] = 255;
+                pixels[idx + 1] = 255;
+                pixels[idx + 2] = 255;
+                pixels[idx + 3] = 255;
+            }
+        }
+        let blur = generate_cpu_blur(&pixels, W, H);
+        assert_eq!(blur.len(), (3 * 3 * 3) as usize);
+
+        let at = |bx: u32, by: u32| -> f32 {
+            let bidx = ((by * 3 + bx) * 3) as usize;
+            blur[bidx]
+        };
+
+        // Center cell: weight[0] * weight[0] = 0.2492^2 ≈ 0.0621.
+        let center = at(1, 1);
+        assert!(
+            (center - 0.0621).abs() < 0.002,
+            "center Gaussian tap^2 expected ~0.0621, got {}",
+            center
+        );
+
+        // Orthogonal neighbors: weight[0] * weight[1] = 0.2492 * 0.1836 ≈ 0.0458.
+        for (bx, by) in [(0u32, 1u32), (2, 1), (1, 0), (1, 2)] {
+            let v = at(bx, by);
+            assert!(
+                (v - 0.0458).abs() < 0.002,
+                "orthogonal neighbor ({}, {}) expected ~0.0458, got {}",
+                bx,
+                by,
+                v
+            );
+        }
+
+        // Corners: weight[1] * weight[1] = 0.1836^2 ≈ 0.0337 (separable isotropy).
+        for (bx, by) in [(0u32, 0u32), (2, 0), (0, 2), (2, 2)] {
+            let v = at(bx, by);
+            assert!(
+                (v - 0.0337).abs() < 0.002,
+                "corner ({}, {}) expected ~0.0337, got {}",
+                bx,
+                by,
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn sample_blur_bilinear_interpolates_across_quarter_res_cells() {
+        // 2x2 atlas where only cell (0, 0) is hot. A UV corresponding to an
+        // 8-pixel-wide source image at x=3 lies 37.5% of the way from cell
+        // center (0) to cell center (1) along x, so the bilinear sample
+        // should produce 1.0 * (1 - 0.375) = 0.625 (in the center row).
+        let atlas = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let sample = sample_blur_bilinear(&atlas, 2, 2, 3.5 / 8.0, 1.5 / 8.0);
+        // y=1 (center of first source row cluster) lands at src_y_in_blur =
+        // 1.5/8 * 2 - 0.5 = -0.125, clamped → weight fully on top row (y=0).
+        assert!(
+            (sample[0] - 0.625).abs() < 0.001,
+            "expected bilinear blur[0] ≈ 0.625 at x=3 y=1, got {}",
+            sample[0]
+        );
+        assert_eq!(sample[1], 0.0);
+        assert_eq!(sample[2], 0.0);
+
+        // At x=2 (nearer the hot cell's center), bilinear weight on cell (0,0)
+        // should be larger: 1 - (2.5/8 * 2 - 0.5) = 1 - 0.125 = 0.875.
+        let sample_near = sample_blur_bilinear(&atlas, 2, 2, 2.5 / 8.0, 1.5 / 8.0);
+        assert!((sample_near[0] - 0.875).abs() < 0.001);
+
+        // Pixels 2 and 3 share the same nearest-cell lookup but must differ
+        // under bilinear. This is the regression Codex flagged.
+        assert_ne!(sample[0], sample_near[0]);
+    }
+
+    #[test]
+    fn strong_temperature_does_not_silence_contrast() {
+        // At temp=-60 the Bradford CAT pushes pure blue into negative red/green,
+        // giving a negative luminance. Without a guard, apply_contrast short-circuits
+        // (lum <= 0 returns identity) and the contrast slider stops affecting the
+        // output. Guard the intermediate so contrast remains visible.
+        let mut base = EditState::default();
+        base.temperature = -60.0;
+        let matrix = temperature_tint_matrix(base.temperature, base.tint);
+
+        let no_contrast = base;
+        let mut with_contrast = base;
+        with_contrast.contrast = 50.0;
+
+        let pixel = [0, 0, 200, 255];
+        let out_plain = apply_all(
+            pixel,
+            &no_contrast,
+            &matrix,
+            [0.0; 3],
+            [0.5, 0.5],
+            [0.0; 3],
+        );
+        let out_contrast = apply_all(
+            pixel,
+            &with_contrast,
+            &matrix,
+            [0.0; 3],
+            [0.5, 0.5],
+            [0.0; 3],
+        );
+
+        assert_ne!(
+            out_plain, out_contrast,
+            "contrast should still change the output even when strong temperature pushes channels negative"
         );
     }
 }

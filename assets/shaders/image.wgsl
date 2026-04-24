@@ -3,7 +3,10 @@
 struct Uniforms {
     rect: vec4<f32>,
     bg_color: vec4<f32>,
-    // Adjustments (normalized: -1..+1 except exposure which is -5..+5)
+    // Adjustments, pre-scaled on the CPU side (viewer.rs::prepare):
+    //   exposure: raw stops, UI range -3..+3 (sent as-is)
+    //   highlights/shadows/whites/blacks/vibrance: UI ±100 divided by 100 -> ±1
+    //   contrast/saturation/clarity/dehaze: UI ±50 divided by 100 -> ±0.5
     exposure: f32,
     contrast: f32,
     highlights: f32,
@@ -180,13 +183,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Exposure: pixel * 2^EV
     px = px * pow(2.0, u.exposure);
 
-    // Temperature/Tint: Bradford CAT matrix multiply
+    // Temperature/Tint: Bradford CAT matrix multiply.
+    // Clamp negative intermediate channels so downstream luminance-based
+    // stages (tone zones, contrast, clarity) don't hit a regime cliff.
     let temp_mat = mat3x3<f32>(
         u.temp_mat_row0.xyz,
         u.temp_mat_row1.xyz,
         u.temp_mat_row2.xyz,
     );
-    px = temp_mat * px;
+    px = max(temp_mat * px, vec3(0.0));
 
     // Zone-based tone adjustments (stop-based, ±2 stops max per slider).
     // Matches darktable tone equalizer's ±2 stop clamp (correction 0.25x-4.0x).

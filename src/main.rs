@@ -265,7 +265,7 @@ struct SaveRequest {
     path: PathBuf,
     image: Arc<ImageData>,
     state: edit::EditState,
-    vig: [f32; 3],
+    lens: edit::LensCorrection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,7 +296,7 @@ struct LocalEditPersistRequest {
     image: Arc<ImageData>,
     logical_dimensions: (u32, u32),
     state: edit::EditState,
-    vig: [f32; 3],
+    lens: edit::LensCorrection,
     base_source: BaseImageSource,
 }
 
@@ -1307,7 +1307,7 @@ impl App {
                                 request.image.width,
                                 request.image.height,
                                 &request.state,
-                                request.vig,
+                                request.lens,
                             )
                             .map(|p| p.to_string_lossy().into_owned())
                         })
@@ -2125,13 +2125,13 @@ impl App {
             .get(path)
             .map(|history| history.current)
             .unwrap_or_default();
-        let vig = if self.current_image_path.as_deref() == Some(path) {
-            self.current_lens_vignetting(state.lens_correction)
+        let lens = if self.current_image_path.as_deref() == Some(path) {
+            self.current_lens_correction(state.lens_correction)
         } else {
-            [0.0; 3]
+            edit::LensCorrection::default()
         };
         let rendered =
-            edit::render_edited_image(&image.pixels, image.width, image.height, &state, vig);
+            edit::render_edited_image(&image.pixels, image.width, image.height, &state, lens);
         ImageHandle::from_rgba(rendered.width, rendered.height, rendered.pixels)
     }
 
@@ -2175,7 +2175,7 @@ impl App {
         {
             return None;
         }
-        let vig = self.current_lens_vignetting(state.lens_correction);
+        let lens = self.current_lens_correction(state.lens_correction);
         let base_dimensions = self
             .current_image_source_dimensions
             .unwrap_or((image.width, image.height));
@@ -2202,7 +2202,7 @@ impl App {
                 state.crop,
             ),
             state,
-            vig,
+            lens,
             base_source,
         })
     }
@@ -3047,12 +3047,12 @@ impl App {
         if self.current_render_depends_on_pending_auto_lens_metadata(state) {
             return None;
         }
-        let vig = self.current_lens_vignetting(state.lens_correction);
+        let lens = self.current_lens_correction(state.lens_correction);
         Some(SaveRequest {
             path,
             image,
             state,
-            vig,
+            lens,
         })
     }
 
@@ -3065,6 +3065,28 @@ impl App {
             .and_then(|profile| profile.vignetting)
             .map(|vignetting| [vignetting.k1, vignetting.k2, vignetting.k3])
             .unwrap_or([0.0; 3])
+    }
+
+    fn current_lens_correction(&self, lens_correction_enabled: bool) -> edit::LensCorrection {
+        if !lens_correction_enabled {
+            return edit::LensCorrection::default();
+        }
+        let dist = self
+            .current_lens_profile
+            .as_ref()
+            .and_then(|profile| profile.distortion)
+            .map(|d| [d.a, d.b, d.c])
+            .unwrap_or([0.0; 3]);
+        let tca = self
+            .current_lens_profile
+            .as_ref()
+            .and_then(|profile| profile.tca);
+        edit::LensCorrection {
+            dist,
+            vig: self.current_lens_vignetting(true),
+            tca_r: tca.map(|t| t.vr).unwrap_or(1.0),
+            tca_b: tca.map(|t| t.vb).unwrap_or(1.0),
+        }
     }
 
     fn visible_crop(&self) -> Option<edit::CropRect> {
@@ -3756,7 +3778,7 @@ fn get_slider_field(state: &edit::EditState, kind: SliderKind) -> f32 {
 fn slider_range(kind: SliderKind) -> (f32, f32) {
     match kind {
         SliderKind::Exposure => (-3.0, 3.0),
-        SliderKind::Temperature | SliderKind::Tint => (-30.0, 30.0),
+        SliderKind::Temperature | SliderKind::Tint => (-60.0, 60.0),
         SliderKind::Highlights
         | SliderKind::Shadows
         | SliderKind::Whites
@@ -4865,7 +4887,7 @@ fn persist_local_edit(
         request.image.width,
         request.image.height,
         &request.state,
-        request.vig,
+        request.lens,
     );
     let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)?;
 
@@ -5077,7 +5099,7 @@ mod tests {
             request.image.width,
             request.image.height,
             &request.state,
-            request.vig,
+            request.lens,
         );
         let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
             .expect("thumbnail render should succeed");
@@ -5353,7 +5375,7 @@ mod tests {
                 state.crop,
             ),
             state,
-            vig: [0.0; 3],
+            lens: edit::LensCorrection::default(),
             base_source,
         })
         .unwrap();
@@ -5671,7 +5693,7 @@ mod tests {
             let loaded = load_persisted_local_edit_image(&image_path)
                 .unwrap()
                 .expect("persisted local edit image");
-            let expected = edit::render_edited_image(&pixels, 2, 1, &state, [0.0; 3]);
+            let expected = edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
             assert_eq!(loaded.width, expected.width);
             assert_eq!(loaded.height, expected.height);
             assert_eq!(loaded.pixels, expected.pixels);
@@ -5702,7 +5724,7 @@ mod tests {
             let thumbnail =
                 load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
                     .unwrap();
-            let expected = edit::render_edited_image(&pixels, 2, 1, &state, [0.0; 3]);
+            let expected = edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
             assert_eq!(thumbnail.width, expected.width);
             assert_eq!(thumbnail.height, expected.height);
             assert_eq!(thumbnail.pixels, expected.pixels);
@@ -5717,10 +5739,10 @@ mod tests {
         write_test_png(&image_path, 2, 1, &pixels);
 
         let original =
-            edit::render_edited_image(&pixels, 2, 1, &edit::EditState::default(), [0.0; 3]);
+            edit::render_edited_image(&pixels, 2, 1, &edit::EditState::default(), edit::LensCorrection::default());
         let mut rotated_state = edit::EditState::default();
         rotated_state.rotate_clockwise();
-        let rotated = edit::render_edited_image(&pixels, 2, 1, &rotated_state, [0.0; 3]);
+        let rotated = edit::render_edited_image(&pixels, 2, 1, &rotated_state, edit::LensCorrection::default());
 
         with_test_photo_repo_root(repo_root.path(), || {
             let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
@@ -6207,7 +6229,7 @@ mod tests {
                 rotation: edit::QuarterTurns::new(1),
                 ..edit::EditState::default()
             },
-            [0.0; 3],
+            edit::LensCorrection::default(),
         );
 
         assert_eq!(width, expected.width);
@@ -6529,10 +6551,14 @@ mod tests {
         assert_eq!(min, -3.0);
         assert_eq!(max, 3.0);
 
-        // Temperature should be narrower
-        let (min, max) = slider_range(SliderKind::Temperature);
-        assert_eq!(min, -30.0);
-        assert_eq!(max, 30.0);
+        // Temperature/tint span should reach tungsten (~3200K) on one side
+        // and cloudy overcast (~9800K) on the other with the 55 K-per-unit
+        // mapping in edit::temperature_tint_matrix.
+        for kind in [SliderKind::Temperature, SliderKind::Tint] {
+            let (min, max) = slider_range(kind);
+            assert_eq!(min, -60.0);
+            assert_eq!(max, 60.0);
+        }
 
         // Highlights/Shadows/Whites/Blacks keep full range
         for kind in [
@@ -6550,6 +6576,27 @@ mod tests {
         let (min, max) = slider_range(SliderKind::Contrast);
         assert_eq!(min, -50.0);
         assert_eq!(max, 50.0);
+    }
+
+    #[test]
+    fn temperature_slider_covers_tungsten_and_cloudy_kelvin() {
+        // At the extremes, the kelvin mapping inside
+        // edit::temperature_tint_matrix should span roughly tungsten
+        // (~3200K) to cloudy/shade (~9800K), so white balance edits can
+        // correct indoor and open-shade images without running out of range.
+        let (min, max) = slider_range(SliderKind::Temperature);
+        let kelvin_low = 6500.0 + min * 55.0;
+        let kelvin_high = 6500.0 + max * 55.0;
+        assert!(
+            kelvin_low <= 3300.0,
+            "temperature low end {} does not reach tungsten",
+            kelvin_low
+        );
+        assert!(
+            kelvin_high >= 9700.0,
+            "temperature high end {} does not reach cloudy",
+            kelvin_high
+        );
     }
 
     #[test]
@@ -7106,7 +7153,7 @@ mod tests {
         });
 
         let state = app.edit_histories.get(&path).unwrap().current;
-        let out = edit::save_edited_image(&original, &pixels, 2, 1, &state, [0.0; 3]).unwrap();
+        let out = edit::save_edited_image(&original, &pixels, 2, 1, &state, edit::LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -7179,7 +7226,7 @@ mod tests {
                 image: test_image(6, 4),
                 logical_dimensions: (3, 2),
                 state,
-                vig: [0.0; 3],
+                lens: edit::LensCorrection::default(),
                 base_source: BaseImageSource::Original,
             })
             .unwrap();
@@ -7525,7 +7572,7 @@ mod tests {
             request.image.width,
             request.image.height,
             &request.state,
-            request.vig,
+            request.lens,
         )
         .unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
@@ -7963,7 +8010,7 @@ mod tests {
             request.image.width,
             request.image.height,
             &request.state,
-            request.vig,
+            request.lens,
         )
         .expect("save copy from reopened missing-source image");
         assert!(saved.exists());
@@ -8041,7 +8088,7 @@ mod tests {
             request.image.width,
             request.image.height,
             &request.state,
-            request.vig,
+            request.lens,
         )
         .expect("save copy from reopened missing-source image");
         assert!(saved.exists());
@@ -8577,7 +8624,7 @@ mod tests {
         app.current_exif = Some(lens::ExifInfo::default());
 
         let request = app.current_save_request().unwrap();
-        assert_eq!(request.vig, [0.1, 0.2, 0.3]);
+        assert_eq!(request.lens.vig, [0.1, 0.2, 0.3]);
     }
 
     #[test]
@@ -8670,7 +8717,10 @@ mod tests {
                 lens_correction: true,
                 ..edit::EditState::default()
             },
-            [-1.0, 0.0, 0.0],
+            edit::LensCorrection {
+                vig: [-1.0, 0.0, 0.0],
+                ..edit::LensCorrection::default()
+            },
         );
 
         assert_eq!(width, expected.width);
@@ -8696,7 +8746,7 @@ mod tests {
         });
 
         let request = app.current_save_request().unwrap();
-        assert_eq!(request.vig, [0.0, 0.0, 0.0]);
+        assert_eq!(request.lens.vig, [0.0, 0.0, 0.0]);
     }
 
     #[test]
