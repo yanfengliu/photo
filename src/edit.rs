@@ -279,19 +279,22 @@ pub fn apply_tone_zones(
     }
     let l_p = l_lin.powf(1.0 / 2.2);
 
-    // Shadows: peaks ~0.20-0.25, fades by ~0.50 (tighter to avoid midtone bleed)
-    let sh_rise = smoothstep(0.0, 0.20, l_p);
-    let sh_fall = 1.0 - smoothstep(0.25, 0.50, l_p);
+    // Zones follow Lightroom-style photographer semantics in gamma-2.2
+    // perceptual space:
+    //   Blacks peak at near-black (L_p < 0.20)
+    //   Shadows bell peaks around L_p ~0.32 (dark midtones, linear ≈ 0.075)
+    //   Highlights bell peaks around L_p ~0.72 (bright midtones, linear ≈ 0.48)
+    //   Whites peak at near-white (L_p > 0.85)
+
+    let sh_rise = smoothstep(0.10, 0.30, l_p);
+    let sh_fall = 1.0 - smoothstep(0.40, 0.55, l_p);
     let w_sh = sh_rise * sh_fall;
 
-    // Highlights: bell shape, rises 0.35-0.55, falls 0.75-1.0 (separates from whites)
-    let w_hi = smoothstep(0.35, 0.55, l_p) * (1.0 - smoothstep(0.75, 1.0, l_p));
+    let w_hi = smoothstep(0.50, 0.65, l_p) * (1.0 - smoothstep(0.80, 0.95, l_p));
 
-    // Blacks: endpoint control, affects bottom ~30% of perceptual range
-    let w_bk = 1.0 - smoothstep(0.0, 0.30, l_p);
+    let w_bk = 1.0 - smoothstep(0.0, 0.20, l_p);
 
-    // Whites: endpoint control, affects top ~40% of perceptual range
-    let w_wh = smoothstep(0.60, 1.0, l_p);
+    let w_wh = smoothstep(0.85, 1.0, l_p);
 
     let stops = (shadows * w_sh * 2.0
         + highlights * w_hi * 2.0
@@ -308,16 +311,19 @@ pub fn apply_contrast(px: [f32; 3], amount: f32) -> [f32; 3] {
     if lum <= 0.0 {
         return px;
     }
-    // Sigmoid contrast: blend between original lum and a steep S-curve.
-    // k must be > 4 (the identity slope at midpoint) to actually boost contrast.
-    // At amount=0, blend factor is 0 so the result is identity.
-    // For HDR values (lum > 1), normalize into [0,1] before applying the sigmoid,
-    // then scale back, so contrast works correctly across the full range.
+    // Apply the S-curve in gamma-2.2 perceptual space so the sigmoid pivot
+    // at 0.5 sits near L* 50 (middle gray at L_lin ≈ 0.22), which is where
+    // photographers expect a contrast pivot. A linear-space pivot at 0.5
+    // lives at L* ≈ 76 (in the highlights), so positive contrast darkens
+    // most of a typical image. HDR values are handled the same way as
+    // before via per-pixel peak normalization.
     let k = 4.0 + amount.abs() * 8.0;
     let peak = lum.max(1.0);
     let lum_n = lum / peak;
-    let sig = 1.0 / (1.0 + (-k * (lum_n - 0.5)).exp());
-    let lum_new = (lum_n + amount * (sig - lum_n)) * peak;
+    let l_p = lum_n.powf(1.0 / 2.2);
+    let sig = 1.0 / (1.0 + (-k * (l_p - 0.5)).exp());
+    let l_p_new = (l_p + amount * (sig - l_p)).clamp(0.0, 1.0);
+    let lum_new = l_p_new.powf(2.2) * peak;
     let ratio = lum_new / lum;
     [px[0] * ratio, px[1] * ratio, px[2] * ratio]
 }
@@ -1227,37 +1233,80 @@ mod tests {
 
     #[test]
     fn tone_zones_highlights_affects_bright_not_dark() {
-        // Highlights should brighten bright pixels
-        let bright = [0.9, 0.9, 0.9];
+        // "Highlights" territory is bright midtones (L_p ≈ 0.65..0.80, peak
+        // at ~0.72 which is linear ≈ 0.48). Push +1 there and verify the
+        // pixel brightens; a near-black pixel (Blacks territory) should not
+        // see any highlights effect.
+        let bright = [0.48, 0.48, 0.48];
         let out = apply_tone_zones(bright, 1.0, 0.0, 0.0, 0.0);
         assert!(
             out[0] > bright[0],
-            "highlights should brighten bright pixels"
+            "highlights should brighten bright midtones"
         );
 
-        // Highlights should minimally affect dark pixels
+        // Near-black pixel: outside the highlights bell.
         let dark = [0.02, 0.02, 0.02];
         let out2 = apply_tone_zones(dark, 1.0, 0.0, 0.0, 0.0);
         assert!(
-            (out2[0] - dark[0]).abs() < 0.01,
-            "highlights should minimally affect dark pixels"
+            (out2[0] - dark[0]).abs() < 0.001,
+            "highlights should not affect near-black pixels"
         );
     }
 
     #[test]
     fn tone_zones_shadows_affects_dark_not_bright() {
-        // Shadows should brighten dark pixels
-        let dark = [0.02, 0.02, 0.02];
+        // "Shadows" territory is dark midtones (L_p ≈ 0.20..0.50, peak at
+        // ~0.32 which is linear ≈ 0.075). Push +1 there and verify the
+        // pixel brightens; a near-white pixel should not see any shadows
+        // effect.
+        let dark = [0.08, 0.08, 0.08];
         let out = apply_tone_zones(dark, 0.0, 1.0, 0.0, 0.0);
-        assert!(out[0] > dark[0], "shadows should brighten dark pixels");
+        assert!(
+            out[0] > dark[0],
+            "shadows should brighten dark midtones"
+        );
 
-        // Shadows should minimally affect bright pixels
+        // Near-white pixel: outside the shadows bell.
         let bright = [0.9, 0.9, 0.9];
         let out2 = apply_tone_zones(bright, 0.0, 1.0, 0.0, 0.0);
-        // Bright pixels are above the shadow zone, so minimal effect
         assert!(
-            (out2[0] - bright[0]).abs() / bright[0] < 0.05,
-            "shadows should minimally affect bright pixels"
+            (out2[0] - bright[0]).abs() / bright[0] < 0.02,
+            "shadows should not affect near-white pixels"
+        );
+    }
+
+    #[test]
+    fn tone_zones_highlights_do_not_leak_into_lower_midtones() {
+        // Pre-fix the highlights bell rose from L_p 0.35, meaning lower
+        // midtones (linear ≈ 0.13) got a noticeable highlights boost and
+        // bled into territory photographers expect Shadows to control.
+        // With highlights shifted up to L_p 0.50..0.95, a lower-midtone
+        // pixel should see zero highlights effect.
+        let mid_dark_lin = 0.40_f32.powf(2.2); // L_p 0.40
+        let px = [mid_dark_lin, mid_dark_lin, mid_dark_lin];
+        let out = apply_tone_zones(px, 1.0, 0.0, 0.0, 0.0);
+        let delta = (out[0] - mid_dark_lin).abs() / mid_dark_lin;
+        assert!(
+            delta < 0.01,
+            "highlights should not affect lower midtones, got Δ={:.2}%",
+            delta * 100.0
+        );
+    }
+
+    #[test]
+    fn tone_zones_whites_do_not_leak_into_midtones() {
+        // Pre-fix whites started at L_p 0.60 (linear ≈ 0.32), so bright
+        // midtones took major whites boost. With whites narrowed to L_p
+        // 0.85..1.0, that same pixel should be exclusively highlights
+        // territory and see zero whites effect.
+        let mid_bright_lin = 0.65_f32.powf(2.2); // L_p 0.65
+        let px = [mid_bright_lin, mid_bright_lin, mid_bright_lin];
+        let out = apply_tone_zones(px, 0.0, 0.0, 1.0, 0.0);
+        let delta = (out[0] - mid_bright_lin).abs() / mid_bright_lin;
+        assert!(
+            delta < 0.01,
+            "whites should not affect bright midtones, got Δ={:.2}%",
+            delta * 100.0
         );
     }
 
@@ -1284,13 +1333,15 @@ mod tests {
 
     #[test]
     fn tone_zones_blacks_darkens_dark_pixels() {
-        // Blacks at -1 should noticeably darken near-black pixels
-        let dark = [0.02, 0.02, 0.02];
+        // Blacks peak at near-black (L_p < ~0.20). A true near-black pixel
+        // at L_p ≈ 0.09 (L_lin ≈ 0.005) sits well inside the blacks bell
+        // and should see a strong response at blacks=-1.
+        let dark = [0.005, 0.005, 0.005];
         let out = apply_tone_zones(dark, 0.0, 0.0, 0.0, -1.0);
         let pct_change = (dark[0] - out[0]) / dark[0];
         assert!(
             pct_change > 0.10,
-            "blacks should darken dark pixels by >10%, got {:.1}%",
+            "blacks should darken near-black pixels by >10%, got {:.1}%",
             pct_change * 100.0
         );
 
@@ -1310,6 +1361,23 @@ mod tests {
         assert!(approx(out[0], px[0]));
         assert!(approx(out[1], px[1]));
         assert!(approx(out[2], px[2]));
+    }
+
+    #[test]
+    fn apply_contrast_preserves_middle_gray_at_full_strength() {
+        // A photographer's contrast slider should pivot around middle gray
+        // (L* 50, L_p 0.5, L_lin ≈ 0.218), not around linear 0.5 (which sits
+        // at L* ≈ 76 — already in the highlights). With the perceptual pivot,
+        // middle gray should stay near identity even at +0.5 contrast.
+        let middle_gray_lin = 0.5_f32.powf(2.2);
+        let px = [middle_gray_lin, middle_gray_lin, middle_gray_lin];
+        let out = apply_contrast(px, 0.5);
+        let delta = (out[0] - middle_gray_lin).abs() / middle_gray_lin;
+        assert!(
+            delta < 0.01,
+            "middle gray should sit at the contrast pivot, got Δ={:.2}%",
+            delta * 100.0
+        );
     }
 
     #[test]

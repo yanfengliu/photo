@@ -195,27 +195,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Zone-based tone adjustments (stop-based, ±2 stops max per slider).
     // Matches darktable tone equalizer's ±2 stop clamp (correction 0.25x-4.0x).
-    // Zone weights in perceptual (gamma 2.2) luminance space with overlapping
-    // smoothstep transitions (analogous to darktable's Gaussian-windowed bands).
-    // Whites/blacks are endpoint controls with wider zones than highlights/shadows.
+    // Zones live in gamma-2.2 perceptual space with Lightroom-style centers:
+    //   Blacks   peaks at near-black (L_p < 0.20)
+    //   Shadows  bell peaks around L_p ~0.32 (dark midtones, L_lin ≈ 0.075)
+    //   Highlights bell peaks around L_p ~0.72 (bright midtones, L_lin ≈ 0.48)
+    //   Whites   peaks at near-white (L_p > 0.85)
     if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
         let L_lin = lum(px);
         if L_lin > 0.0001 {
             let L_p = pow(L_lin, 1.0 / 2.2);
 
-            // Shadows: peaks ~0.20-0.25, fades by ~0.50 (tighter to avoid midtone bleed)
-            let sh_rise = smooth_step(0.0, 0.20, L_p);
-            let sh_fall = 1.0 - smooth_step(0.25, 0.50, L_p);
+            let sh_rise = smooth_step(0.10, 0.30, L_p);
+            let sh_fall = 1.0 - smooth_step(0.40, 0.55, L_p);
             let w_sh = sh_rise * sh_fall;
 
-            // Highlights: bell shape, rises 0.35-0.55, falls 0.75-1.0 (separates from whites)
-            let w_hi = smooth_step(0.35, 0.55, L_p) * (1.0 - smooth_step(0.75, 1.0, L_p));
+            let w_hi = smooth_step(0.50, 0.65, L_p) * (1.0 - smooth_step(0.80, 0.95, L_p));
 
-            // Blacks: endpoint control, affects bottom ~30% of perceptual range
-            let w_bk = 1.0 - smooth_step(0.0, 0.30, L_p);
+            let w_bk = 1.0 - smooth_step(0.0, 0.20, L_p);
 
-            // Whites: endpoint control, affects top ~40% of perceptual range
-            let w_wh = smooth_step(0.60, 1.0, L_p);
+            let w_wh = smooth_step(0.85, 1.0, L_p);
 
             let stops = clamp(u.shadows * w_sh * 2.0
                       + u.highlights * w_hi * 2.0
@@ -226,15 +224,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Contrast: sigmoid S-curve blend (k > 4 ensures proper contrast boost).
-    // For HDR values (lum > 1), normalize into [0,1] before sigmoid, then scale back.
+    // Contrast: sigmoid S-curve in gamma-2.2 perceptual space so the pivot
+    // at L_p 0.5 sits near middle gray (L* 50). HDR values are handled the
+    // same way as before via per-pixel peak normalization.
     let l2 = lum(px);
     if l2 > 0.0 && u.contrast != 0.0 {
         let k = 4.0 + abs(u.contrast) * 8.0;
         let peak = max(l2, 1.0);
         let l2n = l2 / peak;
-        let sig = 1.0 / (1.0 + exp(-k * (l2n - 0.5)));
-        let l_adj = (l2n + u.contrast * (sig - l2n)) * peak;
+        let l_p = pow(l2n, 1.0 / 2.2);
+        let sig = 1.0 / (1.0 + exp(-k * (l_p - 0.5)));
+        let l_p_new = clamp(l_p + u.contrast * (sig - l_p), 0.0, 1.0);
+        let l_adj = pow(l_p_new, 2.2) * peak;
         px = px * (l_adj / l2);
     }
 
