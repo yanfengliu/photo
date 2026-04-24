@@ -810,7 +810,7 @@ enum Message {
     LocalEditPersistCompleted {
         path: PathBuf,
         request_id: u64,
-        result: Result<(), String>,
+        result: Result<Option<Arc<ImageData>>, String>,
     },
     LibraryItemClicked(usize),
     SliderChanged(SliderKind, f32),
@@ -1144,12 +1144,20 @@ impl App {
                 {
                     self.local_edit_persist_in_flight = None;
                 }
-                if let Err(error) = result {
-                    log::warn!(
-                        "Local edit persistence failed for {}: {}",
-                        path.display(),
-                        error
-                    );
+                match result {
+                    Ok(Some(thumbnail)) => {
+                        self.set_library_thumbnail_for_path(&path, thumbnail);
+                    }
+                    Ok(None) => {
+                        self.refresh_library_thumbnail_for_path(&path);
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Local edit persistence failed for {}: {}",
+                            path.display(),
+                            error
+                        );
+                    }
                 }
                 self.start_next_local_edit_persist_if_idle()
             }
@@ -2254,11 +2262,6 @@ impl App {
 
     fn on_current_visible_render_changed(&mut self) -> Task<Message> {
         if let Some(request) = self.current_local_edit_persist_request() {
-            if let Ok(thumbnail) = rendered_thumbnail_image_for_local_edit_request(&request) {
-                self.set_library_thumbnail_for_path(&request.path, thumbnail);
-            } else if let Some(path) = self.current_image_path.clone() {
-                self.refresh_library_thumbnail_for_path(&path);
-            }
             return self.enqueue_local_edit_persist(request);
         }
 
@@ -4063,25 +4066,6 @@ fn thumbnail_from_rendered_image(
     })
 }
 
-fn rendered_thumbnail_image_for_local_edit_request(
-    request: &LocalEditPersistRequest,
-) -> Result<Arc<ImageData>, String> {
-    let full = edit::render_edited_image(
-        &request.image.pixels,
-        request.image.width,
-        request.image.height,
-        &request.state,
-        request.vig,
-    );
-    let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)?;
-    Ok(Arc::new(ImageData {
-        pixels: thumb.pixels,
-        width: thumb.width,
-        height: thumb.height,
-        file_size: request.image.file_size,
-    }))
-}
-
 fn thumbnail_dimensions_for_image(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
     if width == 0 || height == 0 || max_dim == 0 {
         return (width.min(max_dim), height.min(max_dim));
@@ -4868,14 +4852,13 @@ fn load_full_image(
     })
 }
 
-fn persist_local_edit(request: &LocalEditPersistRequest) -> Result<(), String> {
+fn persist_local_edit(
+    request: &LocalEditPersistRequest,
+) -> Result<Option<Arc<ImageData>>, String> {
     if request.state.is_default() && matches!(request.base_source, BaseImageSource::Original) {
-        return remove_persisted_local_edit(&request.path);
+        remove_persisted_local_edit(&request.path)?;
+        return Ok(None);
     }
-
-    let Some(cache_dir) = local_edit_cache_dir() else {
-        return Ok(());
-    };
 
     let full = edit::render_edited_image(
         &request.image.pixels,
@@ -4885,25 +4868,35 @@ fn persist_local_edit(request: &LocalEditPersistRequest) -> Result<(), String> {
         request.vig,
     );
     let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)?;
-    with_local_edit_cache_io_lock(|| {
-        let generation_id = next_local_edit_cache_generation_id();
-        write_local_edit_cache_variant_with_generation_and_logical_dimensions_to(
-            &cache_dir,
-            &request.path,
-            LocalEditCacheVariant::Full,
-            generation_id,
-            &full,
-            request.logical_dimensions,
-        )?;
-        write_local_edit_cache_variant_with_generation_to(
-            &cache_dir,
-            &request.path,
-            LocalEditCacheVariant::Thumbnail,
-            generation_id,
-            &thumb,
-        )?;
-        Ok(())
-    })
+
+    if let Some(cache_dir) = local_edit_cache_dir() {
+        with_local_edit_cache_io_lock(|| {
+            let generation_id = next_local_edit_cache_generation_id();
+            write_local_edit_cache_variant_with_generation_and_logical_dimensions_to(
+                &cache_dir,
+                &request.path,
+                LocalEditCacheVariant::Full,
+                generation_id,
+                &full,
+                request.logical_dimensions,
+            )?;
+            write_local_edit_cache_variant_with_generation_to(
+                &cache_dir,
+                &request.path,
+                LocalEditCacheVariant::Thumbnail,
+                generation_id,
+                &thumb,
+            )?;
+            Ok(())
+        })?;
+    }
+
+    Ok(Some(Arc::new(ImageData {
+        pixels: thumb.pixels,
+        width: thumb.width,
+        height: thumb.height,
+        file_size: request.image.file_size,
+    })))
 }
 
 fn save_library(library: &[LibraryEntry]) {
@@ -5070,6 +5063,35 @@ mod tests {
         let image =
             image::RgbaImage::from_raw(width, height, pixels.to_vec()).expect("valid test image");
         image.save(path).unwrap();
+    }
+
+    /// Drive the in-flight local-edit persist to completion the way the background
+    /// task would and deliver the rendered thumbnail back through the message loop.
+    fn complete_in_flight_persist_with_rendered_thumbnail(app: &mut App) {
+        let request = app
+            .local_edit_persist_in_flight
+            .clone()
+            .expect("expected an in-flight local edit persist request");
+        let full = edit::render_edited_image(
+            &request.image.pixels,
+            request.image.width,
+            request.image.height,
+            &request.state,
+            request.vig,
+        );
+        let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+            .expect("thumbnail render should succeed");
+        let thumbnail = Arc::new(decode::ImageData {
+            pixels: thumb.pixels,
+            width: thumb.width,
+            height: thumb.height,
+            file_size: request.image.file_size,
+        });
+        let _ = app.update(Message::LocalEditPersistCompleted {
+            path: request.path.clone(),
+            request_id: request.request_id,
+            result: Ok(Some(thumbnail)),
+        });
     }
 
     fn rgba_handle_pixels(handle: &ImageHandle) -> (u32, u32, Vec<u8>) {
@@ -5321,7 +5343,7 @@ mod tests {
     ) {
         let base_dimensions =
             decode::source_dimensions(path).unwrap_or((image.width, image.height));
-        persist_local_edit(&LocalEditPersistRequest {
+        let _ = persist_local_edit(&LocalEditPersistRequest {
             request_id: 1,
             path: path.to_path_buf(),
             image,
@@ -6149,7 +6171,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_clockwise_updates_library_thumbnail_immediately() {
+    fn rotate_clockwise_updates_library_thumbnail_after_persist_completes() {
         let path = PathBuf::from("frame.png");
         let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
         let thumbnail_image = test_image_from_pixels(2, 1, &pixels);
@@ -6164,6 +6186,13 @@ mod tests {
         app.rebuild_library_indices();
 
         let _ = app.update(Message::RotateClockwise);
+
+        assert!(
+            app.library[0].thumbnail_handle.is_none(),
+            "rotation commit should defer the library thumbnail render to the persist task"
+        );
+
+        complete_in_flight_persist_with_rendered_thumbnail(&mut app);
 
         let handle = app.library[0]
             .thumbnail_handle
@@ -6187,7 +6216,7 @@ mod tests {
     }
 
     #[test]
-    fn exposure_commit_updates_library_thumbnail_immediately() {
+    fn exposure_commit_updates_library_thumbnail_after_persist_completes() {
         let path = PathBuf::from("frame.png");
         let pixels = [96, 96, 96, 255];
         let thumbnail_image = test_image_from_pixels(1, 1, &pixels);
@@ -6204,6 +6233,13 @@ mod tests {
 
         let _ = app.update(Message::SliderTextSubmit(SliderKind::Exposure));
 
+        assert!(
+            app.library[0].thumbnail_handle.is_none(),
+            "slider commit should defer the library thumbnail render to the persist task"
+        );
+
+        complete_in_flight_persist_with_rendered_thumbnail(&mut app);
+
         let handle = app.library[0]
             .thumbnail_handle
             .as_ref()
@@ -6213,6 +6249,110 @@ mod tests {
             rendered_pixels[0] > pixels[0],
             "expected exposure-adjusted thumbnail to brighten"
         );
+    }
+
+    #[test]
+    fn slider_double_click_release_resets_each_slider_kind() {
+        let kinds_with_initial_values: &[(SliderKind, f32)] = &[
+            (SliderKind::Exposure, 1.5),
+            (SliderKind::Contrast, -25.0),
+            (SliderKind::Highlights, 60.0),
+            (SliderKind::Shadows, -40.0),
+            (SliderKind::Whites, 80.0),
+            (SliderKind::Blacks, -55.0),
+            (SliderKind::Temperature, 12.0),
+            (SliderKind::Tint, -7.5),
+            (SliderKind::Vibrance, 33.0),
+            (SliderKind::Saturation, -18.0),
+            (SliderKind::Clarity, 22.0),
+            (SliderKind::Dehaze, -10.0),
+        ];
+
+        for &(kind, initial) in kinds_with_initial_values {
+            let path = PathBuf::from("frame.png");
+            let mut app = detail_app_with_image(&path, 1, 1);
+            app.image = Some(test_image_from_pixels(1, 1, &[96, 96, 96, 255]));
+            let history = app.edit_histories.entry(path.clone()).or_default();
+            set_slider_field(&mut history.current, kind, initial);
+            history.commit();
+
+            let _ = app.update(Message::SliderReleased(kind));
+            let _ = app.update(Message::SliderReleased(kind));
+
+            let value = get_slider_field(
+                &app.edit_histories.get(&path).expect("history").current,
+                kind,
+            );
+            assert_eq!(
+                value, 0.0,
+                "double-click on the {:?} knob should reset its value to the default",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn slider_double_click_release_defers_persist_when_clearing_an_existing_local_edit() {
+        // The freeze the user reported happens when the on-disk persisted edit
+        // exists and the double-click reset has to delete it. Pre-fix, the commit
+        // path ran a synchronous full-image render on the UI thread before queueing
+        // the background persist. Post-fix, the heavy work moves entirely to the
+        // background persist task and the library thumbnail updates from its result.
+        let repo_root = tempfile::tempdir().unwrap();
+        let image_path = repo_root.path().join("frame.png");
+        let pixels = [96, 96, 96, 255];
+        write_test_png(&image_path, 1, 1, &pixels);
+
+        with_test_photo_repo_root(repo_root.path(), || {
+            let mut prior_state = edit::EditState::default();
+            prior_state.exposure = 1.5;
+            persist_test_local_edit(
+                &image_path,
+                test_image_from_pixels(1, 1, &pixels),
+                prior_state,
+                BaseImageSource::Original,
+            );
+            assert!(persisted_local_edit_exists(
+                &image_path,
+                LocalEditCacheVariant::Full
+            ));
+
+            let mut app = detail_app_with_image(&image_path, 1, 1);
+            app.image = Some(test_image_from_pixels(1, 1, &pixels));
+            app.library = vec![LibraryEntry {
+                path: image_path.clone(),
+                filename: "frame.png".to_string(),
+                thumbnail_image: Some(test_image_from_pixels(1, 1, &pixels)),
+                thumbnail_handle: None,
+            }];
+            app.rebuild_library_indices();
+
+            let history = app.edit_histories.entry(image_path.clone()).or_default();
+            history.current.exposure = 1.5;
+            history.commit();
+
+            let _ = app.update(Message::SliderReleased(SliderKind::Exposure));
+            let _ = app.update(Message::SliderReleased(SliderKind::Exposure));
+
+            assert_eq!(
+                app.edit_histories
+                    .get(&image_path)
+                    .unwrap()
+                    .current
+                    .exposure,
+                0.0,
+                "double-click should reset the exposure to default"
+            );
+            assert!(
+                app.local_edit_persist_in_flight.is_some(),
+                "double-click reset should enqueue a persist task to clear the on-disk edit"
+            );
+            assert!(
+                app.library[0].thumbnail_handle.is_none(),
+                "double-click reset must not synchronously render the full image on the UI \
+                 thread (which would freeze the app for large images)"
+            );
+        });
     }
 
     #[test]
@@ -7033,7 +7173,7 @@ mod tests {
         state.exposure = 1.0;
 
         with_test_photo_repo_root(repo_root.path(), || {
-            persist_local_edit(&LocalEditPersistRequest {
+            let _ = persist_local_edit(&LocalEditPersistRequest {
                 request_id: 1,
                 path: path.clone(),
                 image: test_image(6, 4),
@@ -8509,6 +8649,14 @@ mod tests {
             }),
         });
 
+        assert!(
+            app.library[0].thumbnail_handle.is_none(),
+            "ExifLoaded auto-lens commit should defer thumbnail render to the persist task"
+        );
+        assert!(app.local_edit_persist_in_flight.is_some());
+
+        complete_in_flight_persist_with_rendered_thumbnail(&mut app);
+
         let handle = app.library[0]
             .thumbnail_handle
             .as_ref()
@@ -8528,7 +8676,6 @@ mod tests {
         assert_eq!(width, expected.width);
         assert_eq!(height, expected.height);
         assert_eq!(rendered_pixels, expected.pixels);
-        assert!(app.local_edit_persist_in_flight.is_some());
     }
 
     #[test]

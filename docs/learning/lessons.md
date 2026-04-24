@@ -3,6 +3,7 @@
 Keep this file short, current, and actionable.
 
 ## Active Lessons
+- 2026-04-23 - If a background persistence task already renders the edited full image and a thumbnail, let that task own the library thumbnail update too; never re-run the same full-resolution edit math synchronously on the UI thread just to refresh the library handle, or every commit (slider release, double-click reset, rotate, auto-lens apply) freezes the UI for seconds on multi-megapixel images.
 - 2026-04-23 - If drag preview state is only meaningful in Library, clear it when a Library action enters Detail; otherwise the collection drag thumbnail can keep following the cursor over edit controls after the drop targets are gone.
 - 2026-04-23 - If Library is reopening the same fully loaded Detail image the user just left, short-circuit back to Detail before `start_load(...)` and keep the warm full image, EXIF, and saveable pixels in place; still guard that path with cheap source-metadata validation and keep the transient-state reset contract identical to the reload fallback so same-size rewrites stay correct.
 - 2026-04-23 - If a baked local edit can reopen as the new Detail base image, persist its logical dimensions separately from its baked pixel buffer and restore them on reopen; older caches can only be migrated heuristically, so preserve baked crop/rotation geometry when that is the only reliable signal and only fall back to source dimensions when the old baked buffer clearly exceeds the source.

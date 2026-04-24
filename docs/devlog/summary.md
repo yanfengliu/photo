@@ -13,7 +13,8 @@
 - Library and collection thumbnail grids now reflow from the latest window width, including after resizing while Detail view is open.
 - Library, collection, and drag-preview thumbnails now make `iced` image containment explicit, and RAW thumbnail/detail decode paths now apply RAW orientation metadata before sizing and fall back to sensor orientation when EXIF orientation is missing, so portrait RAW previews keep their true aspect ratio inside fixed square slots instead of rendering squashed.
 - Docs now use the directory layout expected by AGENTS.md.
-- 287 unit tests currently pass.
+- Slider commits (release, double-click reset, rotation, ExifLoaded auto-lens) no longer run the full-resolution edit render synchronously on the UI thread; the background persist task now owns that render and returns the new thumbnail to the UI when it completes, so the editor no longer freezes when the user double-clicks a knob to reset it.
+- 289 unit tests currently pass.
 
 ## Recent milestones
 - Local baked-edit persistence: replace persisted repo-local edit-operation history with baked repo-local edited image files in `local-edits/`, keep undo/redo session-only, prefer baked local copies on reopen, refresh Library thumbnails from the same captured snapshot that gets persisted, gate auto-lens baking until EXIF-driven render inputs settle, pair persisted full/thumbnail local copies with a shared generation so mismatched writes fail closed, invalidate baked copies when the source file metadata changes, and cover baked-image round-trip plus thumbnail behavior with regressions.
