@@ -51,11 +51,12 @@
 - `base_prompt` for the code review agent: "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."
 - Optionally, use the @ symbol within `base_prompt` to include directory context for the best reasoning results.
 - Codex:
-  - `git diff [branch] | codex exec --model gpt-5.5 --model-reasoning-effort xhigh --sandbox read-only --ask-for-approval never --ephemeral <base_prompt>`
+  - `git diff [branch] | codex exec --model gpt-5.4 -c model_reasoning_effort=xhigh -c approval_policy=never --sandbox read-only --ephemeral <base_prompt>`
 - Gemini:
-  - `git diff [branch] | gemini -p <base_prompt> --model gemini-3-pro --thinking high`.
+  - `git diff [branch] | gemini -p <base_prompt> --model gemini-3.1-pro-preview`.
 - Claude:
-  - `git diff [branch] | claude -p --append-system-prompt <base_prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
+  - `git diff [branch] | claude -p --model opus --effort xhigh --append-system-prompt <base_prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
+- For full-codebase reviews (no diff), drop the `git diff` pipe and let each CLI agentically explore the workspace from its CWD; keep the same model/effort flags.
 
 ## Git
 
