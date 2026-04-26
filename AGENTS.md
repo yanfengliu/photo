@@ -1,91 +1,129 @@
 ## Core rules
 
-- Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus exclusively on app experience and mechanisms.
+- Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus primarily on app experience and mechanisms.
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
-- Use a subagent to implement the plan such that the tests pass. For example, if the tech stack uses node, it should make sure `npx vitest run`, `npx tsc --noEmit`, and `npx vite build` pass.
+- Verify every change against this project's gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`. All four must pass before declaring a task done.
 - When the change is visual:
   - Capture a before screenshot.
   - Apply the change.
   - Capture an after screenshot.
   - Generate a pixel diff and use that as verification alongside the normal test/build gates.
 
-## Team of subagents
+## Team of subagents (flexible, not rigid)
 
-- For every task from the user, create a stateless, ephemeral team of subgents to work together on tasks, then turn down the agents when you are done to avoid context rot.
-- **Team lead**:
-  - Responsibility: Breaks the human's request into atomic tasks, selects the appropriate domain specialists, routes the tasks, and acts as the final gatekeeper before merging.
-  - If tests (`npx vitest run`, `npx tsc --noEmit`, etc.) fail or review consensus is not reached after 3 iterations, the Team Lead must execute a hard abort. It will `git reset --hard` the branch, dump the error logs and the failed approach into `docs/learning/lessons.md`, and spin up a completely fresh Architect and Engineer to write a brand new plan that explicitly avoids the failed approach.
-- **Architect**:
-  - Responsibility: Act purely as a consultant rather than an active driver. The Lead queries the Architect to draft the initial implementation plan and verify it against ARCHITECTURE.md before dispatching work.
-- **UX designer**:
-  - Responsibility: Make sure the UX mechanism works well and is fun. Research local and online sources to ground your opinions.
-- **Software engineer**:
-  - Responsibility: Handle all the code writing.
-  - Reach out to the team if you have questions or need a second opinion. 
-  - Iterate with the code reviewer. Reviews might take a long time. Be patient.
-  - After addressing review comments, ask the reviewer to verify that you have successfully done so.
-  - If the Software Engineer and the Code Reviewer cannot reach consensus after 3 iterations, escalate to the Tie-Breaker agent.
-  - Write down the reviewer feedback from previous round(s) under `code_review/` as temp files. The reviewer should consider this info + `docs/learning/lessons.md` + your diff. After you summarize reviewer feedback into devlog, delete the temp files.
-  - Continue this iteration loop until the reviewers seem to start nit-picking instead of catching real bugs / giving substantial feedback. Do not get stuck in an infinite loop.
-- **Code reviewer**: Follow the code review section for detailed rules.
-- **Tie breaker**: Use the high-reasoning model. Its prompt dictates that it must definitively choose to either ACCEPT the current diff (overriding the reviewer) or REJECT it with a mandatory, prescriptive patch. The Tie-Breaker's decision is final.
+Subagent dispatch is a tool, not a mandate. Use it when:
+
+- Context budget matters (a long-running investigation that would clutter the main thread)
+- Work is genuinely parallel (independent searches or independent reviews)
+- A specialist agent type fits naturally (Explore for codebase audits, etc.)
+
+For sequential focused work in the main thread, act as engineer directly — dispatching adds overhead and removes the ability to course-correct quickly.
+
+When you do dispatch, the team roles below describe how to brief them. The Team Lead role is always you (the main agent).
+
+- **Team lead** (always the main agent):
+  - Breaks the human's request into atomic tasks, selects the appropriate domain specialists, routes the tasks, and acts as the final gatekeeper before merging.
+  - If tests fail or review consensus is not reached after 3 iterations, execute a hard abort. Ask the user before destructive operations like `git reset --hard`. Dump error logs and the failed approach into `docs/learning/lessons.md`, and start over with a fresh plan that explicitly avoids the failed approach.
+- **Architect**: Acts as a consultant. Drafts the initial implementation plan and verifies it against ARCHITECTURE.md before work dispatches.
+- **UX designer**: Validates that the UX works well and feels natural. Researches local and online sources to ground opinions.
+- **Software engineer**: Handles code writing.
+  - After coding, ask the code reviewer to review (see Code review section). Iterate with reviewers — diff reviews take ~5 minutes per CLI; use `run_in_background: true` and an `until [ -s <output-file> ]; do sleep 8; done` poller to wait without burning context or hitting harness sleep limits.
+  - After addressing review comments, ask the reviewer to verify the fix.
+  - If engineer + reviewer cannot reach consensus after 3 iterations, escalate to the Tie-Breaker.
+  - Save reviewer feedback under `docs/reviews/<scope>/<date>/<iteration_number>/`, mirroring the full-codebase review convention (see `docs/reviews/full/<date>/<iteration_number>/` for the existing precedent). For per-task diff reviews, `<scope>` is the task slug (the branch name minus the `agent/` prefix); for full-codebase reviews `<scope>` is `full`. Each iteration directory contains:
+    - `raw/codex.md`, `raw/gemini.md`, `raw/opus.md` — per-CLI raw outputs (Claude's file is `opus.md` to match the existing convention; optional `*.stdout.log` / `*.stderr.log` companions for raw command output)
+    - `diff.md` — the diff being reviewed
+    - `REVIEW.md` — your synthesized summary of the three raw outputs with severity-tagged findings
+  - `<iteration_number>` starts at 1 and increments for each re-review. Re-reviewers should consider previous iterations' `REVIEW.md` + `docs/learning/lessons.md` + the new diff so they verify earlier fixes landed and don't re-flag old issues.
+  - After folding the final iteration's `REVIEW.md` into the devlog entry for the task, the review directory stays in `docs/reviews/<scope>/<date>/` as a historical artifact (do not delete — these are valuable audit trails alongside the full-review history).
+  - Continue iterating until reviewers nitpick instead of catching real bugs / giving substantial feedback. Do not get stuck in an infinite loop.
+- **Code reviewer**: Follow the Code review section.
+- **Tie breaker**: Use `claude --model opus`. Its prompt dictates that it must definitively choose to either ACCEPT the current diff (overriding the reviewer) or REJECT it with a mandatory, prescriptive patch. The Tie-Breaker's decision is final.
 
 ## Code review
 
-- Use all of Codex / Gemini / Claude in CLI to independently review every change on the following aspects:
-  1. Design.
-    - Can easily scale, generalize, debug, be understood and reasoned about, and stay lean.
+- Use Codex / Gemini / Claude in CLI to independently review every change. Aspects to review:
+  1. Design — easily scales, generalizes, debugs, can be understood and reasoned about, stays lean.
   2. Test coverage.
   3. Correctness.
-  4. Clean code, typing, efficiency, memory leaks.
-    - No: god class, large files, duplicated logic, inconsistent implementations, violation of boundaries.
-    - Prefer composition over inheritance.
-    - Clean up dead code.
-    - Do not change app mechanics or behavior unless explicitly asked.
-  5. Documentation.
-    - Dev logs should be updated and maintained.
-    - References to code should be up to date.
-    - No outdated comments.
-    - Learnings from debugging and friction points should be documented in `docs/learning/lessons.md`. The file should be actively maintained to not become long, tedious, or outdated.
-- `base_prompt` for the code review agent: "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."
-- Optionally, use the @ symbol within `base_prompt` to include directory context for the best reasoning results.
+  4. Clean code, typing, efficiency, memory leaks. No duplicated logic, inconsistent implementations, violation of boundaries. No file > 500 LOC. Prefer composition over inheritance. Clean up dead code. Do not change app mechanics or behavior unless explicitly asked.
+
+  Documentation accuracy is covered by the Documentation discipline section's reviewer prompt addendum — do not duplicate the rule here.
+
+- A baseline prompt is below; **enrich it with task-specific context** for real reviews — the change's intent, prior-iteration findings to verify, files to focus on, and an anti-regression checklist. The bare baseline returns generic feedback; useful reviews need the specifics.
+
+  > "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."
+
 - Codex:
-  - `git diff [branch] | codex exec --model gpt-5.4 -c model_reasoning_effort=xhigh -c approval_policy=never --sandbox read-only --ephemeral <base_prompt>`
+  - `git diff [branch] | codex exec --model gpt-5.4 -c model_reasoning_effort=xhigh -c approval_policy=never --sandbox read-only --ephemeral <prompt>`
 - Gemini:
-  - `git diff [branch] | gemini -p <base_prompt> --model gemini-3.1-pro-preview`.
+  - `git diff [branch] | gemini -p <prompt> --model gemini-3.1-pro-preview`
 - Claude:
-  - `git diff [branch] | claude -p --model opus --effort xhigh --append-system-prompt <base_prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
+  - `git diff [branch] | claude -p --model opus --effort xhigh --append-system-prompt <prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
 - For full-codebase reviews (no diff), drop the `git diff` pipe and let each CLI agentically explore the workspace from its CWD; keep the same model/effort flags.
+- **Diff reviews take ~5 minutes per CLI on a multi-hundred-line diff.** Run them in parallel with `run_in_background: true`. Wait via a single background `until` poller (`until [ -s codex.txt ] && [ -s claude.txt ] && [ -s gemini.txt ]; do sleep 8; done`) so the harness's no-long-sleeps guard doesn't fire and you don't poll repeatedly.
+- **If a CLI is unreachable** (quota exhaustion, model name rejected by harness), proceed with the remaining reviewers and note the unreachable CLI in the devlog. Two converging reviews are still useful signal — do not block the workflow on a third.
 
 ## Git
 
 - When you iterate, only run affected tests.
-- In the end, after you are confident about your change, run the full suite of tests to make sure you didn't accidentally break anything.
-- Create a short-lived branch for every task (e.g., `agent/fix-tick-start`). Run the test suite on the branch. Only after all tests and visual pixel-diffs pass, merge into main using a fast-forward merge, and delete the branch.
+- After confidence in the change, run the full suite to make sure you didn't accidentally break anything.
+- Create a short-lived branch per task (e.g., `agent/fix-tick-start`). Run the full suite on the branch.
+- **Chained branches when a prior task is unmerged.** If task N is on `agent/foo` waiting to merge and you start task N+1, branch task N+1 off `agent/foo` (not main). The chain stays linear so the user can fast-forward through it in one step. This avoids merge conflicts on shared files like `Cargo.toml` and `docs/changelog.md` that every task touches.
+- **Merging to main requires explicit user authorization.** The harness blocks unauthorized merges to the default branch — do not auto-merge from yolo or auto modes. After all tests pass and reviews converge, the branch stays at the tip awaiting the user typing `merge` (or equivalent explicit go-ahead). When authorized: `git checkout main && git merge --ff-only <branch> && git branch -d <branch>` (and any chained ancestor branches that are now reachable from main).
 - Commit durable docs you added if you are not planning to remove them.
 - Commit as soon as you have a coherent, self-contained unit of change.
 
-## Project docs
+## Documentation
 
-- Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` at session start.
-- Key directories:
-  - `src`: app code.
-  - `docs`: architecture, devlogs, reviews.
-  - `design`: app and mechanism notes.
+Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` at session start. Key directories:
 
-## Architecture
+- `src`: app code.
+- `docs`: architecture, devlogs, reviews, API, tutorials, guides.
 
-- Respect the boundaries documented there. If a boundary seems wrong, flag it instead of silently violating it.
+### Discipline (mandatory; not optional)
+
+Code changes are not done until the docs match. Before declaring any task complete, run through this checklist for every shipped change. Skipping any item is a regression and will be caught by the next audit.
+
+**Always update on every feature / behavior change:**
+
+- `docs/changelog.md` — new version entry with what shipped, why, validation, and behavior callouts. Audience is external; focus on what users need to know to migrate. Keep dev-internal commentary in the devlog.
+- `docs/devlog/summary.md` — one line per task; remove outdated info; compact if > 50 lines. Do not cheat by writing super long line.
+- `docs/devlog/detailed/<latest>.md` — full per-task entry per the Devlog convention below.
+- `Cargo.toml` — version bump per the Versioning convention below.
+
+**Always update if the change introduces or removes API surface (new exports, new methods, new types, removed APIs, renamed APIs):**
+
+- `docs/api-reference.md` — every new public type, method, and standalone utility gets its own section. Removed APIs get removed (not just struck through). Stale signatures must be updated.
+- `README.md` — Feature Overview table mentions the new capability if it's a user-visible feature; Public Surface bullets list the new top-level export if applicable.
+
+**Always update if the change is structural (new subsystem, new boundary, changed data flow):**
+
+- `docs/architecture/ARCHITECTURE.md` — Component Map row + Boundaries paragraph for the new subsystem; lifecycle / data-flow ASCII updated if the flow changes.
+- `docs/architecture/drift-log.md` — append a row with date + change + reason.
+- `docs/architecture/decisions.md` — append a Key Architectural Decision row when the change reflects a non-obvious tradeoff worth recording. Never delete an existing decision; add a newer one that supersedes it.
+
+**Verification step (mandatory before declaring task done):**
+
+- Invoke the `doc-review` skill or grep for removed-API names across `docs/` and `README.md`. The audit must come back clean for the change's diff. Stale references in historical changelog / devlog / drift-log entries are intentional context and should remain — every other surface must reflect current reality.
+- The multi-CLI code review must explicitly verify doc accuracy as part of its review prompt — include "verify docs in the diff match implementation; flag any stale signatures, removed APIs still mentioned, or missing coverage of new APIs in canonical guides."
+
+**Why this is mandatory:** doc drift compounds. A single stale signature in `api-reference.md` becomes the source of truth for the next reader, then for the next feature built on top, then for an external consumer. Treating documentation as part of the change (not after the change) is the only way to keep the surface trustworthy.
+
+### Architecture
+
+- Respect the boundaries documented in `docs/architecture/ARCHITECTURE.md`. If a boundary seems wrong, flag it instead of silently violating it.
 - If architecture changes, update the relevant sections in `docs/architecture/ARCHITECTURE.md`, append a row to `docs/architecture/drift-log.md`, and mention the update in the devlog.
 - Do not update `docs/architecture/ARCHITECTURE.md` for non-structural fixes, refactors, UI tweaks, or test-only work.
 - Never delete a Key Architectural Decision in `docs/architecture/decisions.md`; add a newer decision that supersedes it.
 
-## Devlog
+### Devlog
 
-- Detailed devlogs live under `docs/devlog/detailed/` as append-only files named `YYYY-MM-DD_YYYY-MM-DD.md` (e.g. `2026-04-07_2026-04-13.md`).
+- Detailed devlogs live under `docs/devlog/detailed/` as files named `START_DATE_END_DATE.md` (e.g. `2026-04-07_2026-04-13.md`).
+- A new active file is created with `START_DATE == END_DATE` (today's date for both halves).
 - Always append new entries to the latest detailed devlog (the file with the most recent `END_DATE`). When looking something up, start from the latest file and work backwards.
-- Periodically archive: when the active file grows larger than 500 lines or a significant time boundary is reached, close it (freeze its `END_DATE` in the filename) and start a new file whose `START_DATE` is the next entry's date. Check if the start and end dates of all previous devlogs are still accurate.
+- Periodically archive: when the active file grows larger than 500 lines or a significant time boundary is reached, `git mv` the file to update its `END_DATE` to the date of its last entry, then start a new file whose `START_DATE` is today.
 - After every completed task, append a detailed entry with:
   - timestamp
   - action
@@ -95,6 +133,19 @@
   - notes
 - Keep `docs/devlog/summary.md` current after updating the detailed log. Always remove outdated info. Compact when it grows larger than 50 lines.
 - If a subagent handles summary work, it should extract facts only and avoid interpretation.
+
+### Versioning
+
+- Maintain a version number `a.b.c` in `Cargo.toml`:
+  - Only bump `a` when the human says so.
+  - Whenever you introduce a breaking change, bump `b` and reset `c`.
+  - Whenever you introduce a non-breaking change, bump `c`.
+- **One version bump per coherent shipped change.** If three independent features ship as three commits, each commit gets its own version bump. Do not roll multiple unrelated features into a single version.
+- Maintain `docs/changelog.md` with one entry per version. Check `docs/devlog/` for context.
+
+### Doc formatting
+
+- Don't wrap lines. Only use a new line when you are starting a new paragraph.
 
 ## Debugging
 
