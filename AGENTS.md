@@ -32,7 +32,7 @@ When you do dispatch, the team roles below describe how to brief them. The Team 
   - After coding, ask the code reviewer to review (see Code review section). Iterate with reviewers — diff reviews take ~5 minutes per CLI; use `run_in_background: true` and an `until [ -s <output-file> ]; do sleep 8; done` poller to wait without burning context or hitting harness sleep limits.
   - After addressing review comments, ask the reviewer to verify the fix.
   - If engineer + reviewer cannot reach consensus after 3 iterations, escalate to the Tie-Breaker.
-  - Save reviewer feedback under `docs/reviews/<scope>/<date>/<iteration_number>/`, mirroring the full-codebase review convention (see `docs/reviews/full/<date>/<iteration_number>/` for the existing precedent). For per-task diff reviews, `<scope>` is the task slug (the branch name minus the `agent/` prefix); for full-codebase reviews `<scope>` is `full`. Each iteration directory contains:
+  - Save reviewer feedback under `docs/reviews/<scope>/<date>/<iteration_number>/`, mirroring the full-codebase review convention (see `docs/reviews/full/<date>/<iteration_number>/` for the existing precedent). For per-task diff reviews, `<scope>` is a kebab-case task slug; for full-codebase reviews `<scope>` is `full`. Each iteration directory contains:
     - `raw/codex.md`, `raw/gemini.md`, `raw/opus.md` — per-CLI raw outputs (Claude's file is `opus.md` to match the existing convention; optional `*.stdout.log` / `*.stderr.log` companions for raw command output)
     - `diff.md` — the diff being reviewed
     - `REVIEW.md` — your synthesized summary of the three raw outputs with severity-tagged findings
@@ -73,13 +73,12 @@ This section is the operational implementation of the Core-rules "Multi-CLI code
 
 ## Git
 
+- **Commit directly to `main`.** This is a solo-developer project; branches add overhead without payoff and block autonomous progress while waiting for merge authorization. Each coherent change lands as its own commit on `main`. The full suite (`cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`) must pass before each commit.
 - When you iterate, only run affected tests.
-- After confidence in the change, run the full suite to make sure you didn't accidentally break anything.
-- Create a short-lived branch per task (e.g., `agent/fix-tick-start`). Run the full suite on the branch.
-- **Chained branches when a prior task is unmerged.** If task N is on `agent/foo` waiting to merge and you start task N+1, branch task N+1 off `agent/foo` (not main). The chain stays linear so the user can fast-forward through it in one step. This avoids merge conflicts on shared files like `Cargo.toml` and `docs/changelog.md` that every task touches.
-- **Merging to main requires explicit user authorization.** The harness blocks unauthorized merges to the default branch — do not auto-merge from yolo or auto modes. After all tests pass and reviews converge, the branch stays at the tip awaiting the user typing `merge` (or equivalent explicit go-ahead). When authorized: `git checkout main && git merge --ff-only <branch> && git branch -d <branch>` (and any chained ancestor branches that are now reachable from main).
-- Commit durable docs you added if you are not planning to remove them.
+- After confidence in the change, run the full suite to make sure you didn't accidentally break anything before committing.
 - Commit as soon as you have a coherent, self-contained unit of change.
+- Commit durable docs you added if you are not planning to remove them.
+- **No branches needed for normal work.** Branches are reserved for explicit experimentation that you intend to keep isolated from `main` (and even then, prefer revertable single-commit experiments on `main`). The earlier `agent/<task>` branch convention and the merge-authorization gate are removed — they were artifacts of a multi-developer workflow that doesn't apply here.
 
 ## Documentation
 
