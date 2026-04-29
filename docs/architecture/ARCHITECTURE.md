@@ -77,8 +77,9 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 | --- | --- | --- | --- |
 | GUI | iced | 0.13 | Features: tokio, advanced, image |
 | GPU | wgpu | 0.19 | Via iced re-export |
-| Shader | WGSL | - | `assets/shaders/image.wgsl` |
+| Shader | WGSL | - | `assets/shaders/image.wgsl`, `assets/shaders/blur.wgsl` |
 | Image decode | image crate | 0.24 | Raster decoding |
+| RAW image bridge | image crate (`image25`) | 0.25 | Required by `rawler` for raw-pixel buffers; renamed alias keeps it side-by-side with the 0.24 raster path |
 | RAW decode | rawler | 0.7 | Embedded preview extraction plus staged full-resolution RAW development |
 | JPEG thumbnails | jpeg-decoder | 0.3 | Fast thumbnail downscaling |
 | SVG | resvg | 0.44 | CPU rasterization before upload |
@@ -175,3 +176,8 @@ flowchart TD
 
 - [Architectural decisions](decisions.md)
 - [Architecture drift log](drift-log.md)
+
+## Drift Log
+
+- 2026-04-29 - Mermaid diagram does not depict the in-Library collection-grid sub-view or the same-session full-image cache nodes; deferred because the prose Component Map and Data Flow already cover them and re-laying out the diagram is out of scope for this pass.
+- 2026-04-29 - Component Map narrative does not enumerate the repo-local `decoded-cache/` directory alongside `local-edits/`; deferred because the persisted decode cache is already covered in `decisions.md` and the devlog summary, and the prose paragraph mentions cache-validation behavior implicitly.

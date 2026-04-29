@@ -102,6 +102,9 @@ src/
 assets/
   shaders/
     image.wgsl - Vertex/fragment shader for textured quad rendering
+    blur.wgsl  - 9-tap separable Gaussian blur pre-pass for clarity/dehaze
+  lensfun/
+    sample-lenses.xml - Bundled Lensfun XML database
 docs/
   README.md - Docs index and entry point
   architecture/
@@ -115,12 +118,9 @@ docs/
     lessons.md - Short maintained lessons
   debugging/
     template.md - Debugging session template
+    *.md       - Dated debugging session notes
   reviews/
     README.md - Review artifacts and summaries
 ```
 
 The flat `docs/ARCHITECTURE.md` file is a temporary compatibility shim for older references. New content belongs in the canonical paths above.
-
-## License
-
-See [LICENSE](LICENSE) for details.

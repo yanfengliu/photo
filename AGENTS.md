@@ -3,7 +3,7 @@
 - Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus exclusively on app experience and mechanisms.
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
-- Use a subagent to implement the plan such that the tests pass. For example, if the tech stack uses node, it should make sure `npx vitest run`, `npx tsc --noEmit`, and `npx vite build` pass.
+- Use a subagent to implement the plan such that the tests pass. This Rust project uses `cargo test`, `cargo clippy -- -D warnings`, and `cargo build --release` as the validation gates.
 - When the change is visual:
   - Capture a before screenshot.
   - Apply the change.
@@ -15,7 +15,7 @@
 - For every task from the user, create a stateless, ephemeral team of subgents to work together on tasks, then turn down the agents when you are done to avoid context rot.
 - **Team lead**:
   - Responsibility: Breaks the human's request into atomic tasks, selects the appropriate domain specialists, routes the tasks, and acts as the final gatekeeper before merging.
-  - If tests (`npx vitest run`, `npx tsc --noEmit`, etc.) fail or review consensus is not reached after 3 iterations, the Team Lead must execute a hard abort. It will `git reset --hard` the branch, dump the error logs and the failed approach into `docs/learning/lessons.md`, and spin up a completely fresh Architect and Engineer to write a brand new plan that explicitly avoids the failed approach.
+  - If tests (`cargo test`, `cargo clippy -- -D warnings`, etc.) fail or review consensus is not reached after 3 iterations, the Team Lead must execute a hard abort. It will `git reset --hard` the branch, dump the error logs and the failed approach into `docs/learning/lessons.md`, and spin up a completely fresh Architect and Engineer to write a brand new plan that explicitly avoids the failed approach.
 - **Architect**:
   - Responsibility: Act purely as a consultant rather than an active driver. The Lead queries the Architect to draft the initial implementation plan and verify it against ARCHITECTURE.md before dispatching work.
 - **UX designer**:
@@ -71,8 +71,8 @@
 - Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` at session start.
 - Key directories:
   - `src`: app code.
+  - `assets`: shaders and bundled Lensfun XML.
   - `docs`: architecture, devlogs, reviews.
-  - `design`: app and mechanism notes.
 
 ## Architecture
 
