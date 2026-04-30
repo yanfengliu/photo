@@ -1,7 +1,7 @@
 # Architecture
 
-> Last verified: 2026-04-22
-> Last updated by: codex
+> Last verified: 2026-04-30
+> Last updated by: claude (doc audit)
 
 ## System Overview
 
@@ -11,7 +11,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 
 - `src/main.rs`: iced application state, message loop, tab routing, keyboard/event handling, `DetailLoadState`-based staged Detail-load orchestration, crop/rotation tool wiring, view composition, collection sidebar wiring, local library persistence, session edit history, and repo-local baked local-edit persistence.
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
-- `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
+- `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, temperature/tint (Bradford CAT), vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
 - `assets/shaders/blur.wgsl`: 9-tap separable Gaussian blur pre-pass for clarity/dehaze.
 - `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, and thumbnail loading.
 - `src/edit.rs`: edit state, undo/redo, CPU-side adjustment math, and save pipeline.
@@ -25,7 +25,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 1. The user triggers image load from the CLI, file dialog, drag-and-drop, library click, or arrow keys.
 2. `App::start_load()` advances `DetailLoadState`, clears stale image/metadata state, and chooses the load plan up front.
 3. Raster and SVG files go straight to blocking `decode::decode_image()` plus async EXIF loading.
-4. RAW files start with `decode::decode_embedded_preview()` so Detail can show an embedded image quickly; only the still-current request then launches the heavier full-resolution decode plus EXIF follow-up work.
+4. RAW files start with `decode::decode_embedded_preview()` so Detail can show an embedded image quickly; only the still-current request then launches the heavier full-resolution decode plus EXIF follow-up work. Both RAW and SVG full decodes consult a repo-local `decoded-cache/` directory (versioned, fingerprinted, byte-bounded) for fast repeat opens, and newly imported RAW/SVG files enqueue a serial background warm into that cache.
 5. `Message::ImagePreviewLoaded`, `Message::ImageLoaded`, and `Message::ExifLoaded` arrive in `App::update()`, each tagged with the active request id so stale async completions are ignored.
 6. The app can display the embedded RAW preview immediately, then replace it in place with the full developed image without resetting the user's zoom/pan state.
 7. EXIF and lens-profile lookup complete asynchronously and can update the viewer after the image is already visible.
@@ -80,6 +80,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 | Shader | WGSL | - | `assets/shaders/image.wgsl` |
 | Image decode | image crate | 0.24 | Raster decoding |
 | RAW decode | rawler | 0.7 | Embedded preview extraction plus staged full-resolution RAW development |
+| RAW image bridge | image (renamed `image25`) | 0.25 | Required by `rawler` 0.7 for `DynamicImage`/`RgbImage` types in the develop path |
 | JPEG thumbnails | jpeg-decoder | 0.3 | Fast thumbnail downscaling |
 | SVG | resvg | 0.44 | CPU rasterization before upload |
 | File dialogs | rfd | 0.15 | Async file/folder pickers |

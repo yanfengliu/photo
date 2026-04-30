@@ -103,8 +103,8 @@ Code changes are not done until the docs match. Before declaring any task comple
 
 **Always update if the change introduces or removes API surface (new exports, new methods, new types, removed APIs, renamed APIs):**
 
-- `docs/api-reference.md` — every new public type, method, and standalone utility gets its own section. Removed APIs get removed (not just struck through). Stale signatures must be updated.
-- `README.md` — Feature Overview table mentions the new capability if it's a user-visible feature; Public Surface bullets list the new top-level export if applicable.
+- `docs/architecture/ARCHITECTURE.md` — update the affected Component Map row and Boundaries paragraph so the public surface for each module stays accurate; remove references to deleted APIs.
+- `README.md` — the Features section mentions the new capability if it's user-visible.
 
 **Always update if the change is structural (new subsystem, new boundary, changed data flow):**
 
@@ -117,7 +117,7 @@ Code changes are not done until the docs match. Before declaring any task comple
 - Invoke the `doc-review` skill or grep for removed-API names across `docs/` and `README.md`. The audit must come back clean for the change's diff. Stale references in historical changelog / devlog / drift-log entries are intentional context and should remain — every other surface must reflect current reality.
 - The multi-CLI code review must explicitly verify doc accuracy as part of its review prompt — include "verify docs in the diff match implementation; flag any stale signatures, removed APIs still mentioned, or missing coverage of new APIs in canonical guides."
 
-**Why this is mandatory:** doc drift compounds. A single stale signature in `api-reference.md` becomes the source of truth for the next reader, then for the next feature built on top, then for an external consumer. Treating documentation as part of the change (not after the change) is the only way to keep the surface trustworthy.
+**Why this is mandatory:** doc drift compounds. A single stale signature in `docs/architecture/ARCHITECTURE.md` becomes the source of truth for the next reader, then for the next feature built on top, then for an external consumer. Treating documentation as part of the change (not after the change) is the only way to keep the surface trustworthy.
 
 ### Architecture
 

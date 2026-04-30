@@ -7,7 +7,10 @@ Supports JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, TGA, QOI, HDR, EXR, SVG, and comm
 ## Features
 
 - **Library tab** - Browse image collections as a scrollable thumbnail grid. Load images via folder picker or file picker.
-- **Detail tab** - View individual images with GPU-rendered zoom and pan.
+- **Collections** - Group photos into named collections with drag-and-drop and a sidebar; persisted to `%LOCALAPPDATA%/photo/collections.json`.
+- **Detail tab** - View individual images with GPU-rendered zoom and pan, plus 90-degree rotation and freeform/square crop with overlay preview.
+- **Real-time editing** - 12 GPU-shader adjustments (exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, vibrance, saturation, clarity, dehaze) plus Lensfun-based lens distortion, vignetting, and TCA correction. Undo/redo within a session; committed edits bake into repo-local files under `local-edits/` so reopening preserves the edited image. Save-as-copy exports a separate edited file.
+- **RAW support** - Camera RAW files load fast via embedded preview, then upgrade to a fully developed image in the background.
 - **Keyboard navigation** - Arrow keys to cycle through images.
 - **CLI support** - Open a file directly: `photo.exe path/to/image.jpg`
 
@@ -101,7 +104,10 @@ src/
   nav.rs     - Directory scanning and file navigation
 assets/
   shaders/
-    image.wgsl - Vertex/fragment shader for textured quad rendering
+    image.wgsl - Vertex/fragment shader with adjustments, lens correction, crop overlay
+    blur.wgsl  - Separable Gaussian blur pre-pass for clarity/dehaze
+  lensfun/
+    sample-lenses.xml - Bundled Lensfun lens profile sample
 docs/
   README.md - Docs index and entry point
   architecture/
