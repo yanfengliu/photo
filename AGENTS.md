@@ -122,7 +122,17 @@ Code changes are not done until the docs match. Before declaring any task comple
 
 **Update if applicable to the change's topic:**
 
-- `docs/learning/lessons.md` — when you encounter a non-obvious failure mode worth preserving for future sessions (a recurring trap, a rule that prevented a reasonable-seeming mistake, a process step that turned out load-bearing). One concise entry per lesson; this is the source of process learnings that re-reviewers consult alongside prior `REVIEW.md` files.
+- `docs/learning/lessons.md` — when you encounter a non-obvious failure mode worth preserving for future sessions (a recurring trap, a rule that prevented a reasonable-seeming mistake, a process step that turned out load-bearing). **Each lesson MUST start with this evidence-anchor table** — without anchors a "lesson" is folklore and self-improvement becomes prompt drift:
+
+  | Field | Value |
+  |---|---|
+  | Surfaced by | path to `REVIEW.md` / debug log / commit / conversation that exposed the failure |
+  | Reviewer findings | which CLI flagged it, severity, finding ID — e.g. `Codex 3-C1`, `Gemini iter-2 IMPORTANT` |
+  | Fix commit | short SHA of the commit that closed it |
+  | Test added | exact test node id (or `n/a — process lesson` for review/tooling-only lessons) |
+  | Behavior delta | concrete before/after — what would have happened in production without the fix; for photo-processing changes include the affected image batch ID / sample image / before-after pixel diff or quality metric |
+
+  Code lessons require a real test node id; only genuinely process-level lessons may use `n/a`. One concise entry per lesson; this is the source of process learnings that re-reviewers consult alongside prior `REVIEW.md` files.
 
 **Verification step (mandatory before declaring task done):**
 
