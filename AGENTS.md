@@ -10,6 +10,11 @@
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
 - Verify every change against this project's gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`. All four must pass before declaring a task done.
+- **Dependency-change protocol (mandatory whenever you touch `Cargo.toml`'s `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]`):**
+  1. Re-resolve the lockfile: `cargo update` (commits `Cargo.lock`).
+  2. Run `cargo audit` (install with `cargo install cargo-audit` if needed). A new advisory is a blocker — upgrade past it, swap the crate, or document the suppression in the devlog with a reason and expiry date.
+  3. Mention the audit result in the commit message ("cargo audit: 0 advisories" or similar).
+  Skipping any step is a process regression — supply-chain risk compounds silently.
 - **Multi-CLI code review is mandatory for every behavior or code change before declaring the task done.** Run Codex + Gemini + Claude per the Code review section, synthesize their findings into `docs/threads/current/<objective>/<date>/<iteration_number>/REVIEW.md`, address every real finding, and re-review until reviewers nitpick instead of catching real bugs. Move the thread to `docs/threads/done/<objective>/` when the task is closed. This applies to all changes — single-file fixes, doc-only edits with code implications, refactors, and big features alike. Do not rationalize your way out of review with phrases like "single-file behavior fix," "trivial change," "TDD coverage is sufficient," "subagent dispatch is a tool not a mandate," or any equivalent. The Code review section is non-negotiable; the Team-of-subagents flexibility clause does NOT cover the multi-CLI review step. Skipping review is a process regression and must be corrected by running the review post-hoc on the same branch before merge.
 - When the change is visual:
   - Capture a before screenshot.
