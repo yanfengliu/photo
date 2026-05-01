@@ -22,6 +22,14 @@
   - Capture an after screenshot.
   - Generate a pixel diff and use that as verification alongside the normal test/build gates.
 
+## Command Execution Rules (project-specific)
+
+- **NEVER use compound shell commands.** Do not use `&&`, `|`, or `;` to chain commands together in a single Bash execution. If you need to run multiple commands (e.g., compiling then testing), execute them as separate, sequential tool calls.
+- Do not use command substitution `$(...)` because it prompts for permission and interrupts flow.
+- You are strictly forbidden from using compound commands with `cd` and `git` (e.g., `cd path && git commit`). This triggers a hardcoded CLI security block that halts automation.
+- You MUST ALWAYS use the `git -C <path> <command>` syntax for all git operations. This applies to subagents as well.
+- PowerShell is on the user's deny list. Use Bash with POSIX commands (or the dedicated tools: Read, Edit, Write, Glob, Grep) — never `Test-Path`, `Get-Content`, `Select-String`, or other PowerShell cmdlets, even when invoked through Bash.
+
 ## Team of subagents (flexible, not rigid)
 
 Subagent dispatch is a tool, not a mandate. Use it when:
