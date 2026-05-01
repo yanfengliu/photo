@@ -90,6 +90,7 @@ Operational details for the multi-CLI review rule above.
 - Commit as soon as you have a coherent, self-contained unit of change.
 - Commit durable docs you added if you are not planning to remove them.
 - **No branches needed for normal work.** Branches are reserved for explicit experimentation that you intend to keep isolated from `main` (and even then, prefer revertable single-commit experiments on `main`). The earlier `agent/<task>` branch convention and the merge-authorization gate are removed — they were artifacts of a multi-developer workflow that doesn't apply here.
+- **Push to remote at the end of every task.** If local commits are ahead of the remote, run `git push`. Don't leave the remote behind.
 
 ## Documentation
 
