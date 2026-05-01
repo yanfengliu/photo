@@ -3,7 +3,7 @@
 - Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus exclusively on app experience and mechanisms.
 - For each desired change, make the change easy, then make the easy change.
 - Before implementing a change, write a plan.
-- Use a subagent to implement the plan such that the tests pass. For example, if the tech stack uses node, it should make sure `npx vitest run`, `npx tsc --noEmit`, and `npx vite build` pass.
+- Use a subagent to implement the plan such that the tests pass. This is a Rust project, so the gates are `cargo test`, `cargo clippy -- -D warnings`, and `cargo build --release`.
 - When the change is visual:
   - Capture a before screenshot.
   - Apply the change.
@@ -15,7 +15,7 @@
 - For every task from the user, create a stateless, ephemeral team of subgents to work together on tasks, then turn down the agents when you are done to avoid context rot.
 - **Team lead**:
   - Responsibility: Breaks the human's request into atomic tasks, selects the appropriate domain specialists, routes the tasks, and acts as the final gatekeeper before merging.
-  - If tests (`npx vitest run`, `npx tsc --noEmit`, etc.) fail or review consensus is not reached after 3 iterations, the Team Lead must execute a hard abort. It will `git reset --hard` the branch, dump the error logs and the failed approach into `docs/learning/lessons.md`, and spin up a completely fresh Architect and Engineer to write a brand new plan that explicitly avoids the failed approach.
+  - If tests (`cargo test`, `cargo clippy -- -D warnings`, etc.) fail or review consensus is not reached after 3 iterations, the Team Lead must execute a hard abort. It will `git reset --hard` the branch, dump the error logs and the failed approach into `docs/learning/lessons.md`, and spin up a completely fresh Architect and Engineer to write a brand new plan that explicitly avoids the failed approach.
 - **Architect**:
   - Responsibility: Act purely as a consultant rather than an active driver. The Lead queries the Architect to draft the initial implementation plan and verify it against ARCHITECTURE.md before dispatching work.
 - **UX designer**:
@@ -51,11 +51,11 @@
 - `base_prompt` for the code review agent: "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text."
 - Optionally, use the @ symbol within `base_prompt` to include directory context for the best reasoning results.
 - Codex:
-  - `git diff [branch] | codex exec --model gpt-5.4 -c model_reasoning_effort=xhigh -c approval_policy=never --sandbox read-only --ephemeral <base_prompt>`
+  - `git diff [branch] | codex exec -c model_reasoning_effort=high -c approval_policy=never --sandbox read-only --ephemeral <base_prompt>`
 - Gemini:
-  - `git diff [branch] | gemini -p <base_prompt> --model gemini-3.1-pro-preview`.
+  - `git diff [branch] | gemini -p <base_prompt>`.
 - Claude:
-  - `git diff [branch] | claude -p --model opus --effort xhigh --append-system-prompt <base_prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
+  - `git diff [branch] | claude -p --model opus --append-system-prompt <base_prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
 - For full-codebase reviews (no diff), drop the `git diff` pipe and let each CLI agentically explore the workspace from its CWD; keep the same model/effort flags.
 
 ## Git
@@ -70,9 +70,9 @@
 
 - Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` at session start.
 - Key directories:
-  - `src`: app code.
+  - `src`: app code (single Rust crate, modules: `main`, `viewer`, `decode`, `edit`, `lens`, `nav`, `collection`).
+  - `assets`: WGSL shaders and bundled Lensfun XML.
   - `docs`: architecture, devlogs, reviews.
-  - `design`: app and mechanism notes.
 
 ## Architecture
 

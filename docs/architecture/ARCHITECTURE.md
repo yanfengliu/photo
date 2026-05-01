@@ -1,7 +1,7 @@
 # Architecture
 
-> Last verified: 2026-04-22
-> Last updated by: codex
+> Last verified: 2026-05-01
+> Last updated by: claude
 
 ## System Overview
 
@@ -13,7 +13,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
 - `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
 - `assets/shaders/blur.wgsl`: 9-tap separable Gaussian blur pre-pass for clarity/dehaze.
-- `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, and thumbnail loading.
+- `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, thumbnail loading, and a versioned repo-local persisted decoded-image cache under `decoded-cache/` for RAW and SVG full decodes.
 - `src/edit.rs`: edit state, undo/redo, CPU-side adjustment math, and save pipeline.
 - `src/lens.rs`: Lensfun XML parsing, EXIF reading, and lens profile lookup.
 - `src/collection.rs`: collection CRUD and JSON persistence.
@@ -79,6 +79,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 | GPU | wgpu | 0.19 | Via iced re-export |
 | Shader | WGSL | - | `assets/shaders/image.wgsl` |
 | Image decode | image crate | 0.24 | Raster decoding |
+| Image (rawler interop) | image (aliased `image25`) | 0.25 | RawDynamicImage type used at the rawler boundary in `decode.rs` |
 | RAW decode | rawler | 0.7 | Embedded preview extraction plus staged full-resolution RAW development |
 | JPEG thumbnails | jpeg-decoder | 0.3 | Fast thumbnail downscaling |
 | SVG | resvg | 0.44 | CPU rasterization before upload |
@@ -175,3 +176,11 @@ flowchart TD
 
 - [Architectural decisions](decisions.md)
 - [Architecture drift log](drift-log.md)
+
+## Drift Log (audit notes)
+
+Structural drift noted during the 2026-05-01 docs audit but not fixed in this pass:
+
+- 2026-05-01: `src/main.rs` is ~321 KB / ~7,800 lines and owns App state, message handling, persistence, layout helpers, view composition, and a large session/IO test suite. Splitting it into smaller modules (e.g. extracting persistence and view composition) would relax the AGENTS.md "no large files" guidance but is out of scope for a docs audit.
+- 2026-05-01: `src/decode.rs` and `src/edit.rs` are also large (~85 KB and ~68 KB respectively); flagged for future modularization.
+- 2026-05-01: The flat `docs/ARCHITECTURE.md` shim still exists. Once external references are confirmed migrated, it can be deleted.

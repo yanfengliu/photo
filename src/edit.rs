@@ -261,11 +261,10 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
     [px[0] * m, px[1] * m, px[2] * m]
 }
 
-/// Zone-based tone adjustments (stop-based, ±2 stops max per slider).
+/// Zone-based tone adjustments (stop-based, ±2 stops max per slider total).
 /// Matches darktable tone equalizer's ±2 stop clamp (correction 0.25x-4.0x).
-/// Zone weights in perceptual (gamma 2.2) luminance space with overlapping
-/// smoothstep transitions (analogous to darktable's Gaussian-windowed bands).
-/// Whites/blacks are endpoint controls with wider zones than highlights/shadows.
+/// Band weights are Gaussian in log₂ luminance (EV) space; see
+/// `TONE_ZONE_SIGMA_SQ_2` for the σ that controls the smooth overlap.
 /// Band centers for the 4 tone-zone sliders in EV space. Ported from
 /// darktable's tone equalizer (`src/iop/toneequal.c`), which uses 9 bands
 /// evenly spaced from -8 EV to 0 EV; the 4-slider version collapses those
