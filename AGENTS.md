@@ -68,7 +68,8 @@ Operational details for the multi-CLI review rule above.
   > "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text. Only point out an issue if it is real and important. If there is no issue, say so instead of nit-picking."
 
 - Codex:
-  - `git diff [branch] | codex exec --model gpt-5.5 -c model_reasoning_effort=xhigh -c approval_policy=never --sandbox read-only --ephemeral <prompt>`
+  - `git diff [branch] | codex exec --model gpt-5.5 -c model_reasoning_effort=xhigh -c approval_policy=never --sandbox read-only --ephemeral --ignore-user-config <prompt>`
+  - `--ignore-user-config` is mandatory on Windows where the PowerShell deny rule blocks codex's startup skill loader; verified working 2026-05-01.
   - Requires Codex CLI ≥ 0.125.0 — older builds reject the model name with `requires a newer version of Codex`. Upgrade with `npm install -g @openai/codex@latest`. Codex caps reasoning effort at `xhigh` (no `max` value).
   - On Windows, `--sandbox read-only` blocks PowerShell `Select-String` invocations the model sometimes attempts; the model recovers via direct file reads, so the review still completes.
 - Gemini:
