@@ -1,7 +1,7 @@
 # Architecture
 
-> Last verified: 2026-04-22
-> Last updated by: codex
+> Last verified: 2026-05-02
+> Last updated by: claude
 
 ## System Overview
 
@@ -13,7 +13,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
 - `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
 - `assets/shaders/blur.wgsl`: 9-tap separable Gaussian blur pre-pass for clarity/dehaze.
-- `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, and thumbnail loading.
+- `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, thumbnail loading, and a repo-local persisted decoded-image cache under `decoded-cache/` (versioned schema/contract, normalized path keys, source-fingerprint validation, collision-safe temp writes, and bounded LRU-style retention).
 - `src/edit.rs`: edit state, undo/redo, CPU-side adjustment math, and save pipeline.
 - `src/lens.rs`: Lensfun XML parsing, EXIF reading, and lens profile lookup.
 - `src/collection.rs`: collection CRUD and JSON persistence.
@@ -23,14 +23,15 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 
 ### Image Loading
 1. The user triggers image load from the CLI, file dialog, drag-and-drop, library click, or arrow keys.
-2. `App::start_load()` advances `DetailLoadState`, clears stale image/metadata state, and chooses the load plan up front.
-3. Raster and SVG files go straight to blocking `decode::decode_image()` plus async EXIF loading.
-4. RAW files start with `decode::decode_embedded_preview()` so Detail can show an embedded image quickly; only the still-current request then launches the heavier full-resolution decode plus EXIF follow-up work.
+2. `App::start_load()` advances `DetailLoadState`, clears stale image/metadata state, and chooses the load plan up front. A same-image return from Library short-circuits before `start_load()` when the visible Detail image is still valid; otherwise an in-memory same-session full-image cache (with a small recent-history floor) can serve repeat opens immediately under a write-denying read handle.
+3. Raster files go straight to blocking `decode::decode_image()` plus async EXIF loading.
+4. RAW and SVG files consult the repo-local `decoded-cache/` first (validated by source fingerprint and an explicit cache-contract version); RAW files additionally start with `decode::decode_embedded_preview()` so Detail can show an embedded image quickly, and only the still-current request then launches the heavier full-resolution decode plus EXIF follow-up work.
 5. `Message::ImagePreviewLoaded`, `Message::ImageLoaded`, and `Message::ExifLoaded` arrive in `App::update()`, each tagged with the active request id so stale async completions are ignored.
 6. The app can display the embedded RAW preview immediately, then replace it in place with the full developed image without resetting the user's zoom/pan state.
 7. EXIF and lens-profile lookup complete asynchronously and can update the viewer after the image is already visible.
-8. `prepare()` checks the runtime GPU texture limit and uploads the current image texture.
-9. `render()` draws the textured quad with zoom/pan uniforms.
+8. Newly imported RAW/SVG files enqueue a serial background warm of the persisted decoded-cache so later opens hit the cache without blocking the import path.
+9. `prepare()` checks the runtime GPU texture limit and uploads the current image texture.
+10. `render()` draws the textured quad with zoom/pan uniforms.
 
 ### Thumbnail Loading
 1. The user picks a folder or files with `rfd`.
@@ -66,7 +67,8 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - Only `edit.rs` owns adjustment math and undo/redo history.
 - Only `lens.rs` parses Lensfun XML and reads EXIF data.
 - Only `collection.rs` manages collection persistence and CRUD.
-- Only `main.rs` manages library-path persistence, session edit histories, and repo-local baked local-edit persistence.
+- Only `main.rs` manages library-path persistence, session edit histories, the in-memory same-session full-image cache, and repo-local baked local-edit persistence.
+- Only `decode.rs` reads/writes the repo-local `decoded-cache/` directory.
 - File dialogs go through `rfd::AsyncFileDialog`.
 - Image decoding is always async through `tokio::task::spawn_blocking`.
 - wgpu access stays behind iced's re-export.
