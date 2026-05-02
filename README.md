@@ -49,7 +49,7 @@ cargo run --release -- path/to/image.jpg
 cargo test
 ```
 
-Rust unit tests cover decode, navigation, viewer math, collections, and edit logic without requiring a GPU.
+Rust unit tests cover decode, navigation, viewer math, collections, edit logic, and EXIF/Lensfun parsing without requiring a GPU.
 
 ### Lint
 
@@ -92,16 +92,19 @@ cargo fmt           # Auto-format
 
 ```
 src/
-  main.rs    - App state, message loop, tab routing, keyboard/event handling
-  viewer.rs  - GPU shader pipeline for image rendering (zoom, pan, texture upload)
-  decode.rs  - Image decoding (raster via image crate, RAW via rawler, SVG via resvg)
+  main.rs    - App state, message loop, tab routing, keyboard/event handling, staged Detail-load orchestration, baked local-edit persistence
+  viewer.rs  - GPU shader pipeline for image rendering (zoom, pan, crop overlay, texture upload)
+  decode.rs  - Image decoding (raster via image crate, RAW via rawler, SVG via resvg) plus persisted decoded-image cache
   collection.rs - Collection CRUD and JSON persistence
   edit.rs    - Edit state, undo/redo, and CPU-side save pipeline
-  lens.rs    - Lensfun and EXIF metadata lookup
+  lens.rs    - Lensfun XML parsing, EXIF reading, and lens profile lookup
   nav.rs     - Directory scanning and file navigation
 assets/
   shaders/
-    image.wgsl - Vertex/fragment shader for textured quad rendering
+    image.wgsl - Fragment shader for the textured quad with adjustments, lens correction, and crop overlay
+    blur.wgsl  - Separable 9-tap Gaussian blur pre-pass for clarity/dehaze
+  lensfun/
+    sample-lenses.xml - Bundled Lensfun profile data
 docs/
   README.md - Docs index and entry point
   architecture/
@@ -118,6 +121,8 @@ docs/
   reviews/
     README.md - Review artifacts and summaries
 ```
+
+At runtime the app also maintains two repo-local data directories (gitignored): `decoded-cache/` for persisted decoded RAW/SVG images and `local-edits/` for baked committed-edit copies.
 
 The flat `docs/ARCHITECTURE.md` file is a temporary compatibility shim for older references. New content belongs in the canonical paths above.
 
