@@ -54,7 +54,7 @@ Rust unit tests cover decode, navigation, viewer math, collections, edit logic, 
 ### Lint
 
 ```sh
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
 ### Format
@@ -70,7 +70,7 @@ cargo fmt           # Auto-format
 
    ```sh
    cargo fmt --check
-   cargo clippy -- -D warnings
+   cargo clippy --all-targets -- -D warnings
    cargo test
    ```
 

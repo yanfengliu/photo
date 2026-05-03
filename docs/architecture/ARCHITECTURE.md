@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-05-02
+> Last verified: 2026-05-03
 > Last updated by: claude
 
 ## System Overview
@@ -81,7 +81,8 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 | GPU | wgpu | 0.19 | Via iced re-export |
 | Shader | WGSL | - | `assets/shaders/image.wgsl` |
 | Image decode | image crate | 0.24 | Raster decoding |
-| RAW decode | rawler | 0.7 | Embedded preview extraction plus staged full-resolution RAW development |
+| Image decode (v2) | image (aliased `image25`) | 0.25 | Used by `decode.rs` (`use image25::DynamicImage as RawDynamicImage`) for RAW thumbnail/preview construction; coexists with the 0.24 `image` crate |
+| RAW decode | rawler | 0.7.2 | Embedded preview extraction plus staged full-resolution RAW development |
 | JPEG thumbnails | jpeg-decoder | 0.3 | Fast thumbnail downscaling |
 | SVG | resvg | 0.44 | CPU rasterization before upload |
 | File dialogs | rfd | 0.15 | Async file/folder pickers |
