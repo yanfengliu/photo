@@ -5,6 +5,16 @@ Keep this file short, current, and actionable.
 Note: entries dated before 2026-05-01 predate the evidence-anchor-table mandate in AGENTS.md and are grandfathered as-is; their anchors live in the dated devlog entries. Every new lesson must start with the evidence-anchor table.
 
 ## Active Lessons
+- 2026-06-10 - Tests that rewrite a file with same-length content and expect cache invalidation are racing the filesystem timestamp tick: the persisted decode cache's metadata fast path treats same-size+same-mtime as unchanged by design, so on a fast machine both writes can land in one Windows file-time tick and the change is invisible. Make such tests force an observable change (verify the mtime advanced after the rewrite, retrying briefly) instead of assuming any write changes metadata — and expect this class of latent assumption to surface exactly when something else gets faster (here, the optimized-dependency test speedup).
+
+  | Field | Value |
+  |---|---|
+  | Surfaced by | GitHub Actions CI run 27305008375 (first run after the v0.1.4 test speedup); local suite passed all day |
+  | Reviewer findings | n/a — CI-caught, not reviewer-caught |
+  | Fix commit | (commit H, v0.1.6) |
+  | Test added | decode::tests::rewrite_with_distinct_mtime_makes_same_size_rewrites_observable |
+  | Behavior delta | before: `cached_full_image_redocodes_when_source_file_changes` flaked on fast runners (decode_calls 1 vs 2 — stale cached pixels served after a real content change in the test scenario); after: the rewrite is guaranteed metadata-observable and the suite is deterministic at 299 tests |
+
 - 2026-06-10 - `cargo fix` is not reliably multi-target-aware: after the main.rs module split it removed imports (`use repo::*;`, `std::io::{BufWriter, Write}`, `std::fs::File`) that only the `cfg(test)` target used, leaving the bin target green while `cargo test` failed with 17 resolution errors. After any `cargo fix` run, immediately re-verify with `cargo check --all-targets`, and prefer `#[cfg(test)]`-gated imports for test-only names so the two targets cannot drift.
 
   | Field | Value |

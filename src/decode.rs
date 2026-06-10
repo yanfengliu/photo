@@ -2146,6 +2146,41 @@ mod tests {
         assert_eq!(second.file_size, std::fs::metadata(&source).unwrap().len());
     }
 
+    /// Rewrites `path` and guarantees the change is observable through file
+    /// metadata. The persisted cache's metadata fast path treats same-size,
+    /// same-mtime files as unchanged by design, and Windows file times tick
+    /// coarsely enough that a fast test can rewrite within one tick (exposed
+    /// on CI once optimized dev dependencies made the suite fast).
+    fn rewrite_with_distinct_mtime(path: &Path, contents: &[u8]) {
+        let before = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        for _ in 0..100 {
+            std::fs::write(path, contents).unwrap();
+            let after = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            if after != before {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        panic!(
+            "file mtime did not advance after rewriting {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn rewrite_with_distinct_mtime_makes_same_size_rewrites_observable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.svg");
+        std::fs::write(&path, b"<svg>A</svg>").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        rewrite_with_distinct_mtime(&path, b"<svg>B</svg>");
+
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_ne!(before, after);
+        assert_eq!(std::fs::read(&path).unwrap(), b"<svg>B</svg>");
+    }
+
     #[test]
     fn cached_full_image_redocodes_when_source_file_changes() {
         let source_dir = tempfile::tempdir().unwrap();
@@ -2160,7 +2195,7 @@ mod tests {
         })
         .unwrap();
 
-        std::fs::write(&source, b"<svg>B</svg>").unwrap();
+        rewrite_with_distinct_mtime(&source, b"<svg>B</svg>");
 
         let second = load_or_decode_cached_full_image(&source, Some(cache_dir.path()), |_| {
             decode_calls.fetch_add(1, Ordering::SeqCst);

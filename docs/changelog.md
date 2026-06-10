@@ -2,6 +2,10 @@
 
 External-facing changes per version. Newest first. Dev-internal detail lives in `docs/devlog/`.
 
+## 0.1.6 — 2026-06-10
+
+Test-reliability release; no behavior changes. Fixed a CI-only flake in the persisted decode cache's same-size-rewrite test: the cache's metadata fast path intentionally treats same-size, same-mtime files as unchanged, and fast runners could rewrite a file within one Windows file-time tick, making the change invisible. The test now guarantees an observable mtime change before asserting invalidation, with a new regression covering the helper (suite is now 299 tests).
+
 ## 0.1.5 — 2026-06-10
 
 Security maintenance release; no behavior changes. Established the project's first `cargo audit` baseline and resolved its one finding: transitive `jxl-grid` 0.6.1 → 0.6.2 (RUSTSEC-2026-0151, out-of-bounds writes on 32-bit platforms — low impact for this 64-bit-only app, fixed anyway). Five informational warnings remain on transitive crates (`instant`/`paste` unmaintained, `lru`/`rand` unsound advisories) with no compatible upstream fixes; tracked in the devlog.
