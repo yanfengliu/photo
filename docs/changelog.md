@@ -2,6 +2,10 @@
 
 External-facing changes per version. Newest first. Dev-internal detail lives in `docs/devlog/`.
 
+## 0.1.3 — 2026-06-10
+
+Internal restructuring release; no behavior changes. The 9,006-line `src/main.rs` monolith is split into focused modules: an `app/` module (state/messages, update loop, view composition, tests), plus `theme`, `widgets`, `detail_load`, `session_cache`, `local_edits`, `loading`, `library`, and `repo` modules; `main.rs` is now a 31-line entry point. All 298 tests pass unchanged; the GPU pipeline, edit math, and on-disk formats are untouched.
+
 ## 0.1.2 — 2026-06-10
 
 Build reproducibility release; no behavior changes. Source builds now pin rustc 1.94.0 via `rust-toolchain.toml` (with clippy/rustfmt components), `Cargo.lock` is committed so builds resolve identical dependencies, and GitHub Actions CI now runs the four quality gates (fmt, clippy `-D warnings`, test, build) on every push and pull request on a Windows runner.

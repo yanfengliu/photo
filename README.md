@@ -92,13 +92,22 @@ cargo fmt           # Auto-format
 
 ```
 src/
-  main.rs    - App state, message loop, tab routing, keyboard/event handling, staged Detail-load orchestration, baked local-edit persistence
+  main.rs    - Thin entry point (iced application wiring)
+  app/       - App state + Message (mod.rs), message loop and event handling (update.rs), view composition (view.rs), app-level tests (tests.rs)
   viewer.rs  - GPU shader pipeline for image rendering (zoom, pan, crop overlay, texture upload)
   decode.rs  - Image decoding (raster via image crate, RAW via rawler, SVG via resvg) plus persisted decoded-image cache
   collection.rs - Collection CRUD and JSON persistence
   edit.rs    - Edit state, undo/redo, and CPU-side save pipeline
   lens.rs    - Lensfun XML parsing, EXIF reading, and lens profile lookup
   nav.rs     - Directory scanning and file navigation
+  detail_load.rs - Staged Detail-load lifecycle state
+  session_cache.rs - Source fingerprinting + in-session full-image cache
+  local_edits.rs - Baked local-edit persistence (repo-local cache files)
+  loading.rs - Full-image and library-thumbnail base loading
+  library.rs - Library path persistence and dialog extensions
+  repo.rs    - Repo-root discovery
+  theme.rs   - Color palette and widget styles
+  widgets.rs - Reusable widget builders and grid layout math
 assets/
   shaders/
     image.wgsl - Fragment shader for the textured quad with adjustments, lens correction, and crop overlay

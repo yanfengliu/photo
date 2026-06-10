@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-05-02
+> Last verified: 2026-06-10
 > Last updated by: claude
 
 ## System Overview
@@ -9,7 +9,19 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 
 ## Component Map
 
-- `src/main.rs`: iced application state, message loop, tab routing, keyboard/event handling, `DetailLoadState`-based staged Detail-load orchestration, crop/rotation tool wiring, view composition, collection sidebar wiring, local library persistence, session edit history, and repo-local baked local-edit persistence.
+- `src/main.rs`: thin entry point — iced application wiring only.
+- `src/app/mod.rs`: `App` state, `Message` enum, shared UI types (`Tab`, `SliderKind`, `CropAspect`, context-menu/drag state, `SaveRequest`), lifecycle (`new`/`title`/`theme`/`subscription`), shared state accessors, zoom/fit math, and slider-field mapping.
+- `src/app/update.rs`: the message loop — `update()`, viewer/window/keyboard event handlers, library mutations, import cache-warm queue, local-edit persist orchestration, and staged Detail-load task wiring.
+- `src/app/view.rs`: view composition — tab bar, library and collection grids, detail editor panel, status bar, context-menu/drag overlays, and adjustment-uniform building.
+- `src/app/tests.rs`: app-level regression tests (still hosts tests for extracted subsystems; redistributing them to their home modules is a tracked follow-up).
+- `src/theme.rs`: color palette constants and iced style functions.
+- `src/widgets.rs`: reusable widget builders — rotation buttons, thumbnail slots, thumbnail grid layout math, section labels/dividers, context-menu items.
+- `src/detail_load.rs`: `DetailLoadStage`/`DetailLoadState` staged Detail-load lifecycle.
+- `src/session_cache.rs`: `SourceFileFingerprint` validation plus the in-memory same-session full-image cache.
+- `src/local_edits.rs`: repo-local baked local-edit persistence — cache file format, paired full/thumbnail generations, validation, thumbnail repair, and the persist task core.
+- `src/loading.rs`: `LoadedFullImage`/`BaseImageSource` types plus full-image and library-thumbnail base loading that prefers valid baked local edits.
+- `src/library.rs`: `LibraryEntry`, `library.txt` persistence, and file-dialog extension wiring.
+- `src/repo.rs`: photo repo-root discovery and its test override (decode.rs keeps a pre-existing duplicate; dedup is a tracked follow-up).
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
 - `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
 - `assets/shaders/blur.wgsl`: 9-tap separable Gaussian blur pre-pass for clarity/dehaze.
@@ -46,7 +58,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 3. `ImageCanvas` sends uniforms to `prepare()`, which writes the GPU uniform buffer.
 4. The shader applies the adjustments per pixel and dims outside the active crop overlay while crop mode is active.
 5. `UndoHistory::commit()` stores committed states on slider release and crop/rotation commits.
-6. After each committed edit, `main.rs` captures the current visible render as a snapshot, uses that same snapshot to refresh Library immediately, and bakes it into repo-local files under `local-edits/`, writing both a full-size local copy and a thumbnail-sized copy keyed by the source path.
+6. After each committed edit, `app/update.rs` captures the current visible render as a snapshot, uses that same snapshot to refresh Library immediately, and bakes it through `local_edits.rs` into repo-local files under `local-edits/`, writing both a full-size local copy and a thumbnail-sized copy keyed by the source path.
 7. The persisted full and thumbnail copies share a generation id and source metadata header so partial writes or stale source rewrites fail closed instead of silently reopening mismatched pixels.
 8. Reopening an image in a later session prefers that baked local copy as the new base image, while undo/redo stacks remain memory-only and are not restored after restart.
 9. `apply_all()` mirrors the shader math at full resolution during save, and the save path applies crop bounds after rotation so preview and export stay aligned.
@@ -67,7 +79,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - Only `edit.rs` owns adjustment math and undo/redo history.
 - Only `lens.rs` parses Lensfun XML and reads EXIF data.
 - Only `collection.rs` manages collection persistence and CRUD.
-- Only `main.rs` manages library-path persistence, session edit histories, the in-memory same-session full-image cache, and repo-local baked local-edit persistence.
+- Only `library.rs` manages library-path persistence; only `session_cache.rs` owns the in-memory same-session full-image cache; only `local_edits.rs` reads/writes the repo-local `local-edits/` directory; the `app/` module owns session edit histories and all orchestration.
 - Only `decode.rs` reads/writes the repo-local `decoded-cache/` directory.
 - File dialogs go through `rfd::AsyncFileDialog`.
 - Image decoding is always async through `tokio::task::spawn_blocking`.
@@ -103,7 +115,7 @@ flowchart TD
         Picker([File / folder dialog])
     end
 
-    subgraph UI[main.rs]
+    subgraph UI[app module]
         App{App Coordinator}
         Library[Library Tab]
         Detail[Detail Tab]
