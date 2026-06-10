@@ -1,6 +1,6 @@
 [package]
 name = "photo"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [dependencies]
@@ -25,6 +25,11 @@ image25 = { package = "image", version = "0.25", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+
+# Dependencies (rawler especially) are pathologically slow unoptimized; photo
+# itself stays at opt-level 0 for debuggability and fast incremental builds.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = 3

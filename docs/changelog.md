@@ -2,6 +2,10 @@
 
 External-facing changes per version. Newest first. Dev-internal detail lives in `docs/devlog/`.
 
+## 0.1.4 — 2026-06-10
+
+Developer-experience release; no behavior changes. Dev/test builds now compile dependencies at `opt-level = 2` (the crate itself stays unoptimized for debugging), which cuts the test suite from ~105s to ~14s — rawler's RAW develop path was pathologically slow unoptimized, with single tests taking 100 seconds.
+
 ## 0.1.3 — 2026-06-10
 
 Internal restructuring release; no behavior changes. The 9,006-line `src/main.rs` monolith is split into focused modules: an `app/` module (state/messages, update loop, view composition, tests), plus `theme`, `widgets`, `detail_load`, `session_cache`, `local_edits`, `loading`, `library`, and `repo` modules; `main.rs` is now a 31-line entry point. All 298 tests pass unchanged; the GPU pipeline, edit math, and on-disk formats are untouched.
