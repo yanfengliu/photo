@@ -1,8 +1,5 @@
-# Reviews
+# Reviews (deprecated location)
 
-This directory is for review artifacts, reviewer summaries, response notes, and other short-lived review outputs.
+Review artifacts now live under `docs/threads/` per the AGENTS.md Code review section: in-flight work under `docs/threads/current/<objective>/<date>/<iteration_number>/REVIEW.md`, completed work under `docs/threads/done/<objective>/`.
 
-Suggested pattern:
-- One file per task or review round.
-- Use date-stamped filenames when possible.
-- Keep the final, durable lessons in `docs/learning/lessons.md` and the canonical task log in `docs/devlog/`.
+This directory predates that convention and is kept only so old references resolve. Do not add new artifacts here. Durable lessons go to `docs/learning/lessons.md`; the canonical task log is `docs/devlog/`.

@@ -2,6 +2,8 @@
 
 Keep this file short, current, and actionable.
 
+Note: entries dated before 2026-05-01 predate the evidence-anchor-table mandate in AGENTS.md and are grandfathered as-is; their anchors live in the dated devlog entries. Every new lesson must start with the evidence-anchor table.
+
 ## Active Lessons
 - 2026-04-24 - Don't claim a tuning is "Lightroom-style" in commits or devlogs without a published Adobe reference — Lightroom's Basic-panel math is proprietary and has changed across Process Versions. Cite darktable or a specific paper instead: darktable's `basicadj.c` defines the power-law-in-linear-RGB contrast around middle gray 0.1842, and `toneequal.c` defines the Gaussian-in-EV tone bands (σ = √2, ±2 EV clamp). When porting darktable math, accept its intentional design choices — e.g. the wide Gaussian tails in the tone equalizer are a smooth-overlap feature, not a leakage bug, so tests should pin peak-position rather than "no effect outside the peak".
 - 2026-04-24 - If a photographer-facing contrast or tone-zone slider "feels unnatural", check the space it operates in before changing the formula. A sigmoid pivot at linear 0.5 lives at L* ≈ 76 (bright midtones), not middle gray; apply the curve in gamma-2.2 perceptual space and place the pivot at L_p 0.5. Similarly, tone-zone centers should be placed in perceptual space with Lightroom-style semantics (Blacks near-black only, Shadows bell ~L_p 0.32, Highlights bell ~L_p 0.72, Whites near-white only) so adjacent zones don't overlap or leak into midtones. Test pixels must sit inside each new zone's peak — a borderline pixel will produce a small but technically-passing response that masks a semantic mismatch.
