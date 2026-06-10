@@ -59,7 +59,6 @@ pub(crate) fn display_dimensions_for_edit_state(
     edit::cropped_dimensions(display_w, display_h, crop)
 }
 
-/// Draws a thumbnail inside a fixed square slot using `ContentFit::Contain`.
 pub(crate) fn load_library_thumbnail_base_image(
     path: &Path,
     max_dim: u32,

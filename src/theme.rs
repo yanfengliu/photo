@@ -145,7 +145,3 @@ pub(crate) fn context_menu_button_style(_theme: &Theme, status: button::Status) 
         shadow: Default::default(),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------

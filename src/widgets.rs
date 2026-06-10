@@ -82,10 +82,7 @@ impl ThumbnailGridLayout {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
+/// Draws a thumbnail inside a fixed square slot using `ContentFit::Contain`.
 pub(crate) fn thumbnail_slot_with_renderer<'a, RendererT>(
     handle: ImageHandle,
     slot_size: f32,
@@ -110,10 +107,6 @@ where
 pub(crate) fn thumbnail_slot(handle: ImageHandle, slot_size: f32) -> Element<'static, Message> {
     thumbnail_slot_with_renderer::<iced::Renderer>(handle, slot_size)
 }
-
-// ---------------------------------------------------------------------------
-// Application state
-// ---------------------------------------------------------------------------
 
 pub(crate) fn section_label(title: &str) -> Element<'_, Message> {
     container(text(title).size(10).color(TEXT_DIM))
