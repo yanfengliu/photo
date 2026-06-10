@@ -2,6 +2,10 @@
 
 External-facing changes per version. Newest first. Dev-internal detail lives in `docs/devlog/`.
 
+## 0.1.5 — 2026-06-10
+
+Security maintenance release; no behavior changes. Established the project's first `cargo audit` baseline and resolved its one finding: transitive `jxl-grid` 0.6.1 → 0.6.2 (RUSTSEC-2026-0151, out-of-bounds writes on 32-bit platforms — low impact for this 64-bit-only app, fixed anyway). Five informational warnings remain on transitive crates (`instant`/`paste` unmaintained, `lru`/`rand` unsound advisories) with no compatible upstream fixes; tracked in the devlog.
+
 ## 0.1.4 — 2026-06-10
 
 Developer-experience release; no behavior changes. Dev/test builds now compile dependencies at `opt-level = 2` (the crate itself stays unoptimized for debugging), which cuts the test suite from ~105s to ~14s — rawler's RAW develop path was pathologically slow unoptimized, with single tests taking 100 seconds.
