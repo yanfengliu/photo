@@ -1520,8 +1520,15 @@ mod tests {
         let original = dir.path().join("frame.dng");
         let pixels = [32, 64, 96, 255];
 
-        let out =
-            save_edited_image(&original, &pixels, 1, 1, &EditState::default(), LensCorrection::default()).unwrap();
+        let out = save_edited_image(
+            &original,
+            &pixels,
+            1,
+            1,
+            &EditState::default(),
+            LensCorrection::default(),
+        )
+        .unwrap();
 
         assert_eq!(out.extension().and_then(|ext| ext.to_str()), Some("png"));
         assert!(out.exists());
@@ -1535,7 +1542,8 @@ mod tests {
         let mut state = EditState::default();
         state.rotate_clockwise();
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out =
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1552,7 +1560,8 @@ mod tests {
         let mut state = EditState::default();
         state.rotate_counterclockwise();
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out =
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1570,7 +1579,8 @@ mod tests {
         state.rotate_clockwise();
         state.rotate_clockwise();
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out =
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 2);
@@ -1591,7 +1601,8 @@ mod tests {
             ..EditState::default()
         };
 
-        let out = save_edited_image(&original, &pixels, 2, 2, &state, LensCorrection::default()).unwrap();
+        let out =
+            save_edited_image(&original, &pixels, 2, 2, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1609,7 +1620,8 @@ mod tests {
         state.rotate_clockwise();
         state.crop = Some(CropRect::new(0.0, 0.0, 1.0, 0.5));
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out =
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1627,7 +1639,8 @@ mod tests {
             ..EditState::default()
         };
 
-        let out = save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out =
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 2);
@@ -1777,8 +1790,8 @@ mod tests {
         for y in 0..SIZE {
             for x in 0..SIZE {
                 let idx = ((y * SIZE + x) * 4) as usize;
-                let r = ((x * 255 / (SIZE - 1)) as u8).min(255);
-                let g = ((y * 255 / (SIZE - 1)) as u8).min(255);
+                let r = (x * 255 / (SIZE - 1)) as u8;
+                let g = (y * 255 / (SIZE - 1)) as u8;
                 let b = ((x + y) * 255 / (2 * (SIZE - 1))) as u8;
                 pixels[idx] = r;
                 pixels[idx + 1] = g;
@@ -1787,8 +1800,10 @@ mod tests {
             }
         }
 
-        let mut state = EditState::default();
-        state.lens_correction = true;
+        let state = EditState {
+            lens_correction: true,
+            ..Default::default()
+        };
 
         let identity = LensCorrection::default();
         let out_identity = render_edited_image(&pixels, SIZE, SIZE, &state, identity);
@@ -1801,8 +1816,7 @@ mod tests {
             tca_r: 1.0,
             tca_b: 1.0,
         };
-        let out_distortion =
-            render_edited_image(&pixels, SIZE, SIZE, &state, with_distortion);
+        let out_distortion = render_edited_image(&pixels, SIZE, SIZE, &state, with_distortion);
         assert_ne!(
             out_identity.pixels, out_distortion.pixels,
             "non-identity lens distortion should change saved pixels"
@@ -1846,8 +1860,8 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let idx = ((y * w + x) * 4) as usize;
-                pixels[idx] = ((x * 255 / w.max(1)) as u8).min(255);
-                pixels[idx + 1] = ((y * 255 / h.max(1)) as u8).min(255);
+                pixels[idx] = (x * 255 / w.max(1)) as u8;
+                pixels[idx + 1] = (y * 255 / h.max(1)) as u8;
                 pixels[idx + 2] = 128;
                 pixels[idx + 3] = 255;
             }
@@ -1950,8 +1964,10 @@ mod tests {
         // giving a negative luminance. Without a guard, apply_contrast short-circuits
         // (lum <= 0 returns identity) and the contrast slider stops affecting the
         // output. Guard the intermediate so contrast remains visible.
-        let mut base = EditState::default();
-        base.temperature = -60.0;
+        let base = EditState {
+            temperature: -60.0,
+            ..Default::default()
+        };
         let matrix = temperature_tint_matrix(base.temperature, base.tint);
 
         let no_contrast = base;
@@ -1959,14 +1975,7 @@ mod tests {
         with_contrast.contrast = 50.0;
 
         let pixel = [0, 0, 200, 255];
-        let out_plain = apply_all(
-            pixel,
-            &no_contrast,
-            &matrix,
-            [0.0; 3],
-            [0.5, 0.5],
-            [0.0; 3],
-        );
+        let out_plain = apply_all(pixel, &no_contrast, &matrix, [0.0; 3], [0.5, 0.5], [0.0; 3]);
         let out_contrast = apply_all(
             pixel,
             &with_contrast,

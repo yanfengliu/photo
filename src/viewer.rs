@@ -1316,12 +1316,16 @@ mod tests {
         let default = AdjustmentUniforms::default();
         assert!(!default.needs_blur());
 
-        let mut clarity = AdjustmentUniforms::default();
-        clarity.clarity = 1.0;
+        let clarity = AdjustmentUniforms {
+            clarity: 1.0,
+            ..Default::default()
+        };
         assert!(clarity.needs_blur());
 
-        let mut dehaze = AdjustmentUniforms::default();
-        dehaze.dehaze = -1.0;
+        let dehaze = AdjustmentUniforms {
+            dehaze: -1.0,
+            ..Default::default()
+        };
         assert!(dehaze.needs_blur());
     }
 

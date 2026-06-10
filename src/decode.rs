@@ -249,11 +249,7 @@ fn decode_embedded_image_kind(
     };
 
     match result {
-        Ok(Some(image)) => Ok(Some(raw_dynamic_image_to_rgba(
-            image,
-            max_dim,
-            orientation,
-        ))),
+        Ok(Some(image)) => Ok(Some(raw_dynamic_image_to_rgba(image, max_dim, orientation))),
         Ok(None) => Ok(None),
         Err(e) => Err(format!("Failed to extract RAW {}: {e}", kind.label())),
     }
@@ -295,10 +291,10 @@ fn decode_image_cache_dir(path: &Path) -> Option<PathBuf> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        return match override_dir {
+        match override_dir {
             Some(cache_dir) => cache_dir,
             None => decoded_cache_dir_for(path),
-        };
+        }
     }
 
     #[cfg(not(test))]
@@ -972,21 +968,19 @@ fn decode_raw(
         let embedded_orientation =
             embedded_raw_orientation(decoder, rawfile, params, metadata_orientation);
 
-        let mut take_embedded_image = |kind| {
-            match decode_embedded_image_kind(
-                decoder,
-                rawfile,
-                params,
-                max_dim,
-                kind,
-                embedded_orientation,
-            ) {
-                Ok(Some(image)) => Some(image),
-                Ok(None) => None,
-                Err(e) => {
-                    last_optional_error = Some(e);
-                    None
-                }
+        let mut take_embedded_image = |kind| match decode_embedded_image_kind(
+            decoder,
+            rawfile,
+            params,
+            max_dim,
+            kind,
+            embedded_orientation,
+        ) {
+            Ok(Some(image)) => Some(image),
+            Ok(None) => None,
+            Err(e) => {
+                last_optional_error = Some(e);
+                None
             }
         };
 
@@ -1055,22 +1049,14 @@ fn decode_raw_embedded_preview(
     with_raw_decoder(path, |rawfile, decoder, params| {
         let mut last_error: Option<String> = None;
         let metadata_orientation = raw_orientation_from_metadata(decoder, rawfile, params);
-        let orientation =
-            embedded_raw_orientation(decoder, rawfile, params, metadata_orientation);
+        let orientation = embedded_raw_orientation(decoder, rawfile, params, metadata_orientation);
 
         for kind in [
             EmbeddedImageKind::FullImage,
             EmbeddedImageKind::Preview,
             EmbeddedImageKind::Thumbnail,
         ] {
-            match decode_embedded_image_kind(
-                decoder,
-                rawfile,
-                params,
-                max_dim,
-                kind,
-                orientation,
-            ) {
+            match decode_embedded_image_kind(decoder, rawfile, params, max_dim, kind, orientation) {
                 Ok(Some(image)) => return Ok(Some(image)),
                 Ok(None) => {}
                 Err(e) => last_error = Some(e),
@@ -1171,14 +1157,11 @@ mod tests {
     }
 
     fn raw_dynamic_image_from_pixels(w: u32, h: u32, pixels: &[[u8; 3]]) -> RawDynamicImage {
-        let pixels: Vec<u8> = pixels.iter().copied().flat_map(|rgb| rgb).collect();
+        let pixels: Vec<u8> = pixels.iter().copied().flatten().collect();
         RawDynamicImage::ImageRgb8(image25::RgbImage::from_raw(w, h, pixels).unwrap())
     }
 
-    fn oriented_image_data(
-        image: &ImageData,
-        orientation: Orientation,
-    ) -> (Vec<u8>, u32, u32) {
+    fn oriented_image_data(image: &ImageData, orientation: Orientation) -> (Vec<u8>, u32, u32) {
         let image = RawDynamicImage::ImageRgba8(
             image25::RgbaImage::from_raw(image.width, image.height, image.pixels.clone()).unwrap(),
         );
@@ -1195,9 +1178,8 @@ mod tests {
         full_rgb: [u8; 3],
     ) -> PathBuf {
         let path = dir.join(name);
-        let pixels: Vec<u8> = std::iter::repeat(full_rgb)
-            .take((w * h) as usize)
-            .flat_map(|rgb| rgb)
+        let pixels: Vec<u8> = std::iter::repeat_n(full_rgb, (w * h) as usize)
+            .flatten()
             .collect();
 
         let file = File::create(&path).unwrap();
@@ -1229,9 +1211,8 @@ mod tests {
         preview_rgb: [u8; 3],
     ) -> PathBuf {
         let path = dir.join(name);
-        let pixels: Vec<u8> = std::iter::repeat(raw_rgb)
-            .take((w * h) as usize)
-            .flat_map(|rgb| rgb)
+        let pixels: Vec<u8> = std::iter::repeat_n(raw_rgb, (w * h) as usize)
+            .flatten()
             .collect();
         let thumbnail = RawDynamicImage::ImageRgb8(image25::RgbImage::from_pixel(
             w,
@@ -1278,9 +1259,8 @@ mod tests {
         thumbnail_rgb: [u8; 3],
     ) -> PathBuf {
         let path = dir.join(name);
-        let pixels: Vec<u8> = std::iter::repeat(raw_rgb)
-            .take((w * h) as usize)
-            .flat_map(|rgb| rgb)
+        let pixels: Vec<u8> = std::iter::repeat_n(raw_rgb, (w * h) as usize)
+            .flatten()
             .collect();
         let thumbnail = RawDynamicImage::ImageRgb8(image25::RgbImage::from_pixel(
             w,
@@ -1311,23 +1291,18 @@ mod tests {
     fn create_test_raw_dng_with_oriented_preview(
         dir: &Path,
         name: &str,
-        raw_w: u32,
-        raw_h: u32,
-        preview_w: u32,
-        preview_h: u32,
+        raw_size: (u32, u32),
+        preview_size: (u32, u32),
         orientation: Orientation,
         preview_pixels: &[[u8; 3]],
     ) -> PathBuf {
+        let (raw_w, raw_h) = raw_size;
+        let (preview_w, preview_h) = preview_size;
         let path = dir.join(name);
-        let raw_pixels: Vec<u8> = std::iter::repeat([16, 96, 32])
-            .take((raw_w * raw_h) as usize)
-            .flat_map(|rgb| rgb)
+        let raw_pixels: Vec<u8> = std::iter::repeat_n([16, 96, 32], (raw_w * raw_h) as usize)
+            .flatten()
             .collect();
-        let preview_pixels: Vec<u8> = preview_pixels
-            .iter()
-            .copied()
-            .flat_map(|rgb| rgb)
-            .collect();
+        let preview_pixels: Vec<u8> = preview_pixels.iter().copied().flatten().collect();
         let preview = RawDynamicImage::ImageRgb8(
             image25::RgbImage::from_raw(preview_w, preview_h, preview_pixels).unwrap(),
         );
@@ -1626,20 +1601,16 @@ mod tests {
         let normal_path = create_test_raw_dng_with_oriented_preview(
             dir.path(),
             "preview-normal.dng",
-            24,
-            12,
-            2,
-            1,
+            (24, 12),
+            (2, 1),
             Orientation::Normal,
             &[[255, 0, 0], [0, 255, 0]],
         );
         let path = create_test_raw_dng_with_oriented_preview(
             dir.path(),
             "preview-rotated.dng",
-            24,
-            12,
-            2,
-            1,
+            (24, 12),
+            (2, 1),
             Orientation::Rotate90,
             &[[255, 0, 0], [0, 255, 0]],
         );
@@ -1657,20 +1628,16 @@ mod tests {
         let normal_path = create_test_raw_dng_with_oriented_preview(
             dir.path(),
             "preview-flip-normal.dng",
-            24,
-            12,
-            2,
-            1,
+            (24, 12),
+            (2, 1),
             Orientation::Normal,
             &[[255, 0, 0], [0, 255, 0]],
         );
         let path = create_test_raw_dng_with_oriented_preview(
             dir.path(),
             "preview-flip-horizontal.dng",
-            24,
-            12,
-            2,
-            1,
+            (24, 12),
+            (2, 1),
             Orientation::HorizontalFlip,
             &[[255, 0, 0], [0, 255, 0]],
         );
@@ -1833,20 +1800,16 @@ mod tests {
         let normal_path = create_test_raw_dng_with_oriented_preview(
             dir.path(),
             "embedded-preview-normal.dng",
-            24,
-            12,
-            2,
-            1,
+            (24, 12),
+            (2, 1),
             Orientation::Normal,
             &[[255, 0, 0], [0, 255, 0]],
         );
         let path = create_test_raw_dng_with_oriented_preview(
             dir.path(),
             "embedded-preview-rotated.dng",
-            24,
-            12,
-            2,
-            1,
+            (24, 12),
+            (2, 1),
             Orientation::Rotate90,
             &[[255, 0, 0], [0, 255, 0]],
         );
@@ -1907,12 +1870,7 @@ mod tests {
             raw_dynamic_image_from_pixels(
                 2,
                 2,
-                &[
-                    [255, 0, 0],
-                    [0, 255, 0],
-                    [0, 0, 255],
-                    [255, 255, 0],
-                ],
+                &[[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]],
             ),
             2,
             Orientation::Rotate90,
@@ -1931,12 +1889,7 @@ mod tests {
             raw_dynamic_image_from_pixels(
                 2,
                 2,
-                &[
-                    [255, 0, 0],
-                    [0, 255, 0],
-                    [0, 0, 255],
-                    [255, 255, 0],
-                ],
+                &[[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]],
             ),
             2,
             Orientation::Transpose,
@@ -2110,7 +2063,7 @@ mod tests {
 
         with_default_test_decode_cache_dir(|| {
             with_test_photo_repo_root(Some(Some(repo_root.path())), || {
-                assert_eq!(warm_persisted_decoded_cache(&svg).unwrap(), true);
+                assert!(warm_persisted_decoded_cache(&svg).unwrap());
                 assert!(cache_file.exists());
             });
         });
@@ -2121,7 +2074,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let png = create_test_png(dir.path(), "frame.png", 8, 4);
 
-        assert_eq!(warm_persisted_decoded_cache(&png).unwrap(), false);
+        assert!(!warm_persisted_decoded_cache(&png).unwrap());
     }
 
     #[test]

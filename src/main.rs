@@ -91,13 +91,11 @@ static TEST_PHOTO_REPO_ROOT_OVERRIDE: std::sync::OnceLock<
 static TEST_PHOTO_REPO_ROOT_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
-static TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_HOOK: std::sync::OnceLock<
-    Mutex<Option<Box<dyn FnOnce() + Send>>>,
-> = std::sync::OnceLock::new();
+type TestHookCell = std::sync::OnceLock<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 #[cfg(test)]
-static TEST_LOCAL_EDIT_THUMBNAIL_FAST_PATH_HOOK: std::sync::OnceLock<
-    Mutex<Option<Box<dyn FnOnce() + Send>>>,
-> = std::sync::OnceLock::new();
+static TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_HOOK: TestHookCell = TestHookCell::new();
+#[cfg(test)]
+static TEST_LOCAL_EDIT_THUMBNAIL_FAST_PATH_HOOK: TestHookCell = TestHookCell::new();
 #[cfg(test)]
 static TEST_LOCAL_EDIT_THUMBNAIL_REPAIR_WRITE_ERROR: std::sync::OnceLock<Mutex<Option<String>>> =
     std::sync::OnceLock::new();
@@ -4874,9 +4872,7 @@ fn load_full_image(
     })
 }
 
-fn persist_local_edit(
-    request: &LocalEditPersistRequest,
-) -> Result<Option<Arc<ImageData>>, String> {
+fn persist_local_edit(request: &LocalEditPersistRequest) -> Result<Option<Arc<ImageData>>, String> {
     if request.state.is_default() && matches!(request.base_source, BaseImageSource::Original) {
         remove_persisted_local_edit(&request.path)?;
         return Ok(None);
@@ -5693,7 +5689,8 @@ mod tests {
             let loaded = load_persisted_local_edit_image(&image_path)
                 .unwrap()
                 .expect("persisted local edit image");
-            let expected = edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
+            let expected =
+                edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
             assert_eq!(loaded.width, expected.width);
             assert_eq!(loaded.height, expected.height);
             assert_eq!(loaded.pixels, expected.pixels);
@@ -5724,7 +5721,8 @@ mod tests {
             let thumbnail =
                 load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
                     .unwrap();
-            let expected = edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
+            let expected =
+                edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
             assert_eq!(thumbnail.width, expected.width);
             assert_eq!(thumbnail.height, expected.height);
             assert_eq!(thumbnail.pixels, expected.pixels);
@@ -5738,11 +5736,22 @@ mod tests {
         let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
         write_test_png(&image_path, 2, 1, &pixels);
 
-        let original =
-            edit::render_edited_image(&pixels, 2, 1, &edit::EditState::default(), edit::LensCorrection::default());
+        let original = edit::render_edited_image(
+            &pixels,
+            2,
+            1,
+            &edit::EditState::default(),
+            edit::LensCorrection::default(),
+        );
         let mut rotated_state = edit::EditState::default();
         rotated_state.rotate_clockwise();
-        let rotated = edit::render_edited_image(&pixels, 2, 1, &rotated_state, edit::LensCorrection::default());
+        let rotated = edit::render_edited_image(
+            &pixels,
+            2,
+            1,
+            &rotated_state,
+            edit::LensCorrection::default(),
+        );
 
         with_test_photo_repo_root(repo_root.path(), || {
             let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
@@ -6326,8 +6335,10 @@ mod tests {
         write_test_png(&image_path, 1, 1, &pixels);
 
         with_test_photo_repo_root(repo_root.path(), || {
-            let mut prior_state = edit::EditState::default();
-            prior_state.exposure = 1.5;
+            let prior_state = edit::EditState {
+                exposure: 1.5,
+                ..Default::default()
+            };
             persist_test_local_edit(
                 &image_path,
                 test_image_from_pixels(1, 1, &pixels),
@@ -7153,7 +7164,15 @@ mod tests {
         });
 
         let state = app.edit_histories.get(&path).unwrap().current;
-        let out = edit::save_edited_image(&original, &pixels, 2, 1, &state, edit::LensCorrection::default()).unwrap();
+        let out = edit::save_edited_image(
+            &original,
+            &pixels,
+            2,
+            1,
+            &state,
+            edit::LensCorrection::default(),
+        )
+        .unwrap();
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -7216,8 +7235,10 @@ mod tests {
         let path = repo_root.path().join("frame.png");
         write_test_png(&path, 3, 2, &patterned_rgba_pixels(3, 2));
 
-        let mut state = edit::EditState::default();
-        state.exposure = 1.0;
+        let state = edit::EditState {
+            exposure: 1.0,
+            ..Default::default()
+        };
 
         with_test_photo_repo_root(repo_root.path(), || {
             let _ = persist_local_edit(&LocalEditPersistRequest {
@@ -8003,7 +8024,9 @@ mod tests {
         assert_eq!(app.zoom, 1.0);
         assert_eq!(app.offset, [0.0, 0.0]);
         assert!(!app.crop_mode);
-        let request = app.current_save_request().expect("save request after reopen");
+        let request = app
+            .current_save_request()
+            .expect("save request after reopen");
         let saved = edit::save_edited_image(
             &request.path,
             &request.image.pixels,
@@ -8081,7 +8104,9 @@ mod tests {
         assert_eq!(app.zoom, 1.0);
         assert_eq!(app.offset, [0.0, 0.0]);
         assert!(!app.crop_mode);
-        let request = app.current_save_request().expect("save request after reopen");
+        let request = app
+            .current_save_request()
+            .expect("save request after reopen");
         let saved = edit::save_edited_image(
             &request.path,
             &request.image.pixels,
