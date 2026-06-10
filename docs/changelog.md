@@ -2,6 +2,10 @@
 
 External-facing changes per version. Newest first. Dev-internal detail lives in `docs/devlog/`.
 
+## 0.1.2 — 2026-06-10
+
+Build reproducibility release; no behavior changes. Source builds now pin rustc 1.94.0 via `rust-toolchain.toml` (with clippy/rustfmt components), `Cargo.lock` is committed so builds resolve identical dependencies, and GitHub Actions CI now runs the four quality gates (fmt, clippy `-D warnings`, test, build) on every push and pull request on a Windows runner.
+
 ## 0.1.1 — 2026-06-10
 
 Code hygiene release; no behavior changes. Restored the project's quality gates on rustc 1.94.0: applied rustfmt formatting (24 stale diffs in decode/edit/main) and fixed 26 clippy lints that newer toolchains flag (iterator `flatten`/`repeat_n` modernizations, struct-literal initialization in tests, a type alias for test hook cells, and a tidier test-DNG helper signature — all in test code except one cache-dir early-return cleanup). Validation: 298 tests pass, clippy `-D warnings` clean, fmt clean.
