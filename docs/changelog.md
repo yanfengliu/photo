@@ -4,7 +4,7 @@ External-facing changes per version. Newest first. Dev-internal detail lives in 
 
 ## 0.2.1 — 2026-06-10
 
-Interaction fix: pressing Escape while the crop tool is active now cancels cropping and stays on the image in Detail view (previously it fell through to the back-to-library navigation, landing on the empty-library screen when the image was opened directly). A crop drag in progress at the moment of cancellation is discarded — releasing the mouse afterwards no longer commits the abandoned selection. Escape's other meanings are unchanged and apply on the next press (dismiss menus, leave collection Detail, back to Library). Validation: 319 tests, including new app-level and viewer-level regressions for both the navigation and the mid-drag cancellation paths.
+Interaction fix: pressing Escape while the crop tool is active now cancels cropping and stays on the image in Detail view (previously it fell through to the back-to-library navigation, landing on the empty-library screen when the image was opened directly). A crop drag in progress at the moment of cancellation is discarded — releasing the mouse afterwards no longer commits the abandoned selection. Overlays still take priority (a visible context menu or rename field consumes Escape first); the navigation meanings (leave collection Detail, back to Library) apply on the press after the crop is cancelled. Validation: 319 tests, including new app-level and viewer-level regressions for both the navigation and the mid-drag cancellation paths.
 
 ## 0.2.0 — 2026-06-10
 

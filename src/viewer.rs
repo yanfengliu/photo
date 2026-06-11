@@ -568,7 +568,13 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
                 if state.crop_dragging {
                     if !self.crop_mode {
                         // Crop mode was cancelled mid-drag; drop the stale
-                        // selection instead of keeping it tracking.
+                        // selection instead of keeping it tracking. These
+                        // purge paths only run while crop mode is off, which
+                        // is safe today because re-entering crop mode
+                        // requires the toolbar click (forcing a purging
+                        // release first). If a keyboard shortcut for
+                        // ToggleCropMode is ever added, purge on re-entry
+                        // too, or a cancelled anchor could be resurrected.
                         state.crop_dragging = false;
                         state.crop_start = None;
                         state.crop_current = None;
@@ -1788,6 +1794,45 @@ mod tests {
             event.is_none(),
             "release after crop-mode cancellation must not commit a crop"
         );
+        assert!(!state.crop_dragging);
+        assert!(state.crop_start.is_none());
+        assert!(state.crop_current.is_none());
+    }
+
+    #[test]
+    fn crop_drag_is_purged_on_cursor_move_after_crop_mode_cancel() {
+        // Moving the mouse after a mid-drag cancellation must drop the stale
+        // drag state immediately (not only on release), so the crosshair
+        // cursor and selection tracking stop right away.
+        let mut crop_canvas = test_canvas(200, 100, 1.0);
+        crop_canvas.crop_mode = true;
+        let mut state = ViewerState::default();
+        let bounds = test_bounds();
+        let mut messages = Vec::new();
+        let mut shell = iced::advanced::Shell::new(&mut messages);
+
+        let _ = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &crop_canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(150.0, 80.0)),
+            &mut shell,
+        );
+        assert!(state.crop_dragging);
+
+        let plain_canvas = test_canvas(200, 100, 1.0);
+        let (_, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &plain_canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(220.0, 120.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(220.0, 120.0)),
+            &mut shell,
+        );
+        assert!(event.is_none());
         assert!(!state.crop_dragging);
         assert!(state.crop_start.is_none());
         assert!(state.crop_current.is_none());
