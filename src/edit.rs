@@ -104,18 +104,20 @@ impl CropRect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct EditState {
-    pub exposure: f32,    // -3.0 to +3.0 (stops)
-    pub contrast: f32,    // -50 to +50
+    // Sliders use Lightroom's UI conventions; the `*_amount` mapping
+    // functions below convert them to internal math amounts.
+    pub exposure: f32,    // -5.0 to +5.0 (EV)
+    pub contrast: f32,    // -100 to +100
     pub highlights: f32,  // -100 to +100
     pub shadows: f32,     // -100 to +100
     pub whites: f32,      // -100 to +100
     pub blacks: f32,      // -100 to +100
-    pub temperature: f32, // -60 to +60 (≈3200K..9800K via temperature_tint_matrix)
-    pub tint: f32,        // -60 to +60
+    pub temperature: f32, // -100 to +100 (≈3200K..9800K via temperature_kelvin)
+    pub tint: f32,        // -100 to +100 (±0.012 yd via tint_yd_shift)
     pub vibrance: f32,    // -100 to +100
-    pub saturation: f32,  // -50 to +50
-    pub clarity: f32,     // -50 to +50
-    pub dehaze: f32,      // -50 to +50
+    pub saturation: f32,  // -100 to +100 (-100 = grayscale)
+    pub clarity: f32,     // -100 to +100
+    pub dehaze: f32,      // -100 to +100
     pub lens_correction: bool,
     pub rotation: QuarterTurns,
     pub crop: Option<CropRect>,
@@ -254,6 +256,62 @@ fn luminance(rgb: [f32; 3]) -> f32 {
     0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
+// -- Lightroom-convention slider mapping --
+//
+// Sliders use Lightroom's UI scales (Exposure ±5 EV, everything else ±100).
+// These functions are the single source of truth converting slider units into
+// the internal math amounts; both the CPU save path (`apply_all`) and the GPU
+// uniform packing (`viewer.rs`) go through them. Strengths at the extremes are
+// pinned to the envelope validated by the 2026-04-24 tuning audit (see
+// docs/threads .../lightroom-param-parity/DESIGN.md for the full contract).
+
+/// Contrast slider → power-law exponent offset (exponent = 1 + amount).
+/// ±100 spans the validated exponent envelope 0.5..1.5.
+pub fn contrast_amount(slider: f32) -> f32 {
+    slider * (0.5 / 100.0)
+}
+
+/// Tone-zone slider (Highlights/Shadows/Whites/Blacks) → band weight in
+/// [-1, 1]; each band contributes up to ±2 EV inside `apply_tone_zones`.
+pub fn tone_zone_amount(slider: f32) -> f32 {
+    slider / 100.0
+}
+
+/// Vibrance slider → saturation-weighted chroma amount in [-1, 1].
+pub fn vibrance_amount(slider: f32) -> f32 {
+    slider / 100.0
+}
+
+/// Saturation slider → chroma scale offset (scale = 1 + amount), so -100 is
+/// exact grayscale and +100 doubles chroma — Lightroom's endpoint semantics.
+pub fn saturation_amount(slider: f32) -> f32 {
+    slider / 100.0
+}
+
+/// Clarity slider → midtone local-contrast gain; ±100 spans the validated
+/// ±0.5 gain envelope.
+pub fn clarity_amount(slider: f32) -> f32 {
+    slider * (0.5 / 100.0)
+}
+
+/// Dehaze slider → dark-channel strength; ±100 spans the validated ±0.5
+/// envelope (transmission floor stays 0.1).
+pub fn dehaze_amount(slider: f32) -> f32 {
+    slider * (0.5 / 100.0)
+}
+
+/// Temperature slider → destination illuminant CCT. ±100 spans the validated
+/// tungsten-to-cloudy range 3200K..9800K around D65.
+pub fn temperature_kelvin(slider: f32) -> f32 {
+    6500.0 + slider * 33.0
+}
+
+/// Tint slider → yd chromaticity shift (green/magenta). ±100 spans the
+/// validated ±0.012 range.
+pub fn tint_yd_shift(slider: f32) -> f32 {
+    slider * 0.00012
+}
+
 // -- Per-pixel adjustments (linear RGB) --
 
 pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
@@ -276,10 +334,19 @@ const SHADOWS_EV: f32 = -4.0;
 const HIGHLIGHTS_EV: f32 = -1.0;
 const WHITES_EV: f32 = 0.0;
 
-/// 2 × σ² for the Gaussian band weights. Darktable defaults σ = √2, so
-/// 2 × σ² = 4. The wide Gaussian is intentional — adjacent bands overlap
-/// so the tone curve stays smooth across the full EV range.
-const TONE_ZONE_SIGMA_SQ_2: f32 = 4.0;
+/// 2 × σ² for the Gaussian band weights. σ = 1 (so 2σ² = 2) — deliberately
+/// tighter than darktable's σ = √2 default so a full Highlights or Shadows
+/// move stays targeted at its zone instead of reading as a global exposure
+/// shift (Lightroom-feel; see the lightroom-param-parity design thread).
+/// Adjacent bands 3 EV apart still overlap (weight ≈ 0.32 at the midpoint)
+/// so the summed tone curve stays smooth across the full EV range.
+const TONE_ZONE_SIGMA_SQ_2: f32 = 2.0;
+
+/// Maximum EV a single slider contributes at its band center. 1.5 EV at
+/// ±100 (Lightroom-feel: Highlights -100 recovers about a stop and a half)
+/// while combinations of sliders may still reach the darktable-derived ±2 EV
+/// total clamp below.
+const TONE_ZONE_BAND_EV_RANGE: f32 = 1.5;
 
 pub fn apply_tone_zones(
     px: [f32; 3],
@@ -309,10 +376,10 @@ pub fn apply_tone_zones(
     let w_hi = gauss(HIGHLIGHTS_EV);
     let w_wh = gauss(WHITES_EV);
 
-    let stops = (shadows * w_sh * 2.0
-        + highlights * w_hi * 2.0
-        + blacks * w_bk * 2.0
-        + whites * w_wh * 2.0)
+    let stops = (shadows * w_sh * TONE_ZONE_BAND_EV_RANGE
+        + highlights * w_hi * TONE_ZONE_BAND_EV_RANGE
+        + blacks * w_bk * TONE_ZONE_BAND_EV_RANGE
+        + whites * w_wh * TONE_ZONE_BAND_EV_RANGE)
         .clamp(-2.0, 2.0);
 
     let ratio = 2.0_f32.powf(stops);
@@ -389,20 +456,19 @@ pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
 }
 
 /// Bradford chromatic adaptation matrix for temperature/tint.
-/// Temperature: -60..+60 (UI range) maps to ~3200K..~9800K around D65 (6500K)
-/// at 55 K per unit.
-/// Tint: -60..+60 shifts yd chromaticity by ±0.012 (green/magenta).
+/// Takes raw slider values (±100 Lightroom convention): temperature maps to
+/// ~3200K..~9800K around D65 via `temperature_kelvin`, tint shifts yd
+/// chromaticity by ±0.012 (green/magenta) via `tint_yd_shift`.
 /// Returns a 3x3 row-major matrix for linear RGB transform.
 pub fn temperature_tint_matrix(temperature: f32, tint: f32) -> [f32; 9] {
-    let kelvin = 6500.0 + temperature * 55.0;
+    let kelvin = temperature_kelvin(temperature);
 
     let (xd, yd) = daylight_chromaticity(kelvin);
 
     let x_ref = 0.3127;
     let y_ref = 0.3290;
 
-    let tint_shift = tint * 0.0002;
-    let yd = yd + tint_shift;
+    let yd = yd + tint_yd_shift(tint);
 
     bradford_cat(x_ref, y_ref, xd, yd)
 }
@@ -671,22 +737,21 @@ pub fn apply_all(
         px = [px[0].max(0.0), px[1].max(0.0), px[2].max(0.0)];
     }
 
-    let n = |v: f32| v / 100.0;
     px = apply_tone_zones(
         px,
-        n(state.highlights),
-        n(state.shadows),
-        n(state.whites),
-        n(state.blacks),
+        tone_zone_amount(state.highlights),
+        tone_zone_amount(state.shadows),
+        tone_zone_amount(state.whites),
+        tone_zone_amount(state.blacks),
     );
 
-    px = apply_contrast(px, n(state.contrast));
+    px = apply_contrast(px, contrast_amount(state.contrast));
 
-    px = apply_vibrance(px, n(state.vibrance));
-    px = apply_saturation(px, n(state.saturation));
+    px = apply_vibrance(px, vibrance_amount(state.vibrance));
+    px = apply_saturation(px, saturation_amount(state.saturation));
 
     if state.clarity != 0.0 {
-        let a = n(state.clarity);
+        let a = clarity_amount(state.clarity);
         let lum = luminance(px);
         let midtone = smoothstep(0.0, 0.5, lum) * (1.0 - smoothstep(0.5, 1.0, lum));
         for i in 0..3 {
@@ -695,7 +760,7 @@ pub fn apply_all(
     }
 
     if state.dehaze != 0.0 {
-        let a = n(state.dehaze);
+        let a = dehaze_amount(state.dehaze);
         let atmos = blurred[0].max(blurred[1]).max(blurred[2]).max(0.01);
         let dark = px[0].min(px[1]).min(px[2]);
         let t = (1.0 - a * dark / atmos).max(0.1);
@@ -1289,13 +1354,66 @@ mod tests {
 
         let bright = [0.9, 0.9, 0.9];
         let out2 = apply_tone_zones(bright, 0.0, 1.0, 0.0, 0.0);
-        // At ev≈-0.15, shadows band tail (σ=√2 around -4 EV) contributes
-        // ~0.025 weight → ~3.5 % response. Assert the pixel does not shift
-        // by more than a small fraction rather than by zero.
+        // At ev≈-0.15, the shadows band tail (σ=1 around -4 EV) contributes
+        // well under 0.01 weight → a sub-percent response. Assert the pixel
+        // does not shift by more than a small fraction rather than by zero.
         assert!(
             (out2[0] - bright[0]).abs() / bright[0] < 0.05,
             "shadows should only faintly touch near-white pixels, got Δ={:.1}%",
             ((out2[0] - bright[0]).abs() / bright[0]) * 100.0
+        );
+    }
+
+    #[test]
+    fn tone_zone_bands_stay_isolated_from_midtones() {
+        // Lightroom feel: Highlights at full strength must not read as a
+        // global exposure cut. With σ = 1 a band's Gaussian weight two stops
+        // from its center is e^-2 ≈ 0.135, so a midtone at EV -3 may shift by
+        // at most ~0.27 EV (ratio ≤ ~1.21) under a full highlights move.
+        let midtone = [0.125_f32; 3]; // EV -3
+        let out = apply_tone_zones(midtone, 1.0, 0.0, 0.0, 0.0);
+        let ratio = out[0] / midtone[0];
+        assert!(
+            ratio < 1.25,
+            "highlights leak into EV -3 midtones: ratio {ratio}"
+        );
+
+        let bright_mid = [0.5_f32; 3]; // EV -1
+        let out2 = apply_tone_zones(bright_mid, 0.0, 1.0, 0.0, 0.0);
+        let ratio2 = out2[0] / bright_mid[0];
+        assert!(
+            ratio2 < 1.25,
+            "shadows leak into EV -1 bright midtones: ratio {ratio2}"
+        );
+    }
+
+    #[test]
+    fn tone_zone_full_slider_reaches_1_5_ev_at_band_center() {
+        // Lightroom-feel calibration: a single slider at ±100 moves its band
+        // center by 1.5 EV (Highlights -100 recovers ~1.5 stops at the peak,
+        // not the harsher 2 EV the total clamp allows for combinations).
+        let at_center = [0.5_f32; 3]; // EV -1 = highlights band center
+        let down = apply_tone_zones(at_center, -1.0, 0.0, 0.0, 0.0);
+        let ratio = down[0] / at_center[0];
+        let expected = 2.0_f32.powf(-1.5);
+        assert!(
+            (ratio - expected).abs() < 0.02,
+            "full highlights move at band center should be -1.5 EV (ratio {expected:.3}), got {ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn tone_zone_adjacent_bands_still_overlap_smoothly() {
+        // Tightening σ must not open dead notches between bands: at the
+        // midpoint between Shadows (-4 EV) and Highlights (-1 EV), pushing
+        // both sliders together must still move the pixel meaningfully so
+        // the summed tone curve stays smooth.
+        let between = [2.0_f32.powf(-2.5); 3];
+        let out = apply_tone_zones(between, 1.0, 1.0, 0.0, 0.0);
+        let ratio = out[0] / between[0];
+        assert!(
+            ratio > 1.3,
+            "midpoint between bands should respond when both sliders push: {ratio}"
         );
     }
 
@@ -1960,19 +2078,20 @@ mod tests {
 
     #[test]
     fn strong_temperature_does_not_silence_contrast() {
-        // At temp=-60 the Bradford CAT pushes pure blue into negative red/green,
-        // giving a negative luminance. Without a guard, apply_contrast short-circuits
-        // (lum <= 0 returns identity) and the contrast slider stops affecting the
-        // output. Guard the intermediate so contrast remains visible.
+        // At the tungsten end (slider -100 ≈ 3200 K) the Bradford CAT pushes
+        // pure blue into negative red/green, giving a negative luminance.
+        // Without a guard, apply_contrast short-circuits (lum <= 0 returns
+        // identity) and the contrast slider stops affecting the output.
+        // Guard the intermediate so contrast remains visible.
         let base = EditState {
-            temperature: -60.0,
+            temperature: -100.0,
             ..Default::default()
         };
         let matrix = temperature_tint_matrix(base.temperature, base.tint);
 
         let no_contrast = base;
         let mut with_contrast = base;
-        with_contrast.contrast = 50.0;
+        with_contrast.contrast = 100.0;
 
         let pixel = [0, 0, 200, 255];
         let out_plain = apply_all(pixel, &no_contrast, &matrix, [0.0; 3], [0.5, 0.5], [0.0; 3]);
@@ -1989,5 +2108,322 @@ mod tests {
             out_plain, out_contrast,
             "contrast should still change the output even when strong temperature pushes channels negative"
         );
+    }
+
+    /// Renders a representative settings grid from `assets/test.jpg` to
+    /// `tmp/param-tuning/` for visual review of the Lightroom-convention
+    /// tuning. Gated behind PHOTO_RENDER_TUNING_GRID so CI stays hermetic;
+    /// run with `PHOTO_RENDER_TUNING_GRID=1 cargo test render_lightroom`.
+    #[test]
+    fn render_lightroom_tuning_grid_for_manual_inspection() {
+        if std::env::var("PHOTO_RENDER_TUNING_GRID").is_err() {
+            return;
+        }
+        let image = crate::decode::decode_thumbnail(Path::new("test.jpg"), 800)
+            .expect("test asset must decode");
+        let out_dir = Path::new("tmp/param-tuning");
+        std::fs::create_dir_all(out_dir).unwrap();
+
+        let s = EditState::default;
+        let cases: Vec<(&str, EditState)> = vec![
+            ("00-baseline", s()),
+            (
+                "01-exposure-plus1",
+                EditState {
+                    exposure: 1.0,
+                    ..s()
+                },
+            ),
+            (
+                "02-exposure-minus1",
+                EditState {
+                    exposure: -1.0,
+                    ..s()
+                },
+            ),
+            (
+                "03-contrast-plus50",
+                EditState {
+                    contrast: 50.0,
+                    ..s()
+                },
+            ),
+            (
+                "04-contrast-plus100",
+                EditState {
+                    contrast: 100.0,
+                    ..s()
+                },
+            ),
+            (
+                "05-contrast-minus100",
+                EditState {
+                    contrast: -100.0,
+                    ..s()
+                },
+            ),
+            (
+                "06-highlights-minus100",
+                EditState {
+                    highlights: -100.0,
+                    ..s()
+                },
+            ),
+            (
+                "07-shadows-plus100",
+                EditState {
+                    shadows: 100.0,
+                    ..s()
+                },
+            ),
+            (
+                "08-temp-minus100-tungsten",
+                EditState {
+                    temperature: -100.0,
+                    ..s()
+                },
+            ),
+            (
+                "09-temp-plus100-cloudy",
+                EditState {
+                    temperature: 100.0,
+                    ..s()
+                },
+            ),
+            ("10-tint-plus50", EditState { tint: 50.0, ..s() }),
+            (
+                "11-vibrance-plus50",
+                EditState {
+                    vibrance: 50.0,
+                    ..s()
+                },
+            ),
+            (
+                "12-saturation-minus100-grayscale",
+                EditState {
+                    saturation: -100.0,
+                    ..s()
+                },
+            ),
+            (
+                "13-saturation-plus50",
+                EditState {
+                    saturation: 50.0,
+                    ..s()
+                },
+            ),
+            (
+                "14-clarity-plus50",
+                EditState {
+                    clarity: 50.0,
+                    ..s()
+                },
+            ),
+            (
+                "15-clarity-plus100",
+                EditState {
+                    clarity: 100.0,
+                    ..s()
+                },
+            ),
+            (
+                "16-dehaze-plus50",
+                EditState {
+                    dehaze: 50.0,
+                    ..s()
+                },
+            ),
+            (
+                "17-classic-recipe",
+                EditState {
+                    contrast: 25.0,
+                    highlights: -30.0,
+                    shadows: 30.0,
+                    vibrance: 25.0,
+                    ..s()
+                },
+            ),
+        ];
+
+        let mut metrics = String::from("case\tmean_luma\tstd_luma\tmean_chroma\n");
+        for (name, state) in &cases {
+            let rendered = render_edited_image(
+                &image.pixels,
+                image.width,
+                image.height,
+                state,
+                LensCorrection::default(),
+            );
+            image::save_buffer(
+                out_dir.join(format!("{name}.png")),
+                &rendered.pixels,
+                rendered.width,
+                rendered.height,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+
+            let mut sum_l = 0.0_f64;
+            let mut sum_l2 = 0.0_f64;
+            let mut sum_c = 0.0_f64;
+            let count = (rendered.pixels.len() / 4) as f64;
+            for px in rendered.pixels.chunks_exact(4) {
+                let (r, g, b) = (
+                    px[0] as f64 / 255.0,
+                    px[1] as f64 / 255.0,
+                    px[2] as f64 / 255.0,
+                );
+                let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                sum_l += l;
+                sum_l2 += l * l;
+                let max = r.max(g).max(b);
+                let min = r.min(g).min(b);
+                sum_c += if max > 0.0 { (max - min) / max } else { 0.0 };
+            }
+            let mean = sum_l / count;
+            let std = (sum_l2 / count - mean * mean).max(0.0).sqrt();
+            metrics.push_str(&format!(
+                "{name}\t{mean:.4}\t{std:.4}\t{:.4}\n",
+                sum_c / count
+            ));
+        }
+        std::fs::write(out_dir.join("metrics.txt"), metrics).unwrap();
+    }
+
+    // -- Lightroom-convention slider mapping (see docs/threads .../lightroom-param-parity/DESIGN.md) --
+
+    #[test]
+    fn contrast_mapping_spreads_validated_envelope_across_lightroom_range() {
+        // ±100 reaches exactly the power-law exponent envelope (1 ± 0.5)
+        // validated by the 2026-04-24 audit at the old ±50 range.
+        assert!(approx(contrast_amount(100.0), 0.5));
+        assert!(approx(contrast_amount(-100.0), -0.5));
+        assert!(approx(contrast_amount(0.0), 0.0));
+        assert!(approx(contrast_amount(50.0), 0.25));
+    }
+
+    #[test]
+    fn contrast_pivot_slope_is_the_exponent_at_full_strength() {
+        // For y = (x/g)^e * g the local slope at the pivot is e in linear and
+        // perceptual space alike, so slider +100 must yield slope 1.5 there.
+        let amount = contrast_amount(100.0);
+        let g = 0.1842_f32;
+        let eps = 0.0005;
+        let hi = apply_contrast([g + eps; 3], amount)[0];
+        let lo = apply_contrast([g - eps; 3], amount)[0];
+        let slope = (hi - lo) / (2.0 * eps);
+        assert!(
+            (slope - 1.5).abs() < 0.01,
+            "pivot slope at +100 should be 1.5, got {slope}"
+        );
+    }
+
+    #[test]
+    fn saturation_minus_100_is_exact_grayscale() {
+        // Lightroom endpoint semantics: Saturation -100 fully desaturates.
+        let out = apply_saturation([0.8, 0.2, 0.1], saturation_amount(-100.0));
+        assert!(approx(out[0], out[1]), "R != G after full desaturation");
+        assert!(approx(out[1], out[2]), "G != B after full desaturation");
+    }
+
+    #[test]
+    fn saturation_plus_100_doubles_chroma_distance() {
+        let px = [0.4, 0.3, 0.2];
+        let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+        let out = apply_saturation(px, saturation_amount(100.0));
+        for c in 0..3 {
+            assert!(
+                approx(out[c] - lum, (px[c] - lum) * 2.0),
+                "channel {c} chroma distance should double at +100"
+            );
+        }
+    }
+
+    #[test]
+    fn temperature_mapping_covers_tungsten_to_cloudy_at_lightroom_range() {
+        // The validated 3200K..9800K span now sits at slider ±100.
+        assert!((temperature_kelvin(-100.0) - 3200.0).abs() < 1.0);
+        assert!((temperature_kelvin(100.0) - 9800.0).abs() < 1.0);
+        assert!((temperature_kelvin(0.0) - 6500.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn tint_mapping_preserves_validated_chromaticity_span() {
+        assert!(approx(tint_yd_shift(100.0), 0.012));
+        assert!(approx(tint_yd_shift(-100.0), -0.012));
+        assert!(approx(tint_yd_shift(0.0), 0.0));
+    }
+
+    #[test]
+    fn clarity_and_dehaze_mappings_preserve_validated_gain_envelope() {
+        assert!(approx(clarity_amount(100.0), 0.5));
+        assert!(approx(clarity_amount(-100.0), -0.5));
+        assert!(approx(dehaze_amount(100.0), 0.5));
+        assert!(approx(dehaze_amount(-100.0), -0.5));
+    }
+
+    #[test]
+    fn tone_zone_and_vibrance_mappings_stay_unit_scaled() {
+        assert!(approx(tone_zone_amount(100.0), 1.0));
+        assert!(approx(tone_zone_amount(-50.0), -0.5));
+        assert!(approx(vibrance_amount(100.0), 1.0));
+        assert!(approx(vibrance_amount(-50.0), -0.5));
+    }
+
+    #[test]
+    fn linear_pipeline_stays_finite_at_lightroom_extremes() {
+        // Chain the public linear-light stages with both all-max and all-min
+        // slider mappings; every intermediate must stay finite so the gamma
+        // encode at the end cannot see NaN/Inf.
+        for sign in [1.0_f32, -1.0] {
+            let matrix = temperature_tint_matrix(100.0 * sign, 100.0 * sign);
+            let mut px = [0.9, 0.4, 0.05];
+            px = apply_exposure(px, 5.0 * sign);
+            px = apply_temperature_tint(px, &matrix);
+            px = [px[0].max(0.0), px[1].max(0.0), px[2].max(0.0)];
+            let z = tone_zone_amount(100.0 * sign);
+            px = apply_tone_zones(px, z, z, z, z);
+            px = apply_contrast(px, contrast_amount(100.0 * sign));
+            px = apply_vibrance(px, vibrance_amount(100.0 * sign));
+            px = apply_saturation(px, saturation_amount(100.0 * sign));
+            for (c, v) in px.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "channel {c} not finite at extreme sign {sign}: {v}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn apply_all_at_lightroom_extremes_produces_valid_output() {
+        for sign in [1.0_f32, -1.0] {
+            let v = 100.0 * sign;
+            let state = EditState {
+                exposure: 5.0 * sign,
+                contrast: v,
+                highlights: v,
+                shadows: v,
+                whites: v,
+                blacks: v,
+                temperature: v,
+                tint: v,
+                vibrance: v,
+                saturation: v,
+                clarity: v,
+                dehaze: v,
+                ..Default::default()
+            };
+            let matrix = temperature_tint_matrix(state.temperature, state.tint);
+            let out = apply_all(
+                [180, 90, 45, 200],
+                &state,
+                &matrix,
+                [0.4, 0.35, 0.3],
+                [0.5, 0.5],
+                [0.0; 3],
+            );
+            assert_eq!(out[3], 200, "alpha must pass through untouched");
+        }
     }
 }

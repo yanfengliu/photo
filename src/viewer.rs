@@ -79,6 +79,39 @@ impl AdjustmentUniforms {
     }
 }
 
+/// Slider values converted to the shader's internal math amounts through the
+/// shared `edit::*_amount` mappings — the same functions the CPU save path
+/// uses, so preview and export cannot drift.
+struct ScaledAmounts {
+    exposure: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    vibrance: f32,
+    saturation: f32,
+    clarity: f32,
+    dehaze: f32,
+}
+
+impl ScaledAmounts {
+    fn from_adjustments(adj: &AdjustmentUniforms) -> Self {
+        Self {
+            exposure: adj.exposure,
+            contrast: edit::contrast_amount(adj.contrast),
+            highlights: edit::tone_zone_amount(adj.highlights),
+            shadows: edit::tone_zone_amount(adj.shadows),
+            whites: edit::tone_zone_amount(adj.whites),
+            blacks: edit::tone_zone_amount(adj.blacks),
+            vibrance: edit::vibrance_amount(adj.vibrance),
+            saturation: edit::saturation_amount(adj.saturation),
+            clarity: edit::clarity_amount(adj.clarity),
+            dehaze: edit::dehaze_amount(adj.dehaze),
+        }
+    }
+}
+
 impl Default for AdjustmentUniforms {
     fn default() -> Self {
         Self {
@@ -1163,19 +1196,20 @@ impl shader::Primitive for ImagePrimitive {
             adj.temp_matrix
         };
 
+        let scaled = ScaledAmounts::from_adjustments(adj);
         let uniforms = Uniforms {
             rect: self.rect,
             bg_color: [0.10, 0.10, 0.10, 1.0],
-            exposure: adj.exposure,
-            contrast: adj.contrast / 100.0,
-            highlights: adj.highlights / 100.0,
-            shadows: adj.shadows / 100.0,
-            whites: adj.whites / 100.0,
-            blacks: adj.blacks / 100.0,
-            vibrance: adj.vibrance / 100.0,
-            saturation: adj.saturation / 100.0,
-            clarity: adj.clarity / 100.0,
-            dehaze: adj.dehaze / 100.0,
+            exposure: scaled.exposure,
+            contrast: scaled.contrast,
+            highlights: scaled.highlights,
+            shadows: scaled.shadows,
+            whites: scaled.whites,
+            blacks: scaled.blacks,
+            vibrance: scaled.vibrance,
+            saturation: scaled.saturation,
+            clarity: scaled.clarity,
+            dehaze: scaled.dehaze,
             _pad0: 0.0,
             _pad1: 0.0,
             // WGSL mat3x3(v0,v1,v2) treats vectors as columns, so transpose
@@ -1309,6 +1343,40 @@ mod tests {
             3 => [1.0 - uv[1], uv[0]],
             _ => uv,
         }
+    }
+
+    #[test]
+    fn uniform_packing_uses_the_shared_lightroom_mappings() {
+        // The GPU preview must scale slider values through exactly the same
+        // edit::*_amount functions as the CPU save path, or preview and
+        // export drift apart.
+        let adj = AdjustmentUniforms {
+            exposure: 5.0,
+            contrast: 100.0,
+            highlights: 100.0,
+            shadows: -50.0,
+            whites: 25.0,
+            blacks: -25.0,
+            vibrance: 100.0,
+            saturation: -100.0,
+            clarity: 100.0,
+            dehaze: -100.0,
+            ..Default::default()
+        };
+        let scaled = ScaledAmounts::from_adjustments(&adj);
+        assert_eq!(scaled.exposure, 5.0);
+        assert_eq!(scaled.contrast, edit::contrast_amount(100.0));
+        assert_eq!(scaled.highlights, edit::tone_zone_amount(100.0));
+        assert_eq!(scaled.shadows, edit::tone_zone_amount(-50.0));
+        assert_eq!(scaled.whites, edit::tone_zone_amount(25.0));
+        assert_eq!(scaled.blacks, edit::tone_zone_amount(-25.0));
+        assert_eq!(scaled.vibrance, edit::vibrance_amount(100.0));
+        assert_eq!(scaled.saturation, edit::saturation_amount(-100.0));
+        assert_eq!(scaled.clarity, edit::clarity_amount(100.0));
+        assert_eq!(scaled.dehaze, edit::dehaze_amount(-100.0));
+        assert_eq!(scaled.contrast, 0.5);
+        assert_eq!(scaled.saturation, -1.0);
+        assert_eq!(scaled.clarity, 0.5);
     }
 
     #[test]

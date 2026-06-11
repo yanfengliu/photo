@@ -1592,48 +1592,57 @@ fn scan_folder_no_duplicates_in_entries() {
 }
 
 #[test]
-fn slider_ranges_are_reasonable() {
-    // Exposure should be narrower than before
+fn slider_ranges_match_lightroom_conventions() {
+    // Lightroom Basic-panel UI ranges (see
+    // docs/threads .../lightroom-param-parity/DESIGN.md): Exposure is ±5 EV
+    // and every other slider runs -100..+100.
     let (min, max) = slider_range(SliderKind::Exposure);
-    assert_eq!(min, -3.0);
-    assert_eq!(max, 3.0);
+    assert_eq!(min, -5.0);
+    assert_eq!(max, 5.0);
 
-    // Temperature/tint span should reach tungsten (~3200K) on one side
-    // and cloudy overcast (~9800K) on the other with the 55 K-per-unit
-    // mapping in edit::temperature_tint_matrix.
-    for kind in [SliderKind::Temperature, SliderKind::Tint] {
-        let (min, max) = slider_range(kind);
-        assert_eq!(min, -60.0);
-        assert_eq!(max, 60.0);
-    }
-
-    // Highlights/Shadows/Whites/Blacks keep full range
     for kind in [
+        SliderKind::Contrast,
         SliderKind::Highlights,
         SliderKind::Shadows,
         SliderKind::Whites,
         SliderKind::Blacks,
+        SliderKind::Temperature,
+        SliderKind::Tint,
+        SliderKind::Vibrance,
+        SliderKind::Saturation,
+        SliderKind::Clarity,
+        SliderKind::Dehaze,
     ] {
         let (min, max) = slider_range(kind);
-        assert_eq!(min, -100.0);
-        assert_eq!(max, 100.0);
+        assert_eq!(min, -100.0, "{kind:?} min");
+        assert_eq!(max, 100.0, "{kind:?} max");
     }
+}
 
-    // Other sliders are reduced
-    let (min, max) = slider_range(SliderKind::Contrast);
-    assert_eq!(min, -50.0);
-    assert_eq!(max, 50.0);
+#[test]
+fn slider_steps_match_lightroom_granularity() {
+    assert_eq!(slider_step(SliderKind::Exposure), 0.01);
+    for kind in [
+        SliderKind::Contrast,
+        SliderKind::Temperature,
+        SliderKind::Tint,
+        SliderKind::Saturation,
+        SliderKind::Clarity,
+        SliderKind::Dehaze,
+    ] {
+        assert_eq!(slider_step(kind), 1.0, "{kind:?} step");
+    }
 }
 
 #[test]
 fn temperature_slider_covers_tungsten_and_cloudy_kelvin() {
-    // At the extremes, the kelvin mapping inside
-    // edit::temperature_tint_matrix should span roughly tungsten
-    // (~3200K) to cloudy/shade (~9800K), so white balance edits can
-    // correct indoor and open-shade images without running out of range.
+    // At the extremes, the kelvin mapping behind the temperature slider
+    // should span roughly tungsten (~3200K) to cloudy/shade (~9800K), so
+    // white balance edits can correct indoor and open-shade images without
+    // running out of range.
     let (min, max) = slider_range(SliderKind::Temperature);
-    let kelvin_low = 6500.0 + min * 55.0;
-    let kelvin_high = 6500.0 + max * 55.0;
+    let kelvin_low = edit::temperature_kelvin(min);
+    let kelvin_high = edit::temperature_kelvin(max);
     assert!(
         kelvin_low <= 3300.0,
         "temperature low end {} does not reach tungsten",

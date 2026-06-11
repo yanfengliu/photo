@@ -3,10 +3,12 @@
 struct Uniforms {
     rect: vec4<f32>,
     bg_color: vec4<f32>,
-    // Adjustments, pre-scaled on the CPU side (viewer.rs::prepare):
-    //   exposure: raw stops, UI range -3..+3 (sent as-is)
-    //   highlights/shadows/whites/blacks/vibrance: UI ±100 divided by 100 -> ±1
-    //   contrast/saturation/clarity/dehaze: UI ±50 divided by 100 -> ±0.5
+    // Adjustments, pre-scaled on the CPU side via the shared edit::*_amount
+    // mappings (viewer.rs ScaledAmounts). Slider UI ranges follow Lightroom
+    // conventions (exposure ±5 EV, everything else ±100):
+    //   exposure: raw stops (sent as-is)
+    //   highlights/shadows/whites/blacks/vibrance/saturation: ±100 -> ±1
+    //   contrast/clarity/dehaze: ±100 -> ±0.5
     exposure: f32,
     contrast: f32,
     highlights: f32,
@@ -195,8 +197,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Darktable tone-equalizer-style zone correction. Bands sit at Zone
     // System EV positions: Blacks -7, Shadows -4, Highlights -1, Whites 0.
-    // Each band is a Gaussian in log2 luminance (σ = √2, so 2σ² = 4) and
-    // the sum of contributions is clamped to ±2 EV — matching darktable's
+    // Each band is a Gaussian in log2 luminance with σ = 1 (2σ² = 2) —
+    // tighter than darktable's σ = √2 so a full Highlights/Shadows move
+    // stays targeted instead of reading as a global exposure shift
+    // (Lightroom-feel; see the lightroom-param-parity design thread).
+    // The sum of contributions is clamped to ±2 EV — matching darktable's
     // [0.25, 4.0] linear correction limit. Uniform channel multiplier at
     // the end preserves hue and saturation.
     if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
@@ -207,15 +212,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let d_sh = ev - (-4.0);
             let d_hi = ev - (-1.0);
             let d_wh = ev - 0.0;
-            let w_bk = exp(-(d_bk * d_bk) / 4.0);
-            let w_sh = exp(-(d_sh * d_sh) / 4.0);
-            let w_hi = exp(-(d_hi * d_hi) / 4.0);
-            let w_wh = exp(-(d_wh * d_wh) / 4.0);
+            let w_bk = exp(-(d_bk * d_bk) / 2.0);
+            let w_sh = exp(-(d_sh * d_sh) / 2.0);
+            let w_hi = exp(-(d_hi * d_hi) / 2.0);
+            let w_wh = exp(-(d_wh * d_wh) / 2.0);
+            // 1.5 = per-band EV reach at full slider (edit.rs
+            // TONE_ZONE_BAND_EV_RANGE); combinations clamp at ±2 EV total.
             let stops = clamp(
-                u.shadows * w_sh * 2.0
-                + u.highlights * w_hi * 2.0
-                + u.blacks * w_bk * 2.0
-                + u.whites * w_wh * 2.0,
+                u.shadows * w_sh * 1.5
+                + u.highlights * w_hi * 1.5
+                + u.blacks * w_bk * 1.5
+                + u.whites * w_wh * 1.5,
                 -2.0, 2.0);
             px = px * pow(2.0, stops);
         }

@@ -667,22 +667,18 @@ pub(crate) fn get_slider_field(state: &edit::EditState, kind: SliderKind) -> f32
 }
 
 pub(crate) fn slider_range(kind: SliderKind) -> (f32, f32) {
+    // Lightroom Basic-panel conventions: Exposure is ±5 EV, every other
+    // slider runs -100..+100. The edit::*_amount mappings convert these UI
+    // units into the internal math amounts.
     match kind {
-        SliderKind::Exposure => (-3.0, 3.0),
-        SliderKind::Temperature | SliderKind::Tint => (-60.0, 60.0),
-        SliderKind::Highlights
-        | SliderKind::Shadows
-        | SliderKind::Whites
-        | SliderKind::Blacks
-        | SliderKind::Vibrance => (-100.0, 100.0),
-        _ => (-50.0, 50.0),
+        SliderKind::Exposure => (-5.0, 5.0),
+        _ => (-100.0, 100.0),
     }
 }
 
 pub(crate) fn slider_step(kind: SliderKind) -> f32 {
     match kind {
-        SliderKind::Exposure => 0.02,
-        SliderKind::Temperature | SliderKind::Tint => 0.5,
+        SliderKind::Exposure => 0.01,
         _ => 1.0,
     }
 }

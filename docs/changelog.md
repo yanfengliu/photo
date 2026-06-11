@@ -2,6 +2,10 @@
 
 External-facing changes per version. Newest first. Dev-internal detail lives in `docs/devlog/`.
 
+## 0.2.0 — 2026-06-10
+
+Breaking: editing sliders now follow Adobe Lightroom's UI conventions, and saved slider values from earlier versions mean different strengths on the new scales (baked local edits keep rendering identically — pixels, not operations, are persisted). What changed: Exposure runs −5..+5 EV (was ±3); Contrast, Saturation, Clarity, Dehaze, Temperature, and Tint all run −100..+100 (were ±50/±50/±50/±60/±60); Saturation −100 now produces exact grayscale and +100 doubles chroma; Temperature ±100 spans the same 3200K–9800K tungsten-to-cloudy range as before at finer per-unit resolution. Strength envelopes validated by the April tuning audit are preserved at the new extremes (contrast power-law exponent 0.5–1.5, clarity/dehaze gain ±0.5). The four tone zones were retuned for targeted response: band Gaussians tightened to σ=1 (from √2) and per-slider reach set to 1.5 EV at the band center (combinations still clamp at ±2 EV total), so Highlights −100 reads as highlight recovery instead of a global exposure cut. Validation: 315 tests including new mapping, band-isolation, smoothness, and extreme-value regressions; CPU/GPU parity is now structural (both paths share the same `edit::*_amount` mapping functions); rendered before/after grid reviewed visually.
+
 ## 0.1.6 — 2026-06-10
 
 Test-reliability release; no behavior changes. Fixed a CI-only flake in the persisted decode cache's same-size-rewrite test: the cache's metadata fast path intentionally treats same-size, same-mtime files as unchanged, and fast runners could rewrite a file within one Windows file-time tick, making the change invisible. The test now guarantees an observable mtime change before asserting invalidation, with a new regression covering the helper (suite is now 299 tests).
