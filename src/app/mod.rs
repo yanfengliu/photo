@@ -683,5 +683,15 @@ pub(crate) fn slider_step(kind: SliderKind) -> f32 {
     }
 }
 
+/// Formats a slider value at its step's precision so the readout and the
+/// text-input prefill can represent every reachable position (Exposure steps
+/// by 0.01; the ±100 sliders are integers, Lightroom-style).
+pub(crate) fn slider_value_label(kind: SliderKind, value: f32) -> String {
+    match kind {
+        SliderKind::Exposure => format!("{:.2}", value),
+        _ => format!("{:.0}", value),
+    }
+}
+
 #[cfg(test)]
 mod tests;

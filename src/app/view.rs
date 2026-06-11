@@ -624,11 +624,15 @@ impl App {
                 .width(45)
                 .into()
         } else {
-            button(text(format!("{:.1}", value)).size(11).color(TEXT_PRIMARY))
-                .on_press(Message::SliderTextInput(kind))
-                .padding(0)
-                .style(invisible_button_style)
-                .into()
+            button(
+                text(slider_value_label(kind, value))
+                    .size(11)
+                    .color(TEXT_PRIMARY),
+            )
+            .on_press(Message::SliderTextInput(kind))
+            .padding(0)
+            .style(invisible_button_style)
+            .into()
         };
 
         let slider_el = slider(min..=max, value, move |v| Message::SliderChanged(kind, v))

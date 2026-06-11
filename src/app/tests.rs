@@ -1635,6 +1635,16 @@ fn slider_steps_match_lightroom_granularity() {
 }
 
 #[test]
+fn slider_value_labels_represent_every_reachable_step() {
+    // Exposure steps by 0.01 so the readout needs two decimals; the ±100
+    // sliders are integers and show none (Lightroom-style).
+    assert_eq!(slider_value_label(SliderKind::Exposure, 1.25), "1.25");
+    assert_eq!(slider_value_label(SliderKind::Exposure, -0.07), "-0.07");
+    assert_eq!(slider_value_label(SliderKind::Contrast, 42.0), "42");
+    assert_eq!(slider_value_label(SliderKind::Temperature, -100.0), "-100");
+}
+
+#[test]
 fn temperature_slider_covers_tungsten_and_cloudy_kelvin() {
     // At the extremes, the kelvin mapping behind the temperature slider
     // should span roughly tungsten (~3200K) to cloudy/shade (~9800K), so

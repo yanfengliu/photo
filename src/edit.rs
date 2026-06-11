@@ -272,7 +272,9 @@ pub fn contrast_amount(slider: f32) -> f32 {
 }
 
 /// Tone-zone slider (Highlights/Shadows/Whites/Blacks) → band weight in
-/// [-1, 1]; each band contributes up to ±2 EV inside `apply_tone_zones`.
+/// [-1, 1]; each band contributes up to ±1.5 EV at its center inside
+/// `apply_tone_zones` (`TONE_ZONE_BAND_EV_RANGE`), with the summed
+/// correction clamped to ±2 EV.
 pub fn tone_zone_amount(slider: f32) -> f32 {
     slider / 100.0
 }
@@ -319,11 +321,10 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
     [px[0] * m, px[1] * m, px[2] * m]
 }
 
-/// Zone-based tone adjustments (stop-based, ±2 stops max per slider).
-/// Matches darktable tone equalizer's ±2 stop clamp (correction 0.25x-4.0x).
-/// Zone weights in perceptual (gamma 2.2) luminance space with overlapping
-/// smoothstep transitions (analogous to darktable's Gaussian-windowed bands).
-/// Whites/blacks are endpoint controls with wider zones than highlights/shadows.
+/// Zone-based tone adjustments: each slider reaches ±1.5 EV at its band
+/// center (`TONE_ZONE_BAND_EV_RANGE`) and the summed correction is clamped
+/// to ±2 EV, matching darktable tone equalizer's clamp (correction
+/// 0.25x-4.0x). Bands are Gaussians in log2 luminance.
 /// Band centers for the 4 tone-zone sliders in EV space. Ported from
 /// darktable's tone equalizer (`src/iop/toneequal.c`), which uses 9 bands
 /// evenly spaced from -8 EV to 0 EV; the 4-slider version collapses those
@@ -461,6 +462,14 @@ pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
 /// chromaticity by ±0.012 (green/magenta) via `tint_yd_shift`.
 /// Returns a 3x3 row-major matrix for linear RGB transform.
 pub fn temperature_tint_matrix(temperature: f32, tint: f32) -> [f32; 9] {
+    // Exact identity at neutral: the CIE daylight locus at 6500K is not
+    // exactly the D65 reference white, so the computed matrix is only
+    // near-identity at slider zero. The GPU preview applies this matrix
+    // unconditionally while the CPU save path skips the stage entirely at
+    // neutral — short-circuit here so both paths agree at default settings.
+    if temperature == 0.0 && tint == 0.0 {
+        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    }
     let kelvin = temperature_kelvin(temperature);
 
     let (xd, yd) = daylight_chromaticity(kelvin);
@@ -1369,7 +1378,8 @@ mod tests {
         // Lightroom feel: Highlights at full strength must not read as a
         // global exposure cut. With σ = 1 a band's Gaussian weight two stops
         // from its center is e^-2 ≈ 0.135, so a midtone at EV -3 may shift by
-        // at most ~0.27 EV (ratio ≤ ~1.21) under a full highlights move.
+        // at most ~0.20 EV (ratio ≤ ~1.15) under a full highlights move
+        // at the 1.5 EV per-band reach.
         let midtone = [0.125_f32; 3]; // EV -3
         let out = apply_tone_zones(midtone, 1.0, 0.0, 0.0, 0.0);
         let ratio = out[0] / midtone[0];
@@ -2349,9 +2359,25 @@ mod tests {
 
     #[test]
     fn tint_mapping_preserves_validated_chromaticity_span() {
-        assert!(approx(tint_yd_shift(100.0), 0.012));
-        assert!(approx(tint_yd_shift(-100.0), -0.012));
-        assert!(approx(tint_yd_shift(0.0), 0.0));
+        // Tight tolerance on purpose: the shared approx() helper's absolute
+        // 0.01 window would accept an 80% regression of the 0.012 target.
+        assert!((tint_yd_shift(100.0) - 0.012).abs() < 1e-6);
+        assert!((tint_yd_shift(-100.0) + 0.012).abs() < 1e-6);
+        assert!(tint_yd_shift(0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn temperature_tint_matrix_is_exact_identity_at_neutral() {
+        // The GPU preview applies the matrix unconditionally while the CPU
+        // save path skips the stage when both sliders are zero; the daylight
+        // locus at 6500K is not exactly D65, so without an explicit neutral
+        // short-circuit the two paths disagree at default settings.
+        let m = temperature_tint_matrix(0.0, 0.0);
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert_eq!(
+            m, identity,
+            "neutral temperature/tint must be exact identity for preview/export parity"
+        );
     }
 
     #[test]

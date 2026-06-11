@@ -388,7 +388,7 @@ impl App {
                     .map(|h| get_slider_field(&h.current, kind))
                     .unwrap_or(0.0);
                 self.editing_slider = Some(kind);
-                self.slider_text_buf = format!("{:.1}", value);
+                self.slider_text_buf = slider_value_label(kind, value);
                 Task::none()
             }
 
