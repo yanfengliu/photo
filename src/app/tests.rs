@@ -558,6 +558,33 @@ fn collection_grid_uses_latest_window_width_after_returning_from_detail() {
 }
 
 #[test]
+fn escape_cancels_crop_mode_but_stays_in_detail() {
+    let mut app = detail_app_with_image(Path::new("frame.png"), 200, 100);
+    let _ = app.update(Message::ToggleCropMode);
+    assert!(app.crop_mode);
+
+    let _ = app.handle_key(
+        keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::default(),
+    );
+
+    assert!(!app.crop_mode, "escape should cancel crop mode");
+    assert_eq!(
+        app.tab,
+        Tab::Detail,
+        "escape while cropping must keep the image open in Detail"
+    );
+
+    // With crop mode already cancelled, the next escape performs the normal
+    // back-to-library navigation.
+    let _ = app.handle_key(
+        keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::default(),
+    );
+    assert_eq!(app.tab, Tab::Library);
+}
+
+#[test]
 fn stale_collection_nav_prev_clamps_to_last_valid_photo() {
     let mut app = detail_app_with_image(Path::new("frame.png"), 200, 100);
     app.collection_store.create("Favorites");

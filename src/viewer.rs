@@ -534,17 +534,25 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
             shader::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if state.crop_dragging {
                     state.crop_dragging = false;
-                    let image_rect = self.image_bounds(bounds);
                     let start = state.crop_start.take();
                     let current = state.crop_current.take();
-                    if let (Some(start), Some(current)) = (start, current) {
-                        if let Some(rect) =
-                            crop_rect_from_drag(start, current, image_rect, self.crop_aspect_ratio)
-                        {
-                            return (
-                                event::Status::Captured,
-                                Some(ViewerEvent::CropCommitted { rect }),
-                            );
+                    // Crop mode can be cancelled (Escape) while the button is
+                    // still down; a release after cancellation must discard
+                    // the abandoned selection instead of committing it.
+                    if self.crop_mode {
+                        let image_rect = self.image_bounds(bounds);
+                        if let (Some(start), Some(current)) = (start, current) {
+                            if let Some(rect) = crop_rect_from_drag(
+                                start,
+                                current,
+                                image_rect,
+                                self.crop_aspect_ratio,
+                            ) {
+                                return (
+                                    event::Status::Captured,
+                                    Some(ViewerEvent::CropCommitted { rect }),
+                                );
+                            }
                         }
                     }
                     return (event::Status::Captured, None);
@@ -558,6 +566,14 @@ impl shader::Program<ViewerEvent> for ImageCanvas {
 
             shader::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if state.crop_dragging {
+                    if !self.crop_mode {
+                        // Crop mode was cancelled mid-drag; drop the stale
+                        // selection instead of keeping it tracking.
+                        state.crop_dragging = false;
+                        state.crop_start = None;
+                        state.crop_current = None;
+                        return (event::Status::Captured, None);
+                    }
                     if let Some(pos) = cursor.position_in(bounds) {
                         let abs_pos = Point::new(pos.x + bounds.x, pos.y + bounds.y);
                         state.crop_current = Some(abs_pos);
@@ -1717,6 +1733,64 @@ mod tests {
         );
 
         assert!(matches!(interaction, mouse::Interaction::Grab));
+    }
+
+    #[test]
+    fn crop_drag_release_after_crop_mode_cancel_does_not_commit() {
+        // Start a crop drag, then simulate the app cancelling crop mode
+        // (Escape) before the mouse button is released: the release must
+        // discard the abandoned selection instead of committing it.
+        let mut crop_canvas = test_canvas(200, 100, 1.0);
+        crop_canvas.crop_mode = true;
+        let mut state = ViewerState::default();
+        let bounds = test_bounds();
+        let mut messages = Vec::new();
+        let mut shell = iced::advanced::Shell::new(&mut messages);
+
+        let (status, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &crop_canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(150.0, 80.0)),
+            &mut shell,
+        );
+        assert!(matches!(status, event::Status::Captured));
+        assert!(event.is_none());
+        assert!(
+            state.crop_dragging,
+            "press inside the image starts the drag"
+        );
+
+        let _ = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &crop_canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(220.0, 120.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(220.0, 120.0)),
+            &mut shell,
+        );
+
+        // Escape cancelled crop mode in the app; the canvas re-renders with
+        // crop_mode = false while the viewer-side drag state still lingers.
+        let plain_canvas = test_canvas(200, 100, 1.0);
+        let (_, event) = <ImageCanvas as shader::Program<ViewerEvent>>::update(
+            &plain_canvas,
+            &mut state,
+            shader::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(220.0, 120.0)),
+            &mut shell,
+        );
+        assert!(
+            event.is_none(),
+            "release after crop-mode cancellation must not commit a crop"
+        );
+        assert!(!state.crop_dragging);
+        assert!(state.crop_start.is_none());
+        assert!(state.crop_current.is_none());
     }
 
     #[test]

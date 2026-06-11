@@ -804,13 +804,25 @@ impl App {
         use keyboard::Key;
 
         match key {
-            // Escape: dismiss overlays, exit collection, or go back to library
+            // Escape: dismiss overlays, cancel cropping, exit collection, or
+            // go back to library
             Key::Named(Named::Escape) => {
                 if self.context_menu.is_some() {
                     self.context_menu = None;
                 } else if self.editing_collection_name.is_some() {
                     self.editing_collection_name = None;
                     self.collection_name_buf.clear();
+                } else if self.tab == Tab::Detail && self.crop_mode {
+                    // Cancel the crop tool (discarding any in-flight drag —
+                    // the viewer drops uncommitted selections once crop mode
+                    // is off) and stay on the image.
+                    let previous_rotation = self.current_rotation();
+                    let previous_crop = self.visible_crop();
+                    self.crop_mode = false;
+                    self.preserve_actual_size_after_display_change(
+                        previous_rotation,
+                        previous_crop,
+                    );
                 } else if self.tab == Tab::Detail && self.collection_nav.is_some() {
                     self.tab = Tab::Library;
                     self.collection_nav = None;
