@@ -123,6 +123,14 @@ pub(crate) struct OwedLocalEditBake {
     pub(crate) lens: edit::LensCorrection,
 }
 
+/// What a path's latest completed persist wrote: the generation on disk and the
+/// edit state those pixels absorbed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CompletedBake {
+    pub(crate) generation_id: u64,
+    pub(crate) state: edit::EditState,
+}
+
 pub(crate) struct App {
     tab: Tab,
     library: Vec<LibraryEntry>,
@@ -174,6 +182,14 @@ pub(crate) struct App {
     pending_local_edit_persist_requests: std::collections::VecDeque<LocalEditPersistRequest>,
     local_edit_persist_in_flight: Option<LocalEditPersistRequest>,
     owed_local_edit_bakes: std::collections::HashMap<u64, OwedLocalEditBake>,
+    // Record of each path's latest completed persist; a disk reload whose bake
+    // generation matches has already absorbed that edit state.
+    last_completed_bakes: std::collections::HashMap<PathBuf, CompletedBake>,
+    // Bake generation each path's currently loaded base came from (absent for
+    // originals); a completed persist with a different generation means the disk
+    // has advanced past the loaded base, so even a default state is a revert
+    // that must bake.
+    loaded_base_generations: std::collections::HashMap<PathBuf, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,7 +225,7 @@ pub(crate) enum Message {
     LocalEditPersistCompleted {
         path: PathBuf,
         request_id: u64,
-        result: Result<Option<Arc<ImageData>>, String>,
+        result: Result<Option<CompletedLocalEditBake>, String>,
     },
     LibraryItemClicked(usize),
     SliderChanged(SliderKind, f32),
@@ -313,6 +329,8 @@ impl App {
             pending_local_edit_persist_requests: std::collections::VecDeque::new(),
             local_edit_persist_in_flight: None,
             owed_local_edit_bakes: std::collections::HashMap::new(),
+            last_completed_bakes: std::collections::HashMap::new(),
+            loaded_base_generations: std::collections::HashMap::new(),
         };
 
         // Restore saved library entries

@@ -25,6 +25,10 @@ pub(crate) struct LoadedFullImage {
     pub(crate) image: Arc<ImageData>,
     pub(crate) fingerprint: Option<SourceFileFingerprint>,
     pub(crate) base_source: BaseImageSource,
+    /// Generation of the persisted bake these pixels came from; None for
+    /// originals. Lets the app recognize when a freshly loaded bake already
+    /// contains the session's committed edit state.
+    pub(crate) bake_generation: Option<u64>,
     pub(crate) logical_dimensions: (u32, u32),
 }
 
@@ -158,18 +162,19 @@ pub(crate) fn load_full_image(
 ) -> Result<LoadedFullImage, String> {
     let mut guard = open_cache_validation_handle(path);
     let fingerprint = guard.as_mut().and_then(SourceFileFingerprint::from_file);
-    let (image, base_source, logical_dimensions) = match preferred_source {
+    let (image, base_source, logical_dimensions, bake_generation) = match preferred_source {
         BaseImageSource::PersistedLocalEdit => match load_persisted_local_edit(path) {
             Ok(Some(loaded)) => (
                 loaded.image,
                 BaseImageSource::PersistedLocalEdit,
                 loaded.logical_dimensions,
+                Some(loaded.generation_id),
             ),
             Ok(None) => {
                 let image = decode::decode_image(path)?;
                 let logical_dimensions =
                     loaded_image_logical_dimensions(path, BaseImageSource::Original, &image);
-                (image, BaseImageSource::Original, logical_dimensions)
+                (image, BaseImageSource::Original, logical_dimensions, None)
             }
             Err(error) => {
                 log::debug!(
@@ -180,14 +185,14 @@ pub(crate) fn load_full_image(
                 let image = decode::decode_image(path)?;
                 let logical_dimensions =
                     loaded_image_logical_dimensions(path, BaseImageSource::Original, &image);
-                (image, BaseImageSource::Original, logical_dimensions)
+                (image, BaseImageSource::Original, logical_dimensions, None)
             }
         },
         BaseImageSource::Original => {
             let image = decode::decode_image(path)?;
             let logical_dimensions =
                 loaded_image_logical_dimensions(path, BaseImageSource::Original, &image);
-            (image, BaseImageSource::Original, logical_dimensions)
+            (image, BaseImageSource::Original, logical_dimensions, None)
         }
     };
     drop(guard);
@@ -195,6 +200,7 @@ pub(crate) fn load_full_image(
         image,
         fingerprint,
         base_source,
+        bake_generation,
         logical_dimensions,
     })
 }

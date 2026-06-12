@@ -88,6 +88,7 @@ fn loaded_full_image(path: &Path, image: Arc<decode::ImageData>) -> LoadedFullIm
         image,
         fingerprint: SourceFileFingerprint::from_path(path),
         base_source: BaseImageSource::Original,
+        bake_generation: None,
         logical_dimensions,
     }
 }
@@ -154,8 +155,17 @@ fn complete_in_flight_persist_with_rendered_thumbnail(app: &mut App) {
     let _ = app.update(Message::LocalEditPersistCompleted {
         path: request.path.clone(),
         request_id: request.request_id,
-        result: Ok(Some(thumbnail)),
+        result: Ok(Some(CompletedLocalEditBake {
+            thumbnail,
+            generation_id: Some(1000),
+        })),
     });
+}
+
+fn rotated_test_state() -> edit::EditState {
+    let mut state = edit::EditState::default();
+    state.rotate_clockwise();
+    state
 }
 
 fn rgba_handle_pixels(handle: &ImageHandle) -> (u32, u32, Vec<u8>) {
@@ -415,6 +425,7 @@ fn persist_test_local_edit(
             state.rotation,
             state.crop,
         ),
+        base_dimensions,
         state,
         lens: edit::LensCorrection::default(),
         base_source,
@@ -1548,7 +1559,10 @@ fn persist_completed_thumbnail_updates_stored_base_and_provenance() {
     let _ = app.update(Message::LocalEditPersistCompleted {
         path: path.clone(),
         request_id: 1,
-        result: Ok(Some(test_image_from_pixels(1, 1, &baked_pixels))),
+        result: Ok(Some(CompletedLocalEditBake {
+            thumbnail: test_image_from_pixels(1, 1, &baked_pixels),
+            generation_id: Some(1000),
+        })),
     });
 
     let entry = &app.library[0];
@@ -1649,6 +1663,7 @@ fn commit_during_preview_then_navigate_away_still_bakes_after_full_decode() {
             image: full_a.clone(),
             fingerprint: None,
             base_source: BaseImageSource::Original,
+            bake_generation: None,
             logical_dimensions: (2, 1),
         }),
     });
@@ -1691,6 +1706,7 @@ fn fulfilled_owed_bake_seeds_base_image_source_for_reopen() {
                 image: test_image_from_pixels(2, 1, &pixels),
                 fingerprint: None,
                 base_source: BaseImageSource::Original,
+                bake_generation: None,
                 logical_dimensions: (2, 1),
             }),
         });
@@ -1734,6 +1750,7 @@ fn owed_bake_skipped_for_unedited_baked_image() {
             image: test_image_from_pixels(2, 1, &pixels),
             fingerprint: None,
             base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: None,
             logical_dimensions: (2, 1),
         }),
     });
@@ -1792,6 +1809,7 @@ fn stale_preview_completion_still_fulfills_owed_bake_via_chained_full_decode() {
             image: test_image_from_pixels(2, 1, &pixels),
             fingerprint: None,
             base_source: BaseImageSource::Original,
+            bake_generation: None,
             logical_dimensions: (2, 1),
         }),
     });
@@ -1848,12 +1866,564 @@ fn owed_bake_skipped_when_state_is_default_and_no_bake_exists() {
             image: test_image_from_pixels(2, 1, &pixels),
             fingerprint: None,
             base_source: BaseImageSource::Original,
+            bake_generation: None,
             logical_dimensions: (2, 1),
         }),
     });
 
     assert!(app.local_edit_persist_in_flight.is_none());
     assert!(app.owed_local_edit_bakes.is_empty());
+}
+
+#[test]
+fn reload_of_a_bake_that_absorbed_the_session_edits_resets_history_instead_of_reapplying() {
+    let path = PathBuf::from("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+
+    // The session committed a rotation, the persist task baked it as generation 7,
+    // and the full image was then evicted from the session cache.
+    let mut history = edit::UndoHistory::new();
+    history.current.rotate_clockwise();
+    app.edit_histories.insert(path.clone(), history);
+    app.last_completed_bakes.insert(
+        path.clone(),
+        CompletedBake {
+            generation_id: 7,
+            state: rotated_test_state(),
+        },
+    );
+
+    // Reopening loads the bake from disk — generation 7, rotation already inside.
+    let request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(1, 2, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(7),
+            logical_dimensions: (1, 2),
+        }),
+    });
+
+    assert!(
+        app.edit_histories
+            .get(&path)
+            .map(|history| history.current.is_default())
+            .unwrap_or(true),
+        "the loaded bake already contains the committed edits; keeping the session \
+         state would render and re-bake them twice"
+    );
+    assert!(
+        app.local_edit_persist_in_flight.is_none(),
+        "nothing new to persist when the loaded bake is the latest commit"
+    );
+    assert!(
+        app.save_status.is_none(),
+        "absorbing exactly the committed state loses nothing; no notice may fire"
+    );
+
+    // A second eviction-reopen of the SAME bake must also stay silent: the
+    // absorbed state was already accounted for by the first reset.
+    let request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(1, 2, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(7),
+            logical_dimensions: (1, 2),
+        }),
+    });
+    assert!(
+        app.save_status.is_none(),
+        "re-absorbing an already-absorbed bake loses nothing; a recurring \
+         lost-adjustments warning on idle revisits would be a false alarm"
+    );
+    assert!(app
+        .edit_histories
+        .get(&path)
+        .map(|history| history.current.is_default())
+        .unwrap_or(true));
+}
+
+#[test]
+fn reload_of_an_older_bake_keeps_session_state_while_the_newer_persist_is_pending() {
+    let path = PathBuf::from("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+
+    let mut history = edit::UndoHistory::new();
+    history.current.rotate_clockwise();
+    app.edit_histories.insert(path.clone(), history);
+    app.last_completed_bakes.insert(
+        path.clone(),
+        CompletedBake {
+            generation_id: 7,
+            state: rotated_test_state(),
+        },
+    );
+
+    // The disk still holds generation 5: the newest persist has not landed yet,
+    // so the session state is NOT inside the loaded pixels and must survive.
+    let request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(5),
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    assert_eq!(
+        app.edit_histories
+            .get(&path)
+            .map(|history| history.current.rotation)
+            .unwrap_or_default(),
+        edit::QuarterTurns::new(1),
+        "an older bake does not contain the session edits; the state must stay"
+    );
+}
+
+#[test]
+fn reload_racing_a_pending_persist_keeps_state_and_substitutes_the_pending_base() {
+    let path = PathBuf::from("frame.png");
+    let base_pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let stale_bake_pixels = [0, 0, 255, 255, 255, 255, 0, 255];
+    let mut app = detail_app_with_image(&path, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &base_pixels));
+    app.base_image_sources
+        .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+
+    // S1 already completed (generation 7 on disk and recorded); S2 is committed
+    // in the session and its persist is still in flight, still holding the base
+    // it was authored on.
+    let mut history = edit::UndoHistory::new();
+    history.current.rotate_clockwise();
+    app.edit_histories.insert(path.clone(), history);
+    app.last_completed_bakes.insert(
+        path.clone(),
+        CompletedBake {
+            generation_id: 7,
+            state: rotated_test_state(),
+        },
+    );
+    let mut pending_state = edit::EditState::default();
+    pending_state.rotate_clockwise();
+    app.local_edit_persist_in_flight = Some(LocalEditPersistRequest {
+        request_id: 9,
+        path: path.clone(),
+        image: test_image_from_pixels(2, 1, &base_pixels),
+        logical_dimensions: (1, 2),
+        base_dimensions: (2, 1),
+        state: pending_state,
+        lens: edit::LensCorrection::default(),
+        base_source: BaseImageSource::PersistedLocalEdit,
+    });
+
+    // The reload races the in-flight persist and hands back the S1 bake
+    // (generation 7 — a naive absorbed-match would wipe S2).
+    let request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &stale_bake_pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(7),
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    assert_eq!(
+        app.edit_histories
+            .get(&path)
+            .map(|history| history.current.rotation)
+            .unwrap_or_default(),
+        edit::QuarterTurns::new(1),
+        "the racing persist has not absorbed S2 yet; the session state must stay"
+    );
+    assert_eq!(
+        app.image.as_ref().expect("image").pixels,
+        base_pixels.to_vec(),
+        "the displayed base must be the pending request's base, not the stale bake"
+    );
+    assert_eq!(
+        app.local_edit_persist_in_flight
+            .as_ref()
+            .map(|request| request.request_id),
+        Some(9),
+        "the in-flight persist already covers the session state; no new bake queues"
+    );
+    assert!(app.pending_local_edit_persist_requests.is_empty());
+}
+
+#[test]
+fn owed_fulfillment_defers_to_a_pending_persist_for_the_same_path() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources.clear();
+
+    let request_id = app.detail_load.begin_request();
+    app.detail_load.on_preview_loaded();
+    let _ = app.update(Message::RotateClockwise);
+    let _ = app.start_load(PathBuf::from("b.png"));
+    assert!(app.owed_local_edit_bakes.contains_key(&request_id));
+
+    // A newer persist for the same path is already in flight (e.g. the user
+    // reopened the photo and committed again before the stale decode landed).
+    // The racing persist carries the same state the session still holds.
+    let pending_state = rotated_test_state();
+    app.local_edit_persist_in_flight = Some(LocalEditPersistRequest {
+        request_id: 9,
+        path: path_a.clone(),
+        image: test_image_from_pixels(2, 1, &pixels),
+        logical_dimensions: (2, 1),
+        base_dimensions: (2, 1),
+        state: pending_state,
+        lens: edit::LensCorrection::default(),
+        base_source: BaseImageSource::Original,
+    });
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::Original,
+            bake_generation: None,
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    assert_eq!(
+        app.local_edit_persist_in_flight
+            .as_ref()
+            .map(|request| request.request_id),
+        Some(9),
+        "the pending persist is strictly newer; the owed bake must defer to it"
+    );
+    assert!(
+        app.pending_local_edit_persist_requests.is_empty(),
+        "fulfillment must not queue a bake built on data older than the pending one"
+    );
+    assert!(matches!(
+        app.base_image_sources.get(&path_a),
+        Some(BaseImageSource::Original)
+    ));
+}
+
+#[test]
+fn undo_to_default_on_a_baked_base_rebakes_the_revert() {
+    let path = PathBuf::from("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+    // The displayed base came from bake generation 1.
+    app.loaded_base_generations.insert(path.clone(), 1);
+
+    // Commit a rotation and let its persist complete (a newer generation lands).
+    let _ = app.update(Message::RotateClockwise);
+    assert!(app.local_edit_persist_in_flight.is_some());
+    complete_in_flight_persist_with_rendered_thumbnail(&mut app);
+
+    // Undoing back to default is a REVERT now — the disk holds the rotation.
+    let _ = app.update(Message::RotateCounterclockwise);
+    let request = app
+        .local_edit_persist_in_flight
+        .as_ref()
+        .expect("a revert on a baked base must re-bake the loaded base");
+    assert!(request.state.is_default());
+    assert_eq!(request.path, path);
+}
+
+#[test]
+fn absorbed_reload_clears_stale_redo_state() {
+    let path = PathBuf::from("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+
+    // History: rotation committed (and baked as generation 7), a second commit
+    // was undone — its redo entry is anchored to the pre-absorption base.
+    let mut history = edit::UndoHistory::new();
+    history.current.rotate_clockwise();
+    history.commit();
+    history.current.rotate_clockwise();
+    history.commit();
+    assert!(history.undo());
+    app.edit_histories.insert(path.clone(), history);
+    app.last_completed_bakes.insert(
+        path.clone(),
+        CompletedBake {
+            generation_id: 7,
+            state: rotated_test_state(),
+        },
+    );
+
+    let request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(1, 2, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(7),
+            logical_dimensions: (1, 2),
+        }),
+    });
+
+    let history = app.edit_histories.get_mut(&path).expect("history");
+    assert!(history.current.is_default());
+    assert!(
+        !history.redo(),
+        "redo entries are anchored to the pre-absorption base; re-applying them \
+         onto the absorbed bake would re-create the double-apply corruption"
+    );
+}
+
+#[test]
+fn absorbed_reload_with_unbaked_commits_resets_and_surfaces_a_notice() {
+    let path = PathBuf::from("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+
+    // The bake on disk absorbed one rotation; the session committed a second one
+    // during the reload window (no persist could run, no racing request exists).
+    let mut history = edit::UndoHistory::new();
+    history.current.rotate_clockwise();
+    history.commit();
+    history.current.rotate_clockwise();
+    history.commit();
+    app.edit_histories.insert(path.clone(), history);
+    app.last_completed_bakes.insert(
+        path.clone(),
+        CompletedBake {
+            generation_id: 7,
+            state: rotated_test_state(),
+        },
+    );
+
+    let request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(1, 2, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(7),
+            logical_dimensions: (1, 2),
+        }),
+    });
+
+    assert!(
+        app.edit_histories
+            .get(&path)
+            .map(|history| history.current.is_default())
+            .unwrap_or(true),
+        "commits with no expressible base anchor cannot survive the absorption"
+    );
+    assert!(
+        app.save_status.is_some(),
+        "silently discarding a user commit is not acceptable; a notice must surface"
+    );
+}
+
+#[test]
+fn owed_fulfillment_overrides_an_older_racing_persist_with_the_newer_state() {
+    let path_a = PathBuf::from("a.png");
+    let base_pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &base_pixels));
+    app.base_image_sources.clear();
+
+    // Owed commit: TWO rotations (newer than the racing persist's one).
+    let request_id = app.detail_load.begin_request();
+    app.detail_load.on_preview_loaded();
+    let _ = app.update(Message::RotateClockwise);
+    let _ = app.update(Message::RotateClockwise);
+    let _ = app.start_load(PathBuf::from("b.png"));
+    assert!(app.owed_local_edit_bakes.contains_key(&request_id));
+
+    // The racing persist carries only the FIRST rotation (it started before the
+    // second commit) on the base both states are anchored to.
+    app.local_edit_persist_in_flight = Some(LocalEditPersistRequest {
+        request_id: 5,
+        path: path_a.clone(),
+        image: test_image_from_pixels(2, 1, &base_pixels),
+        logical_dimensions: (1, 2),
+        base_dimensions: (2, 1),
+        state: rotated_test_state(),
+        lens: edit::LensCorrection::default(),
+        base_source: BaseImageSource::Original,
+    });
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &[9, 9, 9, 255, 9, 9, 9, 255]),
+            fingerprint: None,
+            base_source: BaseImageSource::Original,
+            bake_generation: None,
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    let queued = app
+        .pending_local_edit_persist_requests
+        .back()
+        .expect("the newer owed state must queue behind the racing persist");
+    assert_eq!(queued.path, path_a);
+    assert_eq!(queued.state.rotation, edit::QuarterTurns::new(2));
+    assert_eq!(
+        queued.image.pixels,
+        base_pixels.to_vec(),
+        "the owed bake must use the racing request's base, not the stale decode"
+    );
+}
+
+#[test]
+fn reopening_an_unedited_baked_image_does_not_rebake_identical_pixels() {
+    let path = PathBuf::from("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path.clone(), BaseImageSource::PersistedLocalEdit);
+
+    // First open this session: no edits, no generation recorded yet.
+    let request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(3),
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    assert!(
+        app.local_edit_persist_in_flight.is_none(),
+        "a default-state baked image must not queue a full-resolution identity re-bake"
+    );
+}
+
+#[test]
+fn owed_fulfillment_skips_when_the_loaded_bake_already_absorbed_the_state() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path_a.clone(), BaseImageSource::PersistedLocalEdit);
+
+    let mut history = edit::UndoHistory::new();
+    history.current.rotate_clockwise();
+    app.edit_histories.insert(path_a.clone(), history);
+
+    // Superseded while loading; the persist that baked the rotation (generation 9)
+    // completed while the user was on another image.
+    let request_id = app.detail_load.begin_request();
+    let _ = app.start_load(PathBuf::from("b.png"));
+    app.last_completed_bakes.insert(
+        path_a.clone(),
+        CompletedBake {
+            generation_id: 9,
+            state: rotated_test_state(),
+        },
+    );
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(1, 2, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            bake_generation: Some(9),
+            logical_dimensions: (1, 2),
+        }),
+    });
+
+    assert!(
+        app.local_edit_persist_in_flight.is_none(),
+        "the stale decode delivered the very bake the owed commit produced"
+    );
+    assert!(
+        app.edit_histories
+            .get(&path_a)
+            .map(|history| history.current.is_default())
+            .unwrap_or(true),
+        "absorbed state must reset so a later reopen cannot re-apply it"
+    );
+    assert!(matches!(
+        app.base_image_sources.get(&path_a),
+        Some(BaseImageSource::PersistedLocalEdit)
+    ));
+}
+
+#[test]
+fn owed_fulfillment_guard_skips_after_state_reset_but_still_seeds_base_source() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources.clear();
+
+    // Owed registration happens with a real commit in place…
+    let request_id = app.detail_load.begin_request();
+    app.detail_load.on_preview_loaded();
+    let _ = app.update(Message::RotateClockwise);
+    let _ = app.start_load(PathBuf::from("b.png"));
+    assert!(app.owed_local_edit_bakes.contains_key(&request_id));
+
+    // …but the state is back at default by the time the stale decode lands.
+    app.edit_histories
+        .insert(path_a.clone(), edit::UndoHistory::new());
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::Original,
+            bake_generation: None,
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    assert!(
+        app.local_edit_persist_in_flight.is_none(),
+        "default state over an original base with no bake owes nothing at fulfillment"
+    );
+    assert!(
+        matches!(
+            app.base_image_sources.get(&path_a),
+            Some(BaseImageSource::Original)
+        ),
+        "the fulfillment guard must seed the base map even when it skips"
+    );
 }
 
 #[test]
@@ -2926,6 +3496,7 @@ fn persisted_local_edit_reopen_uses_persisted_logical_dimensions_in_status_text(
             path: path.clone(),
             image: test_image(6, 4),
             logical_dimensions: (3, 2),
+            base_dimensions: (6, 4),
             state,
             lens: edit::LensCorrection::default(),
             base_source: BaseImageSource::Original,

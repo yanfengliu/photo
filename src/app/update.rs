@@ -52,11 +52,48 @@ impl App {
                 }
 
                 match result {
-                    Ok(loaded) => {
+                    Ok(mut loaded) => {
+                        // A persist still racing for this path means the disk bake
+                        // is stale by construction; adopt the racing request's base
+                        // (the pixels its edit state was authored on) so the state
+                        // neither re-applies onto a newer bake nor gets wiped.
+                        let racing_covers_state =
+                            if let Some(path) = self.current_image_path.as_deref() {
+                                if let Some(racing) = self.newest_pending_persist_for_path(path) {
+                                    let covers = racing.state == self.visible_edit_state();
+                                    loaded = LoadedFullImage {
+                                        image: racing.image.clone(),
+                                        fingerprint: loaded.fingerprint,
+                                        base_source: racing.base_source,
+                                        bake_generation: None,
+                                        logical_dimensions: racing.base_dimensions,
+                                    };
+                                    covers
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                        let absorbed = self.current_image_path.as_deref().is_some_and(|path| {
+                            self.loaded_bake_absorbed_session_state(path, &loaded)
+                        });
                         if let Some(path) = self.current_image_path.clone() {
                             self.base_image_sources
                                 .insert(path.clone(), loaded.base_source);
+                            match loaded.bake_generation {
+                                Some(generation) => {
+                                    self.loaded_base_generations
+                                        .insert(path.clone(), generation);
+                                }
+                                None => {
+                                    self.loaded_base_generations.remove(&path);
+                                }
+                            }
                             self.current_image_source_dimensions = Some(loaded.logical_dimensions);
+                            if absorbed {
+                                self.reset_absorbed_session_state(&path);
+                            }
                         }
                         let reset_view = self.detail_load.on_full_image_loaded();
                         if let Some(fingerprint) = loaded.fingerprint {
@@ -66,6 +103,12 @@ impl App {
                             );
                         }
                         self.apply_loaded_image(loaded.image, reset_view);
+                        if absorbed || racing_covers_state {
+                            // Either the loaded bake IS the session's latest commit,
+                            // or the racing persist already carries it; nothing new
+                            // to render or persist.
+                            return Task::none();
+                        }
                         return self.enqueue_current_local_edit_persist();
                     }
                     Err(e) => {
@@ -180,19 +223,34 @@ impl App {
                 request_id,
                 result,
             } => {
-                if self
+                let completed_request_state = self
                     .local_edit_persist_in_flight
                     .as_ref()
-                    .is_some_and(|request| request.path == path && request.request_id == request_id)
-                {
+                    .filter(|request| request.path == path && request.request_id == request_id)
+                    .map(|request| request.state);
+                if completed_request_state.is_some() {
                     self.local_edit_persist_in_flight = None;
                 }
                 let follow_up = match result {
-                    Ok(Some(thumbnail)) => {
-                        self.set_library_thumbnail_for_path(&path, thumbnail);
+                    Ok(Some(bake)) => {
+                        if let (Some(generation_id), Some(state)) =
+                            (bake.generation_id, completed_request_state)
+                        {
+                            self.last_completed_bakes.insert(
+                                path.clone(),
+                                CompletedBake {
+                                    generation_id,
+                                    state,
+                                },
+                            );
+                        }
+                        self.set_library_thumbnail_for_path(&path, bake.thumbnail);
                         Task::none()
                     }
-                    Ok(None) => self.reload_library_thumbnail_after_bake_removal(&path),
+                    Ok(None) => {
+                        self.last_completed_bakes.remove(&path);
+                        self.reload_library_thumbnail_after_bake_removal(&path)
+                    }
                     Err(error) => {
                         log::warn!(
                             "Local edit persistence failed for {}: {}",
@@ -1257,10 +1315,7 @@ impl App {
             return None;
         }
         let base_source = self.current_base_image_source();
-        if state.is_default()
-            && matches!(base_source, BaseImageSource::Original)
-            && !persisted_local_edit_exists(&path, LocalEditCacheVariant::Full)
-        {
+        if self.bake_has_nothing_new(state, base_source, &path) {
             return None;
         }
         let lens = self.current_lens_correction(state.lens_correction);
@@ -1278,6 +1333,7 @@ impl App {
                 state.rotation,
                 state.crop,
             ),
+            base_dimensions,
             state,
             lens,
             base_source,
@@ -1333,7 +1389,7 @@ impl App {
             return;
         }
         let base_source = self.preferred_base_image_source(&path);
-        if Self::owed_bake_has_nothing_new(state, base_source, &path) {
+        if self.bake_has_nothing_new(state, base_source, &path) {
             return;
         }
         let lens = self.current_lens_correction(state.lens_correction);
@@ -1344,22 +1400,99 @@ impl App {
     }
 
     /// A default-state image owes nothing when it was never baked (nothing to
-    /// persist) or when its base already IS the bake (an identity re-bake would
-    /// re-render and rewrite identical full-resolution pixels). A default state
-    /// over an `Original` base with an existing bake still owes: that is a
-    /// pending reset, and persisting it removes the bake.
-    fn owed_bake_has_nothing_new(
+    /// persist) or when its base already IS the bake still on disk (an identity
+    /// re-bake would rewrite identical full-resolution pixels). A default state
+    /// over an `Original` base with an existing bake still owes (pending reset:
+    /// persisting it removes the bake), and a default state over a baked base
+    /// that a session persist has advanced PAST is a revert that must re-bake —
+    /// "default" no longer matches the disk.
+    fn bake_has_nothing_new(
+        &self,
         state: edit::EditState,
         base_source: BaseImageSource,
         path: &Path,
     ) -> bool {
-        state.is_default()
-            && match base_source {
-                BaseImageSource::Original => {
-                    !persisted_local_edit_exists(path, LocalEditCacheVariant::Full)
-                }
-                BaseImageSource::PersistedLocalEdit => true,
+        if !state.is_default() {
+            return false;
+        }
+        match base_source {
+            BaseImageSource::Original => {
+                !persisted_local_edit_exists(path, LocalEditCacheVariant::Full)
             }
+            BaseImageSource::PersistedLocalEdit => {
+                if self.newest_pending_persist_for_path(path).is_some() {
+                    return false;
+                }
+                match (
+                    self.last_completed_bakes.get(path),
+                    self.loaded_base_generations.get(path),
+                ) {
+                    (None, _) => true,
+                    (Some(bake), Some(loaded)) => bake.generation_id == *loaded,
+                    (Some(_), None) => false,
+                }
+            }
+        }
+    }
+
+    /// True when the freshly loaded base is the very bake this session last
+    /// committed for the path: its pixels already contain the session's edit
+    /// state, so that state must reset rather than render (and re-bake) on top.
+    pub(crate) fn loaded_bake_absorbed_session_state(
+        &self,
+        path: &Path,
+        loaded: &LoadedFullImage,
+    ) -> bool {
+        matches!(loaded.base_source, BaseImageSource::PersistedLocalEdit)
+            && loaded.bake_generation.is_some()
+            && loaded.bake_generation
+                == self
+                    .last_completed_bakes
+                    .get(path)
+                    .map(|bake| bake.generation_id)
+    }
+
+    /// The newest persist still racing for this path, if any. While one exists,
+    /// any disk bake is stale by construction and the request itself holds the
+    /// exact base its edit state was authored on.
+    pub(crate) fn newest_pending_persist_for_path(
+        &self,
+        path: &Path,
+    ) -> Option<&LocalEditPersistRequest> {
+        self.pending_local_edit_persist_requests
+            .iter()
+            .rev()
+            .find(|request| request.path == path)
+            .or_else(|| {
+                self.local_edit_persist_in_flight
+                    .as_ref()
+                    .filter(|request| request.path == path)
+            })
+    }
+
+    /// Replaces the path's history outright: undo/redo entries are anchored to
+    /// the pre-absorption base, and replaying any of them onto the absorbed bake
+    /// would double-apply. Commits the bake never absorbed (made during the
+    /// reload window, with no racing persist to carry them) cannot be expressed
+    /// against the new base — they are discarded with a visible notice.
+    pub(crate) fn reset_absorbed_session_state(&mut self, path: &Path) {
+        let baked_state = self.last_completed_bakes.get(path).map(|bake| bake.state);
+        if let Some(history) = self.edit_histories.get_mut(path) {
+            let lost_commits = baked_state != Some(history.current);
+            *history = edit::UndoHistory::new();
+            if lost_commits {
+                self.save_status = Some(
+                    "Adjustments made while the photo was reloading could not be kept".to_string(),
+                );
+            }
+        }
+        // Post-absorption, the absorbed state IS the identity relative to the
+        // re-anchored base. Normalizing the record keeps a later re-absorption of
+        // the same bake from comparing against the pre-reset state and falsely
+        // re-firing the lost-commits notice.
+        if let Some(record) = self.last_completed_bakes.get_mut(path) {
+            record.state = edit::EditState::default();
+        }
     }
 
     pub(crate) fn fulfill_owed_local_edit_bake(
@@ -1372,6 +1505,49 @@ impl App {
         };
         match result {
             Ok(loaded) => {
+                let state = self
+                    .edit_histories
+                    .get(&owed.path)
+                    .map(|history| history.current)
+                    .unwrap_or_default();
+                // A persist racing for this path makes the stale decode's bake
+                // obsolete. If the racing request already carries the current
+                // state, the owed bake is redundant; if the owed state is NEWER
+                // (committed under blocks_save after the racing persist started),
+                // it must bake on the racing request's base — the pixels the
+                // session state is actually anchored to — not the stale decode.
+                let racing_snapshot =
+                    self.newest_pending_persist_for_path(&owed.path)
+                        .map(|racing| {
+                            (
+                                racing.image.clone(),
+                                racing.base_source,
+                                racing.base_dimensions,
+                                racing.state,
+                            )
+                        });
+                if let Some((image, base_source, base_dimensions, racing_state)) = racing_snapshot {
+                    self.base_image_sources
+                        .insert(owed.path.clone(), base_source);
+                    if racing_state == state {
+                        return Task::none();
+                    }
+                    let request = LocalEditPersistRequest {
+                        request_id: self.next_local_edit_persist_request_id(),
+                        path: owed.path,
+                        image,
+                        logical_dimensions: display_dimensions_for_edit_state(
+                            base_dimensions,
+                            state.rotation,
+                            state.crop,
+                        ),
+                        base_dimensions,
+                        state,
+                        lens: owed.lens,
+                        base_source,
+                    };
+                    return self.enqueue_local_edit_persist(request);
+                }
                 // The session's edit state for this path is relative to the base
                 // this decode actually used. Record that base, exactly as the
                 // current-request arm does, or the next reopen would resolve the
@@ -1379,12 +1555,25 @@ impl App {
                 // state on top of it a second time.
                 self.base_image_sources
                     .insert(owed.path.clone(), loaded.base_source);
-                let state = self
-                    .edit_histories
-                    .get(&owed.path)
-                    .map(|history| history.current)
-                    .unwrap_or_default();
-                if Self::owed_bake_has_nothing_new(state, loaded.base_source, &owed.path) {
+                if self.loaded_bake_absorbed_session_state(&owed.path, &loaded) {
+                    self.reset_absorbed_session_state(&owed.path);
+                    return Task::none();
+                }
+                // Nothing-new for a stale decode is judged against ITS base: a
+                // default state skips only when no session persist exists at all.
+                // With one on record (and this decode's generation differing —
+                // absorbed already returned above), the default state is a revert
+                // and this decode's older base is exactly the right one to re-bake.
+                let nothing_new = state.is_default()
+                    && match loaded.base_source {
+                        BaseImageSource::Original => {
+                            !persisted_local_edit_exists(&owed.path, LocalEditCacheVariant::Full)
+                        }
+                        BaseImageSource::PersistedLocalEdit => {
+                            !self.last_completed_bakes.contains_key(&owed.path)
+                        }
+                    };
+                if nothing_new {
                     return Task::none();
                 }
                 let request = LocalEditPersistRequest {
@@ -1396,6 +1585,7 @@ impl App {
                         state.rotation,
                         state.crop,
                     ),
+                    base_dimensions: loaded.logical_dimensions,
                     state,
                     lens: owed.lens,
                     base_source: loaded.base_source,

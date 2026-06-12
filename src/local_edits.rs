@@ -60,6 +60,9 @@ pub(crate) struct LocalEditPersistRequest {
     pub(crate) path: PathBuf,
     pub(crate) image: Arc<ImageData>,
     pub(crate) logical_dimensions: (u32, u32),
+    /// Logical dimensions of `image` before the state's rotation/crop — kept so a
+    /// reload racing this persist can adopt `image` as its base.
+    pub(crate) base_dimensions: (u32, u32),
     pub(crate) state: edit::EditState,
     pub(crate) lens: edit::LensCorrection,
     pub(crate) base_source: BaseImageSource,
@@ -80,6 +83,16 @@ pub(crate) struct LoadedLocalEditCacheVariantHeader {
 pub(crate) struct LoadedPersistedLocalEdit {
     pub(crate) image: Arc<ImageData>,
     pub(crate) logical_dimensions: (u32, u32),
+    pub(crate) generation_id: u64,
+}
+
+/// What a completed bake hands back to the app: the thumbnail for the Library
+/// refresh plus the generation written to disk (None when no repo root exists,
+/// so nothing was persisted).
+#[derive(Debug, Clone)]
+pub(crate) struct CompletedLocalEditBake {
+    pub(crate) thumbnail: Arc<ImageData>,
+    pub(crate) generation_id: Option<u64>,
 }
 
 pub(crate) struct ValidatedLocalEditCacheHeader {
@@ -822,6 +835,7 @@ pub(crate) fn load_persisted_local_edit(
             LoadedPersistedLocalEdit {
                 image: entry.image,
                 logical_dimensions: entry.logical_dimensions,
+                generation_id: entry.generation_id,
             }
         }),
     )
@@ -1131,7 +1145,7 @@ pub(crate) fn load_repaired_local_edit_thumbnail(
 
 pub(crate) fn persist_local_edit(
     request: &LocalEditPersistRequest,
-) -> Result<Option<Arc<ImageData>>, String> {
+) -> Result<Option<CompletedLocalEditBake>, String> {
     if request.state.is_default() && matches!(request.base_source, BaseImageSource::Original) {
         remove_persisted_local_edit(&request.path)?;
         return Ok(None);
@@ -1146,9 +1160,10 @@ pub(crate) fn persist_local_edit(
     );
     let thumb = thumbnail_from_rendered_image(&full, LOCAL_EDIT_THUMBNAIL_MAX_DIM)?;
 
+    let mut written_generation = None;
     if let Some(cache_dir) = local_edit_cache_dir() {
+        let generation_id = next_local_edit_cache_generation_id();
         with_local_edit_cache_io_lock(|| {
-            let generation_id = next_local_edit_cache_generation_id();
             write_local_edit_cache_variant_with_generation_and_logical_dimensions_to(
                 &cache_dir,
                 &request.path,
@@ -1166,12 +1181,16 @@ pub(crate) fn persist_local_edit(
             )?;
             Ok(())
         })?;
+        written_generation = Some(generation_id);
     }
 
-    Ok(Some(Arc::new(ImageData {
-        pixels: thumb.pixels,
-        width: thumb.width,
-        height: thumb.height,
-        file_size: request.image.file_size,
-    })))
+    Ok(Some(CompletedLocalEditBake {
+        thumbnail: Arc::new(ImageData {
+            pixels: thumb.pixels,
+            width: thumb.width,
+            height: thumb.height,
+            file_size: request.image.file_size,
+        }),
+        generation_id: written_generation,
+    }))
 }

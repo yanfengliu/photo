@@ -5,6 +5,16 @@ Keep this file short, current, and actionable.
 Note: entries dated before 2026-05-01 predate the evidence-anchor-table mandate in AGENTS.md and are grandfathered as-is; their anchors live in the dated devlog entries. Every new lesson must start with the evidence-anchor table.
 
 ## Active Lessons
+- 2026-06-11 - Fixing an invariant for the path in your diff without auditing the sibling paths that share it leaves the same failure class open: v0.2.2 closed "session edit state must stay relative to its recorded base" for decodes whose base was the Original, and the post-hoc reviewer found the identical corruption alive for bake-as-base reloads (edit over an existing bake → session-cache eviction → reopen loads the new bake → state re-applies and re-bakes, compounding). When a review fix closes an invariant violation, enumerate every site that loads/produces the artifacts the invariant relates (here: every `ImageLoaded` consumer) before declaring it closed — audit the invariant, not the diff. The structural fix was making absorption observable (persists report their written generation; reloads matching `last_baked_generations` reset the absorbed state).
+
+  | Field | Value |
+  |---|---|
+  | Surfaced by | Post-hoc verification pass, docs/threads/done/library-offline-edits/2026-06-11/3/REVIEW.md (finding 3-H1) |
+  | Reviewer findings | Claude post-hoc HIGH 3-H1 (+ MEDIUM 3-M2 mainline identity re-bakes, same predicate-reuse fix) |
+  | Fix commit | (library-offline-edits follow-up commit, v0.2.4) |
+  | Test added | app::tests::reload_of_a_bake_that_absorbed_the_session_edits_resets_history_instead_of_reapplying, app::tests::reload_of_an_older_bake_keeps_session_state_while_the_newer_persist_is_pending, app::tests::owed_fulfillment_skips_when_the_loaded_bake_already_absorbed_the_state |
+  | Behavior delta | before: edit a previously-baked photo, browse 4+ photos, return — edits render doubled on screen and the bake compounds (S², S³…) on every revisit, with exports corrupted identically; after: the reload recognizes the absorbed state, the image shows the committed look once, and the bake stays byte-stable |
+
 - 2026-06-11 - A durable store keyed through the live source file inverts durability exactly when it matters: the baked local-edit cache derived its filename from `fs::canonicalize(source)` and refused every read without fresh source metadata, so unplugging the camera card made committed edits unreachable (different key hash AND fail-closed validation) while the store sat intact on disk. Derive cache keys reachability-independently (candidate forms: canonical, parent-canonical+name, verbatim `\\?\` guess, raw), and distinguish source ABSENT (fail open to the last committed artifact — nothing newer exists to contradict it) from source CHANGED (fail closed — the bake no longer describes it). The same inversion hid in `load_library()` filtering entries on `Path::exists()`: a transient unplug emptied the library and the next save made the eviction permanent — never destructively filter user-intent data on transient environment state.
 
   | Field | Value |
