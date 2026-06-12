@@ -933,6 +933,10 @@ pub fn save_edited_image(
     let rendered = render_edited_image(pixels, width, height, state, lens);
 
     let save_path = edited_save_path(original_path);
+    if let Some(parent) = save_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create export directory: {e}"))?;
+    }
     let img = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.pixels)
         .ok_or_else(|| "Failed to create output image".to_string())?;
     img.save(&save_path)
@@ -1043,6 +1047,13 @@ fn generate_cpu_blur(pixels: &[u8], width: u32, height: u32) -> Vec<f32> {
     blur
 }
 
+/// Repo-local directory that receives save-as-copy exports (gitignored).
+pub const EDITED_EXPORT_DIR_NAME: &str = "edited";
+
+/// Exports land in the repo-local `edited/` directory so the app never writes
+/// into the source folder (which may be a camera card). Re-exporting the same
+/// source overwrites its previous export. Without a repo root the legacy
+/// next-to-the-original location applies.
 pub fn edited_save_path(original: &Path) -> PathBuf {
     let stem = original
         .file_stem()
@@ -1057,7 +1068,10 @@ pub fn edited_save_path(original: &Path) -> PathBuf {
         Some(e) => format!("{stem}_edited.{e}"),
         None => format!("{stem}_edited"),
     };
-    original.with_file_name(new_name)
+    match crate::repo::photo_repo_root() {
+        Some(repo_root) => repo_root.join(EDITED_EXPORT_DIR_NAME).join(new_name),
+        None => original.with_file_name(new_name),
+    }
 }
 
 #[cfg(test)]
@@ -1619,27 +1633,79 @@ mod tests {
     }
 
     #[test]
-    fn save_path_appends_edited() {
+    fn save_path_lands_in_repo_local_edited_dir() {
         use std::path::PathBuf;
-        let p = PathBuf::from("/photos/sunset.jpg");
-        let out = edited_save_path(&p);
-        assert_eq!(out, PathBuf::from("/photos/sunset_edited.jpg"));
+        let repo_root = tempfile::tempdir().unwrap();
+        crate::repo::with_test_photo_repo_root(repo_root.path(), || {
+            let p = PathBuf::from("/photos/sunset.jpg");
+            let out = edited_save_path(&p);
+            assert_eq!(
+                out,
+                repo_root.path().join("edited").join("sunset_edited.jpg"),
+                "exports belong in the repo, not next to the source media"
+            );
+        });
+    }
+
+    #[test]
+    fn save_path_falls_back_beside_source_without_repo_root() {
+        use std::path::PathBuf;
+        crate::repo::with_test_photo_repo_root_absent(|| {
+            let p = PathBuf::from("/photos/sunset.jpg");
+            let out = edited_save_path(&p);
+            assert_eq!(out, PathBuf::from("/photos/sunset_edited.jpg"));
+        });
     }
 
     #[test]
     fn save_path_handles_no_extension() {
         use std::path::PathBuf;
-        let p = PathBuf::from("/photos/image");
-        let out = edited_save_path(&p);
-        assert_eq!(out, PathBuf::from("/photos/image_edited"));
+        let repo_root = tempfile::tempdir().unwrap();
+        crate::repo::with_test_photo_repo_root(repo_root.path(), || {
+            let p = PathBuf::from("/photos/image");
+            let out = edited_save_path(&p);
+            assert_eq!(out, repo_root.path().join("edited").join("image_edited"));
+        });
     }
 
     #[test]
     fn save_path_converts_raw_inputs_to_png() {
         use std::path::PathBuf;
-        let p = PathBuf::from("/photos/frame.CR3");
-        let out = edited_save_path(&p);
-        assert_eq!(out, PathBuf::from("/photos/frame_edited.png"));
+        let repo_root = tempfile::tempdir().unwrap();
+        crate::repo::with_test_photo_repo_root(repo_root.path(), || {
+            let p = PathBuf::from("/photos/frame.CR3");
+            let out = edited_save_path(&p);
+            assert_eq!(
+                out,
+                repo_root.path().join("edited").join("frame_edited.png")
+            );
+        });
+    }
+
+    #[test]
+    fn save_edited_image_creates_the_repo_local_edited_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_root = tempfile::tempdir().unwrap();
+        let original = dir.path().join("frame.png");
+        let pixels = [32, 64, 96, 255];
+
+        let out = crate::repo::with_test_photo_repo_root(repo_root.path(), || {
+            save_edited_image(
+                &original,
+                &pixels,
+                1,
+                1,
+                &EditState::default(),
+                LensCorrection::default(),
+            )
+            .unwrap()
+        });
+
+        assert_eq!(
+            out,
+            repo_root.path().join("edited").join("frame_edited.png")
+        );
+        assert!(out.exists());
     }
 
     #[test]
@@ -1648,15 +1714,17 @@ mod tests {
         let original = dir.path().join("frame.dng");
         let pixels = [32, 64, 96, 255];
 
-        let out = save_edited_image(
-            &original,
-            &pixels,
-            1,
-            1,
-            &EditState::default(),
-            LensCorrection::default(),
-        )
-        .unwrap();
+        let out = crate::repo::with_test_photo_repo_root(dir.path(), || {
+            save_edited_image(
+                &original,
+                &pixels,
+                1,
+                1,
+                &EditState::default(),
+                LensCorrection::default(),
+            )
+            .unwrap()
+        });
 
         assert_eq!(out.extension().and_then(|ext| ext.to_str()), Some("png"));
         assert!(out.exists());
@@ -1670,8 +1738,9 @@ mod tests {
         let mut state = EditState::default();
         state.rotate_clockwise();
 
-        let out =
-            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out = crate::repo::with_test_photo_repo_root(dir.path(), || {
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap()
+        });
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1688,8 +1757,9 @@ mod tests {
         let mut state = EditState::default();
         state.rotate_counterclockwise();
 
-        let out =
-            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out = crate::repo::with_test_photo_repo_root(dir.path(), || {
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap()
+        });
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1707,8 +1777,9 @@ mod tests {
         state.rotate_clockwise();
         state.rotate_clockwise();
 
-        let out =
-            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out = crate::repo::with_test_photo_repo_root(dir.path(), || {
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap()
+        });
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 2);
@@ -1729,8 +1800,9 @@ mod tests {
             ..EditState::default()
         };
 
-        let out =
-            save_edited_image(&original, &pixels, 2, 2, &state, LensCorrection::default()).unwrap();
+        let out = crate::repo::with_test_photo_repo_root(dir.path(), || {
+            save_edited_image(&original, &pixels, 2, 2, &state, LensCorrection::default()).unwrap()
+        });
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1748,8 +1820,9 @@ mod tests {
         state.rotate_clockwise();
         state.crop = Some(CropRect::new(0.0, 0.0, 1.0, 0.5));
 
-        let out =
-            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out = crate::repo::with_test_photo_repo_root(dir.path(), || {
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap()
+        });
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 1);
@@ -1767,8 +1840,9 @@ mod tests {
             ..EditState::default()
         };
 
-        let out =
-            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap();
+        let out = crate::repo::with_test_photo_repo_root(dir.path(), || {
+            save_edited_image(&original, &pixels, 2, 1, &state, LensCorrection::default()).unwrap()
+        });
         let img = image::open(&out).unwrap().to_rgba8();
 
         assert_eq!(img.width(), 2);

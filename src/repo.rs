@@ -50,6 +50,17 @@ pub(crate) fn is_photo_repo_root(candidate: &Path) -> bool {
 
 #[cfg(test)]
 pub(crate) fn with_test_photo_repo_root<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
+    with_test_photo_repo_root_override(Some(repo_root.to_path_buf()), f)
+}
+
+/// Runs `f` with repo-root discovery overridden to "no repo root found".
+#[cfg(test)]
+pub(crate) fn with_test_photo_repo_root_absent<T>(f: impl FnOnce() -> T) -> T {
+    with_test_photo_repo_root_override(None, f)
+}
+
+#[cfg(test)]
+fn with_test_photo_repo_root_override<T>(repo_root: Option<PathBuf>, f: impl FnOnce() -> T) -> T {
     let _guard = TEST_PHOTO_REPO_ROOT_GUARD
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
@@ -58,7 +69,7 @@ pub(crate) fn with_test_photo_repo_root<T>(repo_root: &Path, f: impl FnOnce() ->
     let storage = TEST_PHOTO_REPO_ROOT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
     *storage
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Some(repo_root.to_path_buf()));
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(repo_root);
     let result = f();
     *storage
         .lock()
