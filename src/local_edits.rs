@@ -116,13 +116,91 @@ pub(crate) fn normalized_source_path_key(path: &Path) -> String {
         .into_owned()
 }
 
+/// Cache keys this source path may have been baked under, most authoritative first.
+///
+/// Writes key by the canonicalized path, which only resolves while the source file
+/// exists. So lookups must also try the canonical form reconstructed without touching
+/// the filesystem (the `\\?\` verbatim guess) plus the raw path, or baked edits become
+/// unreachable the moment their source media goes offline.
+pub(crate) fn candidate_source_path_keys(path: &Path) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        keys.push(canonical.to_string_lossy().into_owned());
+    }
+    // A deleted file with a live parent directory (and 8.3 / symlink path aliases)
+    // still resolves to the bake-time canonical form through the parent.
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
+            keys.push(canonical_parent.join(name).to_string_lossy().into_owned());
+        }
+    }
+    let raw = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    if path.is_absolute() && !raw.starts_with(r"\\") {
+        keys.push(format!(r"\\?\{raw}"));
+    }
+    keys.push(raw);
+    keys.dedup();
+    keys
+}
+
+/// Locates the cache file for a source path by trying every candidate key, falling
+/// back to the primary (most authoritative) candidate for paths never baked yet.
+pub(crate) fn resolve_local_edit_cache_file(
+    cache_dir: &Path,
+    path: &Path,
+    variant: LocalEditCacheVariant,
+) -> (String, PathBuf) {
+    let mut keys = candidate_source_path_keys(path);
+    for key in &keys {
+        let file = local_edit_cache_file_path_for_path_key(cache_dir, key, variant);
+        if file.exists() {
+            return (key.clone(), file);
+        }
+    }
+    let key = keys.remove(0);
+    let file = local_edit_cache_file_path_for_path_key(cache_dir, &key, variant);
+    (key, file)
+}
+
 pub(crate) fn source_file_state(path: &Path) -> Option<(u64, u64, u32)> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())?;
-    Some((metadata.len(), modified.as_secs(), modified.subsec_nanos()))
+    match probe_source_file_state(path) {
+        SourceFilePresence::Present(state) => Some(state),
+        SourceFilePresence::Absent | SourceFilePresence::Unreadable(_) => None,
+    }
+}
+
+pub(crate) enum SourceFilePresence {
+    Present((u64, u64, u32)),
+    /// The file does not exist (offline media, deleted, unplugged drive).
+    Absent,
+    /// The file may exist but its metadata is unavailable (permissions, exotic
+    /// mtimes). Treated fail-closed by cache readers: a possibly-present,
+    /// possibly-changed source must not be shadowed by a stale bake.
+    Unreadable(String),
+}
+
+pub(crate) fn probe_source_file_state(path: &Path) -> SourceFilePresence {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            match metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            {
+                Some(modified) => SourceFilePresence::Present((
+                    metadata.len(),
+                    modified.as_secs(),
+                    modified.subsec_nanos(),
+                )),
+                None => SourceFilePresence::Unreadable(
+                    "source modification time unavailable".to_string(),
+                ),
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SourceFilePresence::Absent,
+        Err(error) => SourceFilePresence::Unreadable(error.to_string()),
+    }
 }
 
 pub(crate) fn local_edit_cache_file_path_for_path_key(
@@ -133,15 +211,6 @@ pub(crate) fn local_edit_cache_file_path_for_path_key(
     let mut hasher = DefaultHasher::new();
     path_key.hash(&mut hasher);
     cache_dir.join(format!("{:016x}{}", hasher.finish(), variant.file_suffix()))
-}
-
-pub(crate) fn local_edit_cache_file_path(
-    cache_dir: &Path,
-    path: &Path,
-    variant: LocalEditCacheVariant,
-) -> PathBuf {
-    let path_key = normalized_source_path_key(path);
-    local_edit_cache_file_path_for_path_key(cache_dir, &path_key, variant)
 }
 
 pub(crate) fn local_edit_cache_temp_file_path(final_path: &Path) -> PathBuf {
@@ -238,7 +307,8 @@ pub(crate) fn clear_test_local_edit_thumbnail_hooks() {
 
 pub(crate) fn write_repaired_local_edit_thumbnail(
     cache_dir: &Path,
-    path: &Path,
+    path_key: &str,
+    source_state: (u64, u64, u32),
     generation_id: u64,
     image: &edit::RenderedImage,
 ) -> Result<(), String> {
@@ -252,12 +322,14 @@ pub(crate) fn write_repaired_local_edit_thumbnail(
         return Err(error);
     }
 
-    write_local_edit_cache_variant_with_generation_to(
+    write_local_edit_cache_variant_for_path_key(
         cache_dir,
-        path,
+        path_key,
+        source_state,
         LocalEditCacheVariant::Thumbnail,
         generation_id,
         image,
+        (image.width, image.height),
     )
 }
 
@@ -265,7 +337,9 @@ pub(crate) fn persisted_local_edit_exists(path: &Path, variant: LocalEditCacheVa
     let Some(cache_dir) = local_edit_cache_dir() else {
         return false;
     };
-    local_edit_cache_file_path(&cache_dir, path, variant).exists()
+    resolve_local_edit_cache_file(&cache_dir, path, variant)
+        .1
+        .exists()
 }
 
 pub(crate) fn local_edit_cache_fixed_header_bytes(schema_version: u32) -> Result<u64, String> {
@@ -419,11 +493,32 @@ pub(crate) fn write_local_edit_cache_variant_with_generation_and_logical_dimensi
     image: &edit::RenderedImage,
     logical_dimensions: (u32, u32),
 ) -> Result<(), String> {
-    let Some((file_size, modified_secs, modified_nanos)) = source_file_state(path) else {
+    let Some(source_state) = source_file_state(path) else {
         return Err("Failed to read source file metadata".to_string());
     };
     let path_key = normalized_source_path_key(path);
-    let final_path = local_edit_cache_file_path_for_path_key(cache_dir, &path_key, variant);
+    write_local_edit_cache_variant_for_path_key(
+        cache_dir,
+        &path_key,
+        source_state,
+        variant,
+        generation_id,
+        image,
+        logical_dimensions,
+    )
+}
+
+pub(crate) fn write_local_edit_cache_variant_for_path_key(
+    cache_dir: &Path,
+    path_key: &str,
+    source_state: (u64, u64, u32),
+    variant: LocalEditCacheVariant,
+    generation_id: u64,
+    image: &edit::RenderedImage,
+    logical_dimensions: (u32, u32),
+) -> Result<(), String> {
+    let (file_size, modified_secs, modified_nanos) = source_state;
+    let final_path = local_edit_cache_file_path_for_path_key(cache_dir, path_key, variant);
     let temp_path = local_edit_cache_temp_file_path(&final_path);
 
     std::fs::create_dir_all(cache_dir)
@@ -486,10 +581,15 @@ pub(crate) fn remove_persisted_local_edit(path: &Path) -> Result<(), String> {
             LocalEditCacheVariant::Full,
             LocalEditCacheVariant::Thumbnail,
         ] {
-            let cache_path = local_edit_cache_file_path(&cache_dir, path, variant);
-            if let Err(error) = std::fs::remove_file(&cache_path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(format!("Failed to remove local edit cache: {error}"));
+            // Purge every candidate key so a reset cannot leave a bake reachable
+            // through an alternate key form (e.g. one written via the raw-path
+            // fallback and one via the canonical form).
+            for key in candidate_source_path_keys(path) {
+                let cache_path = local_edit_cache_file_path_for_path_key(&cache_dir, &key, variant);
+                if let Err(error) = std::fs::remove_file(&cache_path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        return Err(format!("Failed to remove local edit cache: {error}"));
+                    }
                 }
             }
         }
@@ -505,11 +605,19 @@ pub(crate) fn load_persisted_local_edit_variant_header(
     let Some(cache_dir) = local_edit_cache_dir() else {
         return Ok(None);
     };
-    let Some((file_size, modified_secs, modified_nanos)) = source_file_state(path) else {
-        return Ok(None);
+    let source_state = match probe_source_file_state(path) {
+        SourceFilePresence::Present(state) => Some(state),
+        SourceFilePresence::Absent => None,
+        SourceFilePresence::Unreadable(reason) => {
+            log::debug!(
+                "Treating local edit cache as unusable for {}: {}",
+                path.display(),
+                reason
+            );
+            return Ok(None);
+        }
     };
-    let path_key = normalized_source_path_key(path);
-    let cache_path = local_edit_cache_file_path_for_path_key(&cache_dir, &path_key, variant);
+    let (path_key, cache_path) = resolve_local_edit_cache_file(&cache_dir, path, variant);
     if !cache_path.exists() {
         return Ok(None);
     }
@@ -525,9 +633,7 @@ pub(crate) fn load_persisted_local_edit_variant_header(
         let header = read_validated_local_edit_cache_header(
             &mut reader,
             &path_key,
-            file_size,
-            modified_secs,
-            modified_nanos,
+            source_state,
             cache_file_len,
         )?;
         Ok(LoadedLocalEditCacheVariantHeader {
@@ -546,9 +652,7 @@ pub(crate) fn load_persisted_local_edit_variant_header(
 pub(crate) fn read_validated_local_edit_cache_header(
     reader: &mut BufReader<File>,
     path_key: &str,
-    file_size: u64,
-    modified_secs: u64,
-    modified_nanos: u32,
+    source_state: Option<(u64, u64, u32)>,
     cache_file_len: u64,
 ) -> Result<ValidatedLocalEditCacheHeader, String> {
     let mut magic = [0u8; LOCAL_EDIT_CACHE_MAGIC.len()];
@@ -581,11 +685,17 @@ pub(crate) fn read_validated_local_edit_cache_header(
     };
     let pixel_len = read_u64(reader)?;
 
-    if cached_file_size != file_size
-        || cached_modified_secs != modified_secs
-        || cached_modified_nanos != modified_nanos
-    {
-        return Err("Local edit cache source metadata mismatch".to_string());
+    // A reachable source must match the metadata recorded at bake time (fail closed:
+    // the source was rewritten, so the bake no longer describes it). An unreadable
+    // source means the media is offline; the bake is the only truth left, so the
+    // metadata check is skipped (fail open) and the remaining structural checks decide.
+    if let Some((file_size, modified_secs, modified_nanos)) = source_state {
+        if cached_file_size != file_size
+            || cached_modified_secs != modified_secs
+            || cached_modified_nanos != modified_nanos
+        {
+            return Err("Local edit cache source metadata mismatch".to_string());
+        }
     }
 
     let expected_pixel_len = u64::from(width)
@@ -623,7 +733,7 @@ pub(crate) fn read_validated_local_edit_cache_header(
         width,
         height,
         logical_dimensions,
-        source_file_size: file_size,
+        source_file_size: cached_file_size,
     })
 }
 
@@ -634,11 +744,19 @@ pub(crate) fn load_persisted_local_edit_variant(
     let Some(cache_dir) = local_edit_cache_dir() else {
         return Ok(None);
     };
-    let Some((file_size, modified_secs, modified_nanos)) = source_file_state(path) else {
-        return Ok(None);
+    let source_state = match probe_source_file_state(path) {
+        SourceFilePresence::Present(state) => Some(state),
+        SourceFilePresence::Absent => None,
+        SourceFilePresence::Unreadable(reason) => {
+            log::debug!(
+                "Treating local edit cache as unusable for {}: {}",
+                path.display(),
+                reason
+            );
+            return Ok(None);
+        }
     };
-    let path_key = normalized_source_path_key(path);
-    let cache_path = local_edit_cache_file_path_for_path_key(&cache_dir, &path_key, variant);
+    let (path_key, cache_path) = resolve_local_edit_cache_file(&cache_dir, path, variant);
     if !cache_path.exists() {
         return Ok(None);
     }
@@ -653,9 +771,7 @@ pub(crate) fn load_persisted_local_edit_variant(
         let header = read_validated_local_edit_cache_header(
             &mut reader,
             &path_key,
-            file_size,
-            modified_secs,
-            modified_nanos,
+            source_state,
             cache_file_len,
         )?;
 
@@ -901,10 +1017,21 @@ pub(crate) fn load_repaired_local_edit_thumbnail(
                 return Ok(FinalizeLocalEditThumbnailRepair::Retry);
             }
 
-            if let Some(cache_dir) = local_edit_cache_dir() {
-                if let Err(error) = write_repaired_local_edit_thumbnail(
+            // Persisting the repaired thumbnail embeds fresh source metadata, so it
+            // can only happen while the source is reachable; offline repairs still
+            // serve the derived thumbnail, they just stay in-memory.
+            if let (Some(cache_dir), Some(source_state)) =
+                (local_edit_cache_dir(), source_file_state(path))
+            {
+                let (thumb_key, _) = resolve_local_edit_cache_file(
                     &cache_dir,
                     path,
+                    LocalEditCacheVariant::Thumbnail,
+                );
+                if let Err(error) = write_repaired_local_edit_thumbnail(
+                    &cache_dir,
+                    &thumb_key,
+                    source_state,
                     generation_id,
                     &derived_thumb,
                 ) {

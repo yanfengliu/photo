@@ -28,6 +28,15 @@ pub(crate) struct LoadedFullImage {
     pub(crate) logical_dimensions: (u32, u32),
 }
 
+/// A library-thumbnail base plus where it came from. Baked bases already contain
+/// their committed edits, so handle construction must not re-apply session state
+/// on top of them.
+#[derive(Debug, Clone)]
+pub(crate) struct LoadedThumbnailBase {
+    pub(crate) image: Arc<ImageData>,
+    pub(crate) base_source: BaseImageSource,
+}
+
 pub(crate) fn loaded_image_logical_dimensions(
     path: &Path,
     base_source: BaseImageSource,
@@ -62,7 +71,7 @@ pub(crate) fn display_dimensions_for_edit_state(
 pub(crate) fn load_library_thumbnail_base_image(
     path: &Path,
     max_dim: u32,
-) -> Result<Arc<ImageData>, String> {
+) -> Result<LoadedThumbnailBase, String> {
     let thumbnail_header =
         match load_persisted_local_edit_variant_header(path, LocalEditCacheVariant::Thumbnail) {
             Ok(Some(header)) => Some(header),
@@ -119,7 +128,10 @@ pub(crate) fn load_library_thumbnail_base_image(
                     full_header.generation_id,
                     expected_dimensions,
                 ) {
-                    return Ok(thumbnail_entry.image);
+                    return Ok(LoadedThumbnailBase {
+                        image: thumbnail_entry.image,
+                        base_source: BaseImageSource::PersistedLocalEdit,
+                    });
                 }
             }
         }
@@ -127,11 +139,17 @@ pub(crate) fn load_library_thumbnail_base_image(
 
     if full_header.is_some() {
         if let Some(repaired_thumb) = load_repaired_local_edit_thumbnail(path, max_dim)? {
-            return Ok(repaired_thumb);
+            return Ok(LoadedThumbnailBase {
+                image: repaired_thumb,
+                base_source: BaseImageSource::PersistedLocalEdit,
+            });
         }
     }
 
-    decode::decode_thumbnail(path, max_dim)
+    decode::decode_thumbnail(path, max_dim).map(|image| LoadedThumbnailBase {
+        image,
+        base_source: BaseImageSource::Original,
+    })
 }
 
 pub(crate) fn load_full_image(

@@ -23,6 +23,13 @@ impl App {
                 if !self.detail_load.is_current_request(request_id)
                     || !self.detail_load.is_loading()
                 {
+                    // A superseded staged load can still owe a bake, and its
+                    // full-resolution decode is only ever chained off this preview
+                    // completion — chain it anyway or the owed commit is lost.
+                    if self.owed_local_edit_bakes.contains_key(&request_id) {
+                        let preferred_source = self.preferred_base_image_source(&path);
+                        return Self::full_image_load_task(path, request_id, preferred_source);
+                    }
                     return Task::none();
                 }
 
@@ -41,7 +48,7 @@ impl App {
             }
             Message::ImageLoaded { request_id, result } => {
                 if !self.detail_load.is_current_request(request_id) {
-                    return Task::none();
+                    return self.fulfill_owed_local_edit_bake(request_id, result);
                 }
 
                 match result {
@@ -136,10 +143,20 @@ impl App {
             }
             Message::FilesPicked(None) => Task::none(),
 
-            Message::ThumbnailLoaded(path, Ok(data)) => {
-                let handle = self.thumbnail_handle_for_path(&path, &data);
+            Message::ThumbnailLoaded(path, Ok(base)) => {
+                // Baked bases already contain their committed edits; rendering the
+                // session state on top would apply those edits twice.
+                let handle = match base.base_source {
+                    BaseImageSource::Original => self.thumbnail_handle_for_path(&path, &base.image),
+                    BaseImageSource::PersistedLocalEdit => ImageHandle::from_rgba(
+                        base.image.width,
+                        base.image.height,
+                        base.image.pixels.clone(),
+                    ),
+                };
                 if let Some(entry) = self.library.iter_mut().find(|e| e.path == path) {
-                    entry.thumbnail_image = Some(data.clone());
+                    entry.thumbnail_image = Some(base.image.clone());
+                    entry.thumbnail_base_source = base.base_source;
                     entry.thumbnail_handle = Some(handle);
                 }
                 Task::none()
@@ -170,22 +187,22 @@ impl App {
                 {
                     self.local_edit_persist_in_flight = None;
                 }
-                match result {
+                let follow_up = match result {
                     Ok(Some(thumbnail)) => {
                         self.set_library_thumbnail_for_path(&path, thumbnail);
+                        Task::none()
                     }
-                    Ok(None) => {
-                        self.refresh_library_thumbnail_for_path(&path);
-                    }
+                    Ok(None) => self.reload_library_thumbnail_after_bake_removal(&path),
                     Err(error) => {
                         log::warn!(
                             "Local edit persistence failed for {}: {}",
                             path.display(),
                             error
                         );
+                        Task::none()
                     }
-                }
-                self.start_next_local_edit_persist_if_idle()
+                };
+                Task::batch([follow_up, self.start_next_local_edit_persist_if_idle()])
             }
 
             Message::LibraryItemClicked(index) => {
@@ -1010,6 +1027,7 @@ impl App {
                     path: path.clone(),
                     thumbnail_image: None,
                     thumbnail_handle: None,
+                    thumbnail_base_source: BaseImageSource::Original,
                 });
             }
         }
@@ -1128,7 +1146,7 @@ impl App {
             let p2 = path.clone();
             Task::perform(
                 async move {
-                    let result: Result<Arc<ImageData>, String> =
+                    let result: Result<LoadedThumbnailBase, String> =
                         tokio::task::spawn_blocking(move || {
                             load_library_thumbnail_base_image(&p, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
                         })
@@ -1181,6 +1199,15 @@ impl App {
         let Some(&index) = self.library_indices_by_path.get(path) else {
             return;
         };
+        // Baked bases already contain their committed edits; only the persist
+        // pipeline may replace them (set_library_thumbnail_for_path), otherwise the
+        // session state would render on top of itself.
+        if matches!(
+            self.library[index].thumbnail_base_source,
+            BaseImageSource::PersistedLocalEdit
+        ) {
+            return;
+        }
         let Some(base_image) = self.library[index].thumbnail_image.clone() else {
             return;
         };
@@ -1192,11 +1219,30 @@ impl App {
         let Some(&index) = self.library_indices_by_path.get(path) else {
             return;
         };
-        self.library[index].thumbnail_handle = Some(ImageHandle::from_rgba(
+        let entry = &mut self.library[index];
+        entry.thumbnail_handle = Some(ImageHandle::from_rgba(
             image.width,
             image.height,
             image.pixels.clone(),
         ));
+        entry.thumbnail_image = Some(image);
+        entry.thumbnail_base_source = BaseImageSource::PersistedLocalEdit;
+    }
+
+    /// After a bake is removed (edits reset to default), the stored base may hold
+    /// baked pixels, so the original thumbnail reloads asynchronously. The stale
+    /// handle stays visible until the reload lands to avoid a blank flash.
+    pub(crate) fn reload_library_thumbnail_after_bake_removal(
+        &mut self,
+        path: &Path,
+    ) -> Task<Message> {
+        let Some(&index) = self.library_indices_by_path.get(path) else {
+            return Task::none();
+        };
+        let entry = &mut self.library[index];
+        entry.thumbnail_image = None;
+        entry.thumbnail_base_source = BaseImageSource::Original;
+        Self::load_thumbnails(&[path.to_path_buf()])
     }
 
     pub(crate) fn current_local_edit_persist_request(&mut self) -> Option<LocalEditPersistRequest> {
@@ -1221,18 +1267,7 @@ impl App {
         let base_dimensions = self
             .current_image_source_dimensions
             .unwrap_or((image.width, image.height));
-        let request_id = self
-            .local_edit_persist_in_flight
-            .as_ref()
-            .map(|request| request.request_id)
-            .unwrap_or(0)
-            .max(
-                self.pending_local_edit_persist_requests
-                    .back()
-                    .map(|request| request.request_id)
-                    .unwrap_or(0),
-            )
-            + 1;
+        let request_id = self.next_local_edit_persist_request_id();
 
         Some(LocalEditPersistRequest {
             request_id,
@@ -1254,6 +1289,128 @@ impl App {
         state: edit::EditState,
     ) -> bool {
         state.lens_correction && self.lens_override_name.is_none() && self.detail_load.exif_loading
+    }
+
+    pub(crate) fn next_local_edit_persist_request_id(&self) -> u64 {
+        self.local_edit_persist_in_flight
+            .as_ref()
+            .map(|request| request.request_id)
+            .unwrap_or(0)
+            .max(
+                self.pending_local_edit_persist_requests
+                    .back()
+                    .map(|request| request.request_id)
+                    .unwrap_or(0),
+            )
+            + 1
+    }
+
+    /// Snapshots a bake obligation for the image being navigated away from while
+    /// its full-resolution decode is still in flight. Committed edits made during
+    /// the staged-preview window cannot bake until that decode lands; without this
+    /// the stale completion would be discarded and the commit silently lost.
+    pub(crate) fn register_owed_local_edit_bake_for_superseded_load(&mut self) {
+        let Some(path) = self.current_image_path.clone() else {
+            return;
+        };
+        let state = self
+            .edit_histories
+            .get(&path)
+            .map(|history| history.current)
+            .unwrap_or_default();
+        if !self.detail_load.is_loading() {
+            // Nothing will arrive for this request. The only commit at risk here is
+            // one still waiting on EXIF metadata; surface it instead of losing it
+            // silently (it bakes on the next open of that image).
+            if !state.is_default()
+                && self.current_render_depends_on_pending_auto_lens_metadata(state)
+            {
+                log::warn!(
+                    "Navigated away from {} while its EXIF metadata was loading; the commit bakes on next open",
+                    path.display()
+                );
+            }
+            return;
+        }
+        let base_source = self.preferred_base_image_source(&path);
+        if Self::owed_bake_has_nothing_new(state, base_source, &path) {
+            return;
+        }
+        let lens = self.current_lens_correction(state.lens_correction);
+        self.owed_local_edit_bakes.insert(
+            self.detail_load.request_id,
+            OwedLocalEditBake { path, lens },
+        );
+    }
+
+    /// A default-state image owes nothing when it was never baked (nothing to
+    /// persist) or when its base already IS the bake (an identity re-bake would
+    /// re-render and rewrite identical full-resolution pixels). A default state
+    /// over an `Original` base with an existing bake still owes: that is a
+    /// pending reset, and persisting it removes the bake.
+    fn owed_bake_has_nothing_new(
+        state: edit::EditState,
+        base_source: BaseImageSource,
+        path: &Path,
+    ) -> bool {
+        state.is_default()
+            && match base_source {
+                BaseImageSource::Original => {
+                    !persisted_local_edit_exists(path, LocalEditCacheVariant::Full)
+                }
+                BaseImageSource::PersistedLocalEdit => true,
+            }
+    }
+
+    pub(crate) fn fulfill_owed_local_edit_bake(
+        &mut self,
+        request_id: u64,
+        result: Result<LoadedFullImage, String>,
+    ) -> Task<Message> {
+        let Some(owed) = self.owed_local_edit_bakes.remove(&request_id) else {
+            return Task::none();
+        };
+        match result {
+            Ok(loaded) => {
+                // The session's edit state for this path is relative to the base
+                // this decode actually used. Record that base, exactly as the
+                // current-request arm does, or the next reopen would resolve the
+                // freshly written bake as its base and apply the still-held edit
+                // state on top of it a second time.
+                self.base_image_sources
+                    .insert(owed.path.clone(), loaded.base_source);
+                let state = self
+                    .edit_histories
+                    .get(&owed.path)
+                    .map(|history| history.current)
+                    .unwrap_or_default();
+                if Self::owed_bake_has_nothing_new(state, loaded.base_source, &owed.path) {
+                    return Task::none();
+                }
+                let request = LocalEditPersistRequest {
+                    request_id: self.next_local_edit_persist_request_id(),
+                    path: owed.path,
+                    image: loaded.image,
+                    logical_dimensions: display_dimensions_for_edit_state(
+                        loaded.logical_dimensions,
+                        state.rotation,
+                        state.crop,
+                    ),
+                    state,
+                    lens: owed.lens,
+                    base_source: loaded.base_source,
+                };
+                self.enqueue_local_edit_persist(request)
+            }
+            Err(error) => {
+                log::warn!(
+                    "Dropping owed local-edit bake for {}: full-resolution load failed: {}",
+                    owed.path.display(),
+                    error
+                );
+                Task::none()
+            }
+        }
     }
 
     pub(crate) fn enqueue_current_local_edit_persist(&mut self) -> Task<Message> {
@@ -1521,6 +1678,7 @@ impl App {
 
     pub(crate) fn start_load(&mut self, path: PathBuf) -> Task<Message> {
         self.clear_library_drag_state();
+        self.register_owed_local_edit_bake_for_superseded_load();
         let preferred_source = self.preferred_base_image_source(&path);
         let displayed_full_image = self.displayed_full_image_for_path(&path, preferred_source);
         let displayed_logical_dimensions = displayed_full_image

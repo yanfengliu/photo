@@ -107,6 +107,7 @@ fn library_app_with_entries(count: usize) -> App {
                 filename: format!("photo-{index}.png"),
                 thumbnail_image: None,
                 thumbnail_handle: None,
+                thumbnail_base_source: BaseImageSource::Original,
             })
             .collect(),
     );
@@ -692,12 +693,14 @@ fn save_and_load_library_round_trips() {
             filename: "a.png".to_string(),
             thumbnail_image: None,
             thumbnail_handle: None,
+            thumbnail_base_source: BaseImageSource::Original,
         },
         LibraryEntry {
             path: p2.clone(),
             filename: "b.jpg".to_string(),
             thumbnail_image: None,
             thumbnail_handle: None,
+            thumbnail_base_source: BaseImageSource::Original,
         },
     ];
 
@@ -790,7 +793,9 @@ fn library_thumbnail_load_prefers_the_persisted_local_edit_thumbnail() {
         );
 
         let thumbnail =
-            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                .unwrap()
+                .image;
         let expected =
             edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
         assert_eq!(thumbnail.width, expected.width);
@@ -843,7 +848,9 @@ fn library_thumbnail_ignores_a_stale_persisted_thumbnail_when_full_copy_changed(
         .unwrap();
 
         let thumbnail =
-            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                .unwrap()
+                .image;
 
         assert_eq!(thumbnail.width, rotated.width);
         assert_eq!(thumbnail.height, rotated.height);
@@ -887,7 +894,9 @@ fn library_thumbnail_ignores_a_generation_mismatch_even_when_dimensions_match() 
         .unwrap();
 
         let thumbnail =
-            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                .unwrap()
+                .image;
         let expected =
             thumbnail_from_rendered_image(&expected_full, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
 
@@ -935,8 +944,9 @@ fn library_thumbnail_ignores_a_same_generation_persisted_thumbnail_when_its_aspe
             &square_thumb,
         )
         .unwrap();
-        let loaded =
-            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+        let loaded = load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+            .unwrap()
+            .image;
         let repaired =
             load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
                 .unwrap()
@@ -1030,8 +1040,9 @@ fn library_thumbnail_fast_path_rechecks_generation_before_returning() {
             .unwrap();
         });
 
-        let loaded =
-            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+        let loaded = load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+            .unwrap()
+            .image;
         let persisted =
             load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
                 .unwrap()
@@ -1127,8 +1138,9 @@ fn library_thumbnail_rechecks_local_edit_cache_inside_the_repair_lock() {
             .unwrap();
         });
 
-        let loaded =
-            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+        let loaded = load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+            .unwrap()
+            .image;
         let repaired =
             load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
                 .unwrap()
@@ -1182,8 +1194,9 @@ fn library_thumbnail_still_loads_when_repair_write_fails() {
         .unwrap();
         set_test_local_edit_thumbnail_repair_write_error("simulated repair write failure");
 
-        let loaded =
-            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM).unwrap();
+        let loaded = load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+            .unwrap()
+            .image;
         let persisted =
             load_persisted_local_edit_variant(&image_path, LocalEditCacheVariant::Thumbnail)
                 .unwrap()
@@ -1265,6 +1278,585 @@ fn persisted_local_edit_is_ignored_after_the_source_file_changes() {
 }
 
 #[test]
+fn persisted_local_edit_loads_after_source_file_disappears() {
+    let repo_root = tempfile::tempdir().unwrap();
+    let image_path = repo_root.path().join("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    write_test_png(&image_path, 2, 1, &pixels);
+
+    let mut state = edit::EditState::default();
+    state.rotate_clockwise();
+
+    with_test_photo_repo_root(repo_root.path(), || {
+        persist_test_local_edit(
+            &image_path,
+            test_image_from_pixels(2, 1, &pixels),
+            state,
+            BaseImageSource::Original,
+        );
+
+        std::fs::remove_file(&image_path).unwrap();
+
+        let loaded = load_persisted_local_edit_image(&image_path)
+            .unwrap()
+            .expect("baked local edit should stay loadable when the source is offline");
+        let expected =
+            edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
+        assert_eq!(loaded.width, expected.width);
+        assert_eq!(loaded.height, expected.height);
+        assert_eq!(loaded.pixels, expected.pixels);
+        assert!(persisted_local_edit_exists(
+            &image_path,
+            LocalEditCacheVariant::Full
+        ));
+    });
+}
+
+#[test]
+fn library_thumbnail_serves_baked_local_edit_when_source_is_missing() {
+    let repo_root = tempfile::tempdir().unwrap();
+    let image_path = repo_root.path().join("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    write_test_png(&image_path, 2, 1, &pixels);
+
+    let mut state = edit::EditState::default();
+    state.rotate_clockwise();
+
+    with_test_photo_repo_root(repo_root.path(), || {
+        persist_test_local_edit(
+            &image_path,
+            test_image_from_pixels(2, 1, &pixels),
+            state,
+            BaseImageSource::Original,
+        );
+
+        std::fs::remove_file(&image_path).unwrap();
+
+        let thumbnail =
+            load_library_thumbnail_base_image(&image_path, LOCAL_EDIT_THUMBNAIL_MAX_DIM)
+                .unwrap()
+                .image;
+        let expected =
+            edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
+        assert_eq!(thumbnail.width, expected.width);
+        assert_eq!(thumbnail.height, expected.height);
+        assert_eq!(thumbnail.pixels, expected.pixels);
+    });
+}
+
+#[test]
+fn load_full_image_serves_baked_local_edit_when_source_is_missing() {
+    let repo_root = tempfile::tempdir().unwrap();
+    let image_path = repo_root.path().join("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    write_test_png(&image_path, 2, 1, &pixels);
+
+    let mut state = edit::EditState::default();
+    state.rotate_clockwise();
+
+    with_test_photo_repo_root(repo_root.path(), || {
+        persist_test_local_edit(
+            &image_path,
+            test_image_from_pixels(2, 1, &pixels),
+            state,
+            BaseImageSource::Original,
+        );
+
+        std::fs::remove_file(&image_path).unwrap();
+
+        let loaded = load_full_image(&image_path, BaseImageSource::PersistedLocalEdit)
+            .expect("baked local edit should open in Detail when the source is offline");
+        assert!(matches!(
+            loaded.base_source,
+            BaseImageSource::PersistedLocalEdit
+        ));
+        assert!(loaded.fingerprint.is_none());
+        let expected =
+            edit::render_edited_image(&pixels, 2, 1, &state, edit::LensCorrection::default());
+        assert_eq!(loaded.image.pixels, expected.pixels);
+        assert_eq!(loaded.logical_dimensions, (1, 2));
+    });
+}
+
+#[test]
+fn remove_persisted_local_edit_removes_cache_for_missing_source() {
+    let repo_root = tempfile::tempdir().unwrap();
+    let image_path = repo_root.path().join("frame.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    write_test_png(&image_path, 2, 1, &pixels);
+
+    let mut state = edit::EditState::default();
+    state.rotate_clockwise();
+
+    with_test_photo_repo_root(repo_root.path(), || {
+        persist_test_local_edit(
+            &image_path,
+            test_image_from_pixels(2, 1, &pixels),
+            state,
+            BaseImageSource::Original,
+        );
+
+        std::fs::remove_file(&image_path).unwrap();
+
+        remove_persisted_local_edit(&image_path).unwrap();
+        assert!(!persisted_local_edit_exists(
+            &image_path,
+            LocalEditCacheVariant::Full
+        ));
+        assert!(!persisted_local_edit_exists(
+            &image_path,
+            LocalEditCacheVariant::Thumbnail
+        ));
+
+        let cache_dir = local_edit_cache_dir().expect("repo-local local edit dir");
+        let leftover: Vec<_> = std::fs::read_dir(&cache_dir)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(
+            leftover.is_empty(),
+            "expected no baked files to survive removal, found {leftover:?}"
+        );
+    });
+}
+
+#[test]
+fn parsed_library_content_keeps_offline_paths() {
+    let parsed =
+        parse_library_content("E:\\DCIM\\100MSDCF\\DSC09218.ARW\nC:\\does\\not\\exist.png\n");
+    assert_eq!(
+        parsed,
+        vec![
+            PathBuf::from("E:\\DCIM\\100MSDCF\\DSC09218.ARW"),
+            PathBuf::from("C:\\does\\not\\exist.png"),
+        ],
+        "library membership is user intent; offline media must not evict entries"
+    );
+}
+
+#[test]
+fn thumbnail_loaded_does_not_reapply_session_edits_to_baked_base() {
+    let path = PathBuf::from("frame.png");
+    let base_pixels = [96, 96, 96, 255];
+    let mut app = detail_app_with_image(&path, 1, 1);
+    app.image = Some(test_image_from_pixels(1, 1, &base_pixels));
+    app.library = vec![LibraryEntry {
+        path: path.clone(),
+        filename: "frame.png".to_string(),
+        thumbnail_image: None,
+        thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
+    }];
+    app.rebuild_library_indices();
+
+    // The session history still holds the exposure push that the bake already contains.
+    let mut session_state = edit::EditState::default();
+    set_slider_field(&mut session_state, SliderKind::Exposure, 1.0);
+    app.edit_histories.entry(path.clone()).or_default().current = session_state;
+
+    let baked = edit::render_edited_image(
+        &base_pixels,
+        1,
+        1,
+        &session_state,
+        edit::LensCorrection::default(),
+    );
+    let baked_image = test_image_from_pixels(1, 1, &baked.pixels);
+
+    let _ = app.update(Message::ThumbnailLoaded(
+        path.clone(),
+        Ok(LoadedThumbnailBase {
+            image: baked_image,
+            base_source: BaseImageSource::PersistedLocalEdit,
+        }),
+    ));
+
+    let handle = app.library[0]
+        .thumbnail_handle
+        .as_ref()
+        .expect("baked thumbnail handle");
+    let (_, _, pixels) = rgba_handle_pixels(handle);
+    assert_eq!(
+        pixels, baked.pixels,
+        "session edits must not re-apply on top of an already-baked base"
+    );
+    assert!(matches!(
+        app.library[0].thumbnail_base_source,
+        BaseImageSource::PersistedLocalEdit
+    ));
+}
+
+#[test]
+fn thumbnail_loaded_applies_session_edits_to_original_base() {
+    let path = PathBuf::from("frame.png");
+    let base_pixels = [96, 96, 96, 255];
+    let mut app = detail_app_with_image(&path, 1, 1);
+    app.image = Some(test_image_from_pixels(1, 1, &base_pixels));
+    app.library = vec![LibraryEntry {
+        path: path.clone(),
+        filename: "frame.png".to_string(),
+        thumbnail_image: None,
+        thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
+    }];
+    app.rebuild_library_indices();
+
+    let mut session_state = edit::EditState::default();
+    set_slider_field(&mut session_state, SliderKind::Exposure, 1.0);
+    app.edit_histories.entry(path.clone()).or_default().current = session_state;
+
+    let _ = app.update(Message::ThumbnailLoaded(
+        path.clone(),
+        Ok(LoadedThumbnailBase {
+            image: test_image_from_pixels(1, 1, &base_pixels),
+            base_source: BaseImageSource::Original,
+        }),
+    ));
+
+    let handle = app.library[0]
+        .thumbnail_handle
+        .as_ref()
+        .expect("original-base thumbnail handle");
+    let (_, _, pixels) = rgba_handle_pixels(handle);
+    let expected = edit::render_edited_image(
+        &base_pixels,
+        1,
+        1,
+        &session_state,
+        edit::LensCorrection::default(),
+    );
+    assert_eq!(
+        pixels, expected.pixels,
+        "session edits must still apply to an original base"
+    );
+}
+
+#[test]
+fn persist_completed_thumbnail_updates_stored_base_and_provenance() {
+    let path = PathBuf::from("frame.png");
+    let original_pixels = [96, 96, 96, 255];
+    let mut app = detail_app_with_image(&path, 1, 1);
+    app.library = vec![LibraryEntry {
+        path: path.clone(),
+        filename: "frame.png".to_string(),
+        thumbnail_image: Some(test_image_from_pixels(1, 1, &original_pixels)),
+        thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
+    }];
+    app.rebuild_library_indices();
+
+    let baked_pixels = [200, 200, 200, 255];
+    let _ = app.update(Message::LocalEditPersistCompleted {
+        path: path.clone(),
+        request_id: 1,
+        result: Ok(Some(test_image_from_pixels(1, 1, &baked_pixels))),
+    });
+
+    let entry = &app.library[0];
+    assert!(matches!(
+        entry.thumbnail_base_source,
+        BaseImageSource::PersistedLocalEdit
+    ));
+    assert_eq!(
+        entry
+            .thumbnail_image
+            .as_ref()
+            .expect("stored base image")
+            .pixels,
+        baked_pixels
+    );
+    let (_, _, pixels) = rgba_handle_pixels(entry.thumbnail_handle.as_ref().expect("handle"));
+    assert_eq!(pixels, baked_pixels);
+
+    // A later state-based refresh must not re-render session edits onto the baked base.
+    let mut session_state = edit::EditState::default();
+    set_slider_field(&mut session_state, SliderKind::Exposure, 1.0);
+    app.edit_histories.entry(path.clone()).or_default().current = session_state;
+    app.refresh_library_thumbnail_for_path(&path);
+    let (_, _, pixels) =
+        rgba_handle_pixels(app.library[0].thumbnail_handle.as_ref().expect("handle"));
+    assert_eq!(
+        pixels, baked_pixels,
+        "refresh must leave baked thumbnails to the persist pipeline"
+    );
+}
+
+#[test]
+fn persist_completed_with_removed_bake_reloads_original_thumbnail() {
+    let path = PathBuf::from("frame.png");
+    let baked_pixels = [200, 200, 200, 255];
+    let original_pixels = [96, 96, 96, 255];
+    let mut app = detail_app_with_image(&path, 1, 1);
+    app.library = vec![LibraryEntry {
+        path: path.clone(),
+        filename: "frame.png".to_string(),
+        thumbnail_image: Some(test_image_from_pixels(1, 1, &baked_pixels)),
+        thumbnail_handle: Some(ImageHandle::from_rgba(1, 1, baked_pixels.to_vec())),
+        thumbnail_base_source: BaseImageSource::PersistedLocalEdit,
+    }];
+    app.rebuild_library_indices();
+
+    let _ = app.update(Message::LocalEditPersistCompleted {
+        path: path.clone(),
+        request_id: 1,
+        result: Ok(None),
+    });
+
+    assert!(
+        matches!(
+            app.library[0].thumbnail_base_source,
+            BaseImageSource::Original
+        ),
+        "a removed bake must reset the stored base provenance"
+    );
+
+    // The async reload delivers the original base; the handle must show it un-edited.
+    let _ = app.update(Message::ThumbnailLoaded(
+        path.clone(),
+        Ok(LoadedThumbnailBase {
+            image: test_image_from_pixels(1, 1, &original_pixels),
+            base_source: BaseImageSource::Original,
+        }),
+    ));
+    let (_, _, pixels) =
+        rgba_handle_pixels(app.library[0].thumbnail_handle.as_ref().expect("handle"));
+    assert_eq!(pixels, original_pixels);
+}
+
+#[test]
+fn commit_during_preview_then_navigate_away_still_bakes_after_full_decode() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+
+    // Staged RAW-style load: embedded preview visible, full decode still in flight.
+    let preview_request_id = app.detail_load.begin_request();
+    app.detail_load.on_preview_loaded();
+
+    let _ = app.update(Message::RotateClockwise);
+    assert!(
+        app.local_edit_persist_in_flight.is_none(),
+        "a commit during the preview stage cannot bake yet"
+    );
+
+    // Navigate away before the full decode lands.
+    let _ = app.start_load(PathBuf::from("b.png"));
+
+    let full_a = test_image_from_pixels(2, 1, &pixels);
+    let _ = app.update(Message::ImageLoaded {
+        request_id: preview_request_id,
+        result: Ok(LoadedFullImage {
+            image: full_a.clone(),
+            fingerprint: None,
+            base_source: BaseImageSource::Original,
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    let request = app
+        .local_edit_persist_in_flight
+        .as_ref()
+        .expect("the stale full decode must still bake the committed edit");
+    assert_eq!(request.path, path_a);
+    assert_eq!(request.state.rotation, edit::QuarterTurns::new(1));
+    assert_eq!(request.image.pixels, full_a.pixels);
+    assert_eq!(
+        request.logical_dimensions,
+        (1, 2),
+        "rotation swaps the logical dimensions"
+    );
+}
+
+#[test]
+fn fulfilled_owed_bake_seeds_base_image_source_for_reopen() {
+    let repo_root = tempfile::tempdir().unwrap();
+    let image_path = repo_root.path().join("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    write_test_png(&image_path, 2, 1, &pixels);
+
+    with_test_photo_repo_root(repo_root.path(), || {
+        let mut app = detail_app_with_image(&image_path, 2, 1);
+        app.image = Some(test_image_from_pixels(2, 1, &pixels));
+        // The session never completed a current-request load for this path.
+        app.base_image_sources.clear();
+
+        let preview_request_id = app.detail_load.begin_request();
+        app.detail_load.on_preview_loaded();
+        let _ = app.update(Message::RotateClockwise);
+        let _ = app.start_load(repo_root.path().join("b.png"));
+
+        let _ = app.update(Message::ImageLoaded {
+            request_id: preview_request_id,
+            result: Ok(LoadedFullImage {
+                image: test_image_from_pixels(2, 1, &pixels),
+                fingerprint: None,
+                base_source: BaseImageSource::Original,
+                logical_dimensions: (2, 1),
+            }),
+        });
+
+        let request = app
+            .local_edit_persist_in_flight
+            .clone()
+            .expect("owed bake persists");
+        // Run the bake for real so the cache file exists on disk.
+        let _ = persist_local_edit(&request).expect("bake writes");
+
+        // The edit history still holds the rotation relative to the ORIGINAL base.
+        // Reopening must therefore load the original, not the (already rotated)
+        // bake, or the rotation would apply twice and corrupt the next bake.
+        assert!(matches!(
+            app.base_image_sources.get(&image_path),
+            Some(BaseImageSource::Original)
+        ));
+        assert!(matches!(
+            app.preferred_base_image_source(&image_path),
+            BaseImageSource::Original
+        ));
+    });
+}
+
+#[test]
+fn owed_bake_skipped_for_unedited_baked_image() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path_a.clone(), BaseImageSource::PersistedLocalEdit);
+
+    let request_id = app.detail_load.begin_request();
+    let _ = app.start_load(PathBuf::from("b.png"));
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::PersistedLocalEdit,
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    assert!(
+        app.local_edit_persist_in_flight.is_none(),
+        "an unedited baked image has nothing new to bake"
+    );
+    assert!(app.owed_local_edit_bakes.is_empty());
+}
+
+#[test]
+fn navigation_owes_nothing_for_unedited_baked_image() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+    app.base_image_sources
+        .insert(path_a.clone(), BaseImageSource::PersistedLocalEdit);
+
+    let _ = app.detail_load.begin_request();
+    let _ = app.start_load(PathBuf::from("b.png"));
+
+    assert!(
+        app.owed_local_edit_bakes.is_empty(),
+        "flicking through unedited baked images must not queue identity re-bakes"
+    );
+}
+
+#[test]
+fn stale_preview_completion_still_fulfills_owed_bake_via_chained_full_decode() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+
+    // Staged load superseded while still in stage Loading: no full-resolution
+    // task exists yet — it is chained off the preview completion.
+    let preview_request_id = app.detail_load.begin_request();
+    let _ = app.update(Message::RotateClockwise);
+    let _ = app.start_load(PathBuf::from("b.png"));
+
+    let _ = app.update(Message::ImagePreviewLoaded {
+        request_id: preview_request_id,
+        path: path_a.clone(),
+        result: Ok(Some(test_image_from_pixels(2, 1, &pixels))),
+    });
+    assert!(
+        app.owed_local_edit_bakes.contains_key(&preview_request_id),
+        "the owed bake must survive the stale preview so the chained decode can fulfill it"
+    );
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id: preview_request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::Original,
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    let request = app
+        .local_edit_persist_in_flight
+        .as_ref()
+        .expect("chained full decode fulfills the owed bake");
+    assert_eq!(request.path, path_a);
+    assert_eq!(request.state.rotation, edit::QuarterTurns::new(1));
+}
+
+#[test]
+fn owed_bake_dropped_when_stale_full_decode_fails() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+
+    let preview_request_id = app.detail_load.begin_request();
+    app.detail_load.on_preview_loaded();
+
+    let _ = app.update(Message::RotateClockwise);
+    let _ = app.start_load(PathBuf::from("b.png"));
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id: preview_request_id,
+        result: Err("simulated decode failure".to_string()),
+    });
+
+    assert!(app.local_edit_persist_in_flight.is_none());
+    assert!(
+        app.owed_local_edit_bakes.is_empty(),
+        "a failed stale decode must consume the owed bake"
+    );
+}
+
+#[test]
+fn owed_bake_skipped_when_state_is_default_and_no_bake_exists() {
+    let path_a = PathBuf::from("a.png");
+    let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
+    let mut app = detail_app_with_image(&path_a, 2, 1);
+    app.image = Some(test_image_from_pixels(2, 1, &pixels));
+
+    let preview_request_id = app.detail_load.begin_request();
+    app.detail_load.on_preview_loaded();
+
+    // No commit at all: navigating away owes nothing.
+    let _ = app.start_load(PathBuf::from("b.png"));
+
+    let _ = app.update(Message::ImageLoaded {
+        request_id: preview_request_id,
+        result: Ok(LoadedFullImage {
+            image: test_image_from_pixels(2, 1, &pixels),
+            fingerprint: None,
+            base_source: BaseImageSource::Original,
+            logical_dimensions: (2, 1),
+        }),
+    });
+
+    assert!(app.local_edit_persist_in_flight.is_none());
+    assert!(app.owed_local_edit_bakes.is_empty());
+}
+
+#[test]
 fn rotate_clockwise_updates_library_thumbnail_after_persist_completes() {
     let path = PathBuf::from("frame.png");
     let pixels = [255, 0, 0, 255, 0, 255, 0, 255];
@@ -1276,6 +1868,7 @@ fn rotate_clockwise_updates_library_thumbnail_after_persist_completes() {
         filename: "frame.png".to_string(),
         thumbnail_image: Some(thumbnail_image),
         thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
     }];
     app.rebuild_library_indices();
 
@@ -1321,6 +1914,7 @@ fn exposure_commit_updates_library_thumbnail_after_persist_completes() {
         filename: "frame.png".to_string(),
         thumbnail_image: Some(thumbnail_image),
         thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
     }];
     app.rebuild_library_indices();
     app.slider_text_buf = "1.0".to_string();
@@ -1420,6 +2014,7 @@ fn slider_double_click_release_defers_persist_when_clearing_an_existing_local_ed
             filename: "frame.png".to_string(),
             thumbnail_image: Some(test_image_from_pixels(1, 1, &pixels)),
             thumbnail_handle: None,
+            thumbnail_base_source: BaseImageSource::Original,
         }];
         app.rebuild_library_indices();
 
@@ -2246,15 +2841,18 @@ fn rotated_crop_commit_saves_the_selected_rotated_region() {
     });
 
     let state = app.edit_histories.get(&path).unwrap().current;
-    let out = edit::save_edited_image(
-        &original,
-        &pixels,
-        2,
-        1,
-        &state,
-        edit::LensCorrection::default(),
-    )
-    .unwrap();
+    let export_root = tempfile::tempdir().unwrap();
+    let out = with_test_photo_repo_root(export_root.path(), || {
+        edit::save_edited_image(
+            &original,
+            &pixels,
+            2,
+            1,
+            &state,
+            edit::LensCorrection::default(),
+        )
+        .unwrap()
+    });
     let img = image::open(&out).unwrap().to_rgba8();
 
     assert_eq!(img.width(), 1);
@@ -2586,6 +3184,7 @@ fn removing_the_current_library_entry_clears_current_image_source_dimensions() {
         filename: "frame.png".to_string(),
         thumbnail_image: None,
         thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
     }]);
     app.current_image_path = Some(path);
     app.current_image_source_dimensions = Some((200, 100));
@@ -2669,15 +3268,18 @@ fn save_request_exports_the_visible_full_image_in_crop_mode() {
     app.crop_mode = true;
 
     let request = app.current_save_request().unwrap();
-    let out = edit::save_edited_image(
-        &original,
-        &request.image.pixels,
-        request.image.width,
-        request.image.height,
-        &request.state,
-        request.lens,
-    )
-    .unwrap();
+    let export_root = tempfile::tempdir().unwrap();
+    let out = with_test_photo_repo_root(export_root.path(), || {
+        edit::save_edited_image(
+            &original,
+            &request.image.pixels,
+            request.image.width,
+            request.image.height,
+            &request.state,
+            request.lens,
+        )
+        .unwrap()
+    });
     let img = image::open(&out).unwrap().to_rgba8();
 
     assert_eq!(img.width(), 2);
@@ -3103,15 +3705,18 @@ fn repeat_raw_open_reuses_cached_full_image_immediately() {
     let request = app
         .current_save_request()
         .expect("save request after reopen");
-    let saved = edit::save_edited_image(
-        &request.path,
-        &request.image.pixels,
-        request.image.width,
-        request.image.height,
-        &request.state,
-        request.lens,
-    )
-    .expect("save copy from reopened missing-source image");
+    let export_root = tempfile::tempdir().unwrap();
+    let saved = with_test_photo_repo_root(export_root.path(), || {
+        edit::save_edited_image(
+            &request.path,
+            &request.image.pixels,
+            request.image.width,
+            request.image.height,
+            &request.state,
+            request.lens,
+        )
+        .expect("save copy from reopened missing-source image")
+    });
     assert!(saved.exists());
     assert_eq!(saved.extension().and_then(|ext| ext.to_str()), Some("png"));
 }
@@ -3132,6 +3737,7 @@ fn library_reopen_reuses_the_displayed_full_image_immediately() {
         filename: "frame.arw".to_string(),
         thumbnail_image: None,
         thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
     }]);
     app.current_image_path = Some(path.clone());
 
@@ -3183,15 +3789,18 @@ fn library_reopen_reuses_the_displayed_full_image_immediately() {
     let request = app
         .current_save_request()
         .expect("save request after reopen");
-    let saved = edit::save_edited_image(
-        &request.path,
-        &request.image.pixels,
-        request.image.width,
-        request.image.height,
-        &request.state,
-        request.lens,
-    )
-    .expect("save copy from reopened missing-source image");
+    let export_root = tempfile::tempdir().unwrap();
+    let saved = with_test_photo_repo_root(export_root.path(), || {
+        edit::save_edited_image(
+            &request.path,
+            &request.image.pixels,
+            request.image.width,
+            request.image.height,
+            &request.state,
+            request.lens,
+        )
+        .expect("save copy from reopened missing-source image")
+    });
     assert!(saved.exists());
     assert_eq!(saved.extension().and_then(|ext| ext.to_str()), Some("png"));
 }
@@ -3212,6 +3821,7 @@ fn opening_detail_from_library_clears_pending_drag_state() {
         filename: "frame.png".to_string(),
         thumbnail_image: None,
         thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
     }]);
     app.cursor_position = [120.0, 80.0];
 
@@ -3241,6 +3851,7 @@ fn library_reopen_reloads_when_the_current_source_metadata_changes() {
         filename: "frame.arw".to_string(),
         thumbnail_image: None,
         thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
     }]);
     app.current_image_path = Some(path.clone());
 
@@ -3764,6 +4375,7 @@ fn exif_loaded_refreshes_library_thumbnail_and_persist_for_auto_lens_correction(
         filename: "frame.arw".to_string(),
         thumbnail_image: Some(base_image),
         thumbnail_handle: None,
+        thumbnail_base_source: BaseImageSource::Original,
     }];
     app.rebuild_library_indices();
     let mut history = edit::UndoHistory::default();

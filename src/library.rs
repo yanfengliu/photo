@@ -1,6 +1,7 @@
 //! Library path persistence and file-dialog extensions.
 
 use crate::decode::ImageData;
+use crate::loading::BaseImageSource;
 use crate::nav;
 use iced::widget::image::Handle as ImageHandle;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ pub(crate) struct LibraryEntry {
     pub(crate) filename: String,
     pub(crate) thumbnail_image: Option<Arc<ImageData>>,
     pub(crate) thumbnail_handle: Option<ImageHandle>,
+    pub(crate) thumbnail_base_source: BaseImageSource,
 }
 
 pub(crate) fn local_app_storage_dir() -> Option<PathBuf> {
@@ -43,11 +45,17 @@ pub(crate) fn load_library() -> Vec<PathBuf> {
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
+    parse_library_content(&content)
+}
+
+/// Library membership is user intent. Entries whose media is currently offline
+/// (unplugged card, remapped drive) must survive startup, or the next library
+/// save would permanently drop them.
+pub(crate) fn parse_library_content(content: &str) -> Vec<PathBuf> {
     content
         .lines()
         .filter(|line| !line.is_empty())
         .map(PathBuf::from)
-        .filter(|p| p.exists())
         .collect()
 }
 

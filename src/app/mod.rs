@@ -113,6 +113,16 @@ pub(crate) struct SaveRequest {
     lens: edit::LensCorrection,
 }
 
+/// A bake that could not run when its edit was committed (the full-resolution
+/// decode was still in flight) and is owed to the superseded load request. The
+/// lens correction is snapshotted at navigation time because the app-level lens
+/// state moves on with the newly shown image.
+#[derive(Debug, Clone)]
+pub(crate) struct OwedLocalEditBake {
+    pub(crate) path: PathBuf,
+    pub(crate) lens: edit::LensCorrection,
+}
+
 pub(crate) struct App {
     tab: Tab,
     library: Vec<LibraryEntry>,
@@ -163,6 +173,7 @@ pub(crate) struct App {
     import_cache_warm_in_flight: Option<PathBuf>,
     pending_local_edit_persist_requests: std::collections::VecDeque<LocalEditPersistRequest>,
     local_edit_persist_in_flight: Option<LocalEditPersistRequest>,
+    owed_local_edit_bakes: std::collections::HashMap<u64, OwedLocalEditBake>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,7 +201,7 @@ pub(crate) enum Message {
     AddFiles,
     FolderPicked(Option<PathBuf>),
     FilesPicked(Option<Vec<PathBuf>>),
-    ThumbnailLoaded(PathBuf, Result<Arc<ImageData>, String>),
+    ThumbnailLoaded(PathBuf, Result<LoadedThumbnailBase, String>),
     ImportCacheWarmCompleted {
         path: PathBuf,
         result: Result<bool, String>,
@@ -301,6 +312,7 @@ impl App {
             import_cache_warm_in_flight: None,
             pending_local_edit_persist_requests: std::collections::VecDeque::new(),
             local_edit_persist_in_flight: None,
+            owed_local_edit_bakes: std::collections::HashMap::new(),
         };
 
         // Restore saved library entries

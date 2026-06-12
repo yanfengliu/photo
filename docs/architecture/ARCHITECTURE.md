@@ -1,11 +1,11 @@
 # Architecture
 
-> Last verified: 2026-06-10
+> Last verified: 2026-06-11
 > Last updated by: claude
 
 ## System Overview
 
-Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats, and RAW Detail view uses a staged load that shows an embedded preview first when available before upgrading to the fully developed image. Edits remain non-destructive within a session, committed edits bake into repo-local local-copy files across restarts with source-metadata validation and paired full/thumbnail generations, and save-as-copy still exports a separate edited file.
+Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats, and RAW Detail view uses a staged load that shows an embedded preview first when available before upgrading to the fully developed image. Edits remain non-destructive within a session, committed edits bake into repo-local local-copy files across restarts with source-metadata validation and paired full/thumbnail generations, and save-as-copy still exports a separate edited file. Baked local edits stay authoritative when the source media is offline: library membership, edited thumbnails, and Detail opening all work without the original file present (a reachable-but-rewritten source still invalidates the bake).
 
 ## Component Map
 
@@ -18,9 +18,9 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - `src/widgets.rs`: reusable widget builders — rotation buttons, thumbnail slots, thumbnail grid layout math, section labels/dividers, context-menu items.
 - `src/detail_load.rs`: `DetailLoadStage`/`DetailLoadState` staged Detail-load lifecycle.
 - `src/session_cache.rs`: `SourceFileFingerprint` validation plus the in-memory same-session full-image cache.
-- `src/local_edits.rs`: repo-local baked local-edit persistence — cache file format, paired full/thumbnail generations, validation, thumbnail repair, and the persist task core.
-- `src/loading.rs`: `LoadedFullImage`/`BaseImageSource` types plus full-image and library-thumbnail base loading that prefers valid baked local edits.
-- `src/library.rs`: `LibraryEntry`, `library.txt` persistence, and file-dialog extension wiring.
+- `src/local_edits.rs`: repo-local baked local-edit persistence — cache file format, paired full/thumbnail generations, validation, thumbnail repair, and the persist task core. Lookups resolve through reachability-independent candidate path keys, and validation fails open to the bake when the source file is absent (fails closed when it is present but its metadata changed).
+- `src/loading.rs`: `LoadedFullImage`/`BaseImageSource`/`LoadedThumbnailBase` types plus full-image and library-thumbnail base loading that prefers valid baked local edits and reports each thumbnail base's provenance.
+- `src/library.rs`: `LibraryEntry`, `library.txt` persistence (offline paths are kept — membership is user intent), and file-dialog extension wiring.
 - `src/repo.rs`: photo repo-root discovery and its test override (decode.rs keeps a pre-existing duplicate; dedup is a tracked follow-up).
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
 - `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
@@ -49,8 +49,8 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 1. The user picks a folder or files with `rfd`.
 2. `scan_folder_for_images()` finds and naturally sorts image files.
 3. `App::load_thumbnails()` launches async decode jobs.
-4. Each job loads a thumbnail base image, preferring a baked repo-local local-edit thumbnail only when it matches the persisted full local copy for the same generation and otherwise deriving from that full local copy or falling back to `decode::decode_thumbnail(path, 200)`, which prefers embedded RAW thumbnails/previews when the source is a camera RAW file.
-5. Thumbnails are stored as the base `ImageData`, rendered into `ImageHandle::from_rgba()`, and refreshed immediately after committed edits so Library reflects the visible Detail image.
+4. Each job loads a thumbnail base image, preferring a baked repo-local local-edit thumbnail only when it matches the persisted full local copy for the same generation and otherwise deriving from that full local copy or falling back to `decode::decode_thumbnail(path, 200)`, which prefers embedded RAW thumbnails/previews when the source is a camera RAW file. Baked thumbnails resolve and validate without the source file present, so edited entries render offline.
+5. Thumbnails are stored as the base `ImageData` tagged with its provenance and rendered into `ImageHandle::from_rgba()`. Session edit state renders only onto `Original` bases — baked bases already contain their edits, and only the persist pipeline replaces them — and they refresh immediately after committed edits so Library reflects the visible Detail image.
 
 ### Edit and Save Flow
 1. Sliders plus Detail-view crop/rotation controls update `EditState` in `App::update()`.
@@ -58,14 +58,14 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 3. `ImageCanvas` sends uniforms to `prepare()`, which writes the GPU uniform buffer.
 4. The shader applies the adjustments per pixel and dims outside the active crop overlay while crop mode is active.
 5. `UndoHistory::commit()` stores committed states on slider release and crop/rotation commits.
-6. After each committed edit, `app/update.rs` captures the current visible render as a snapshot, uses that same snapshot to refresh Library immediately, and bakes it through `local_edits.rs` into repo-local files under `local-edits/`, writing both a full-size local copy and a thumbnail-sized copy keyed by the source path.
-7. The persisted full and thumbnail copies share a generation id and source metadata header so partial writes or stale source rewrites fail closed instead of silently reopening mismatched pixels.
+6. After each committed edit, `app/update.rs` captures the current visible render as a snapshot, uses that same snapshot to refresh Library immediately, and bakes it through `local_edits.rs` into repo-local files under `local-edits/`, writing both a full-size local copy and a thumbnail-sized copy keyed by the source path. A commit made while the full-resolution decode is still in flight cannot bake yet; if the user navigates away first, the obligation is recorded against the superseded load request and fulfilled when that decode completes (`owed_local_edit_bakes`).
+7. The persisted full and thumbnail copies share a generation id and source metadata header so partial writes or stale source rewrites fail closed instead of silently reopening mismatched pixels. When the source file is absent (offline media), the bake is authoritative and loads without the metadata comparison.
 8. Reopening an image in a later session prefers that baked local copy as the new base image, while undo/redo stacks remain memory-only and are not restored after restart.
 9. `apply_all()` mirrors the shader math at full resolution during save, and the save path applies crop bounds after rotation so preview and export stay aligned.
 
 ### Navigation and Collections
 1. Arrow-key navigation prefers `library_index` and falls back to `DirNav`.
-2. Library paths load from `%LOCALAPPDATA%/photo/library.txt`, and baked per-image local copies load from the repo-local `local-edits/` directory when present and still valid for the current source metadata.
+2. Library paths load from `%LOCALAPPDATA%/photo/library.txt` — including paths whose media is currently offline, so entries survive unplugged cards and drive-letter changes — and baked per-image local copies load from the repo-local `local-edits/` directory when present and valid (metadata-checked against a reachable source, served as-is for an absent one).
 3. Collections load from `%LOCALAPPDATA%/photo/collections.json`.
 4. Collection mutations go through `CollectionStore`.
 5. Photos can be added or removed through context menus or drag-and-drop.

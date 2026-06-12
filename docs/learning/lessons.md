@@ -5,6 +5,26 @@ Keep this file short, current, and actionable.
 Note: entries dated before 2026-05-01 predate the evidence-anchor-table mandate in AGENTS.md and are grandfathered as-is; their anchors live in the dated devlog entries. Every new lesson must start with the evidence-anchor table.
 
 ## Active Lessons
+- 2026-06-11 - A durable store keyed through the live source file inverts durability exactly when it matters: the baked local-edit cache derived its filename from `fs::canonicalize(source)` and refused every read without fresh source metadata, so unplugging the camera card made committed edits unreachable (different key hash AND fail-closed validation) while the store sat intact on disk. Derive cache keys reachability-independently (candidate forms: canonical, parent-canonical+name, verbatim `\\?\` guess, raw), and distinguish source ABSENT (fail open to the last committed artifact — nothing newer exists to contradict it) from source CHANGED (fail closed — the bake no longer describes it). The same inversion hid in `load_library()` filtering entries on `Path::exists()`: a transient unplug emptied the library and the next save made the eviction permanent — never destructively filter user-intent data on transient environment state.
+
+  | Field | Value |
+  |---|---|
+  | Surfaced by | User report 2026-06-11 + live diagnosis in docs/threads/done/library-offline-edits/DESIGN.md (bake for E:\DCIM\100MSDCF\DSC09218.ARW present and valid, loader returned None for all 17 library entries with the card unplugged) |
+  | Reviewer findings | Gemini iter-1: approved, no defects; Claude iter-1: see thread REVIEW.md; Codex unreachable (usage limit) |
+  | Fix commit | (library-offline-edits commit, v0.2.2) |
+  | Test added | app::tests::library_thumbnail_serves_baked_local_edit_when_source_is_missing, app::tests::load_full_image_serves_baked_local_edit_when_source_is_missing, app::tests::persisted_local_edit_loads_after_source_file_disappears, app::tests::remove_persisted_local_edit_removes_cache_for_missing_source, app::tests::parsed_library_content_keeps_offline_paths |
+  | Behavior delta | before: startup with the card unplugged showed an empty library (entries evicted) and re-plugging couldn't restore edited thumbnails baked under the canonical key; after: all entries persist and the edited photo renders its baked 200x133 thumbnail offline (verified end-to-end against the real library and bake) |
+
+- 2026-06-11 - Async edit pipelines need two explicit invariants or they silently corrupt/lose work under timing: (1) every commit must be accounted for — baked now, recorded as an obligation (owed-bake registry fulfilled by the stale decode completion), or a legitimate no-op; a guard that just skips persistence ("full image not ready yet") is a data-loss path the moment the user navigates away. (2) Any cached artifact that may or may not already contain a transformation must carry provenance — `ThumbnailLoaded` re-rendered session edit state onto whatever base arrived, which double-applied edits whenever the base was already baked (race: edit quickly while slow import thumbnail jobs are still in flight).
+
+  | Field | Value |
+  |---|---|
+  | Surfaced by | blocks_save()/is_current_request analysis during the library-offline-edits diagnosis (docs/threads/done/library-offline-edits/DESIGN.md F2/F5) |
+  | Reviewer findings | Gemini iter-1: approved (called the owed-bake registry "a precise solution"); Claude iter-1: see thread REVIEW.md |
+  | Fix commit | (library-offline-edits commit, v0.2.2) |
+  | Test added | app::tests::commit_during_preview_then_navigate_away_still_bakes_after_full_decode, app::tests::owed_bake_dropped_when_stale_full_decode_fails, app::tests::owed_bake_skipped_when_state_is_default_and_no_bake_exists, app::tests::thumbnail_loaded_does_not_reapply_session_edits_to_baked_base |
+  | Behavior delta | before: a slider commit during a multi-second RAW develop + arrow-key navigation never baked (the edit died with the session), and a quick edit after import could brighten a thumbnail twice (exposure applied in the bake and re-applied at render); after: the bake lands when the superseded decode completes, and baked bases render as-is |
+
 - 2026-06-10 - Peak-position tests and direction-only assertions cannot catch zone-slider leakage: a Gaussian tone band that peaks in exactly the right place can still read as a global exposure shift if its tails are too wide (σ=√2 carries weight 0.37 two stops from center, so Highlights -100 moved EV-3 midtones by -0.74 EV). Pin band ISOLATION with ratio bounds at off-center EVs, pin the per-band reach at the center, and verify slider extremes with rendered images plus summary metrics — the leak was invisible to every existing unit test and obvious in one render.
 
   | Field | Value |
