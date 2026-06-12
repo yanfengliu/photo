@@ -416,6 +416,37 @@ pub fn apply_contrast(px: [f32; 3], amount: f32) -> [f32; 3] {
     [power(px[0]), power(px[1]), power(px[2])]
 }
 
+/// Applies the default RAW develop tone — an exposure lift plus the
+/// darktable-style power-law contrast above — to an sRGB-encoded RGBA buffer
+/// in place (alpha untouched). rawler's develop performs demosaic, white
+/// balance, and the camera-matrix → sRGB conversion but applies no tone
+/// curve, which reads flat next to the camera's own embedded JPEG; this is
+/// the baseline curve that closes that gap. The math lives here with the rest
+/// of the adjustment pipeline; how much to apply is the RAW decode path's
+/// policy (`decode.rs`).
+pub fn apply_raw_develop_tone(pixels: &mut [u8], exposure_ev: f32, contrast_slider: f32) {
+    let amount = contrast_amount(contrast_slider);
+    if exposure_ev == 0.0 && amount == 0.0 {
+        return;
+    }
+    // Exposure and the power-law contrast both act on each channel
+    // independently, and the input domain is quantized to 256 values — so a
+    // per-channel lookup table is EXACT (identical to running the float path
+    // per pixel) and turns a multi-second transcendental pass over a 60 MP
+    // develop into a single table scan.
+    let lut: [u8; 256] = core::array::from_fn(|v| {
+        let lin = srgb_to_linear(v as f32 / 255.0);
+        let exposed = apply_exposure([lin, lin, lin], exposure_ev)[0];
+        let toned = apply_contrast([exposed, exposed, exposed], amount)[0];
+        (linear_to_srgb(toned.clamp(0.0, 1.0)) * 255.0).round() as u8
+    });
+    for px in pixels.chunks_exact_mut(4) {
+        px[0] = lut[px[0] as usize];
+        px[1] = lut[px[1] as usize];
+        px[2] = lut[px[2] as usize];
+    }
+}
+
 pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
     let lum = luminance(px);
     let t = 1.0 + amount;
@@ -1588,6 +1619,45 @@ mod tests {
             "negative contrast should darken above-pivot pixels, got {}",
             out_h[0]
         );
+    }
+
+    #[test]
+    fn raw_develop_tone_is_identity_at_zero() {
+        let mut pixels = vec![10, 100, 200, 255, 0, 128, 255, 7];
+        let original = pixels.clone();
+        apply_raw_develop_tone(&mut pixels, 0.0, 0.0);
+        assert_eq!(pixels, original);
+    }
+
+    #[test]
+    fn raw_develop_tone_brightens_midtones_and_anchors_endpoints() {
+        let mut pixels = vec![0, 118, 255, 31];
+        apply_raw_develop_tone(&mut pixels, 0.3, 25.0);
+        assert_eq!(pixels[0], 0, "black must stay anchored");
+        assert!(
+            pixels[1] > 118,
+            "midtones must lift under the default tone, got {}",
+            pixels[1]
+        );
+        assert_eq!(pixels[2], 255, "white must stay anchored");
+        assert_eq!(pixels[3], 31, "alpha must pass through untouched");
+    }
+
+    #[test]
+    fn raw_develop_tone_is_monotonic_on_a_gray_ramp() {
+        let mut ramp: Vec<u8> = (0..=255u32)
+            .flat_map(|v| [v as u8, v as u8, v as u8, 255])
+            .collect();
+        apply_raw_develop_tone(&mut ramp, 0.3, 25.0);
+        let values: Vec<u8> = ramp.chunks_exact(4).map(|px| px[0]).collect();
+        for pair in values.windows(2) {
+            assert!(
+                pair[1] >= pair[0],
+                "the develop tone must be monotonic: {} then {}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     #[test]

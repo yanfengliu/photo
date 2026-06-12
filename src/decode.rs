@@ -28,8 +28,17 @@ const DECODE_CACHE_MAGIC: &[u8; 8] = b"PHOCACHE";
 const DECODE_CACHE_SCHEMA_VERSION: u32 = 3;
 // Older persisted RAW cache entries were observed at bogus oversized dimensions, and RAW
 // orientation is now applied during decode, so force a one-time rebuild rather than trusting
-// pre-fix cache content across sessions.
-const DECODE_CACHE_CONTRACT_VERSION: u64 = 5;
+// pre-fix cache content across sessions. Bumped to 6 when the default develop tone landed:
+// cached flat developments must re-derive with the tone curve.
+const DECODE_CACHE_CONTRACT_VERSION: u64 = 6;
+
+// Default tone for developed RAW output, applied through `edit::apply_raw_develop_tone`.
+// rawler's develop carries no tone curve, so it reads flat next to the camera's embedded
+// JPEG; these constants were tuned against the embedded preview of a Sony ARW with the
+// `raw_develop_tone_tuning_harness` test (metrics in the raw-default-tone thread/devlog).
+// Embedded previews and thumbnails are NOT tone-mapped — they already carry the camera curve.
+pub(crate) const RAW_DEVELOP_TONE_EXPOSURE_EV: f32 = 1.0;
+pub(crate) const RAW_DEVELOP_TONE_CONTRAST: f32 = 65.0;
 const DECODE_CACHE_DIR_NAME: &str = "decoded-cache";
 const DECODE_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DECODE_CACHE_TRIM_TARGET_BYTES: u64 = 1_536 * 1024 * 1024;
@@ -1000,7 +1009,14 @@ fn decode_raw(
                 .to_dynamic_image()
                 .ok_or_else(|| "Failed to convert RAW output to an image".to_string())?;
 
-            Ok(raw_dynamic_image_to_rgba(image, max_dim, orientation))
+            let (mut pixels, width, height) =
+                raw_dynamic_image_to_rgba(image, max_dim, orientation);
+            crate::edit::apply_raw_develop_tone(
+                &mut pixels,
+                RAW_DEVELOP_TONE_EXPOSURE_EV,
+                RAW_DEVELOP_TONE_CONTRAST,
+            );
+            Ok((pixels, width, height))
         };
 
         let embedded_kinds = if prefer_thumbnail {
@@ -1580,6 +1596,164 @@ mod tests {
         assert_eq!(
             result.pixels.len(),
             (result.width * result.height * 4) as usize
+        );
+    }
+
+    fn srgb_luma_stats(pixels: &[u8]) -> (f32, [u8; 5], f32, f32) {
+        let mut lumas: Vec<u8> = pixels
+            .chunks_exact(4)
+            .map(|px| {
+                (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32).round()
+                    as u8
+            })
+            .collect();
+        lumas.sort_unstable();
+        let n = lumas.len();
+        let mean = (lumas.iter().map(|&l| l as f64).sum::<f64>() / n as f64) as f32;
+        let pct = |p: f32| lumas[(((n - 1) as f32) * p) as usize];
+        let lo_clip = lumas.iter().filter(|&&l| l <= 2).count() as f32 / n as f32;
+        let hi_clip = lumas.iter().filter(|&&l| l >= 253).count() as f32 / n as f32;
+        (
+            mean,
+            [pct(0.05), pct(0.25), pct(0.50), pct(0.75), pct(0.95)],
+            lo_clip,
+            hi_clip,
+        )
+    }
+
+    /// Manual tuning harness: set `PHOTO_RAW_TONE_COMPARE=<path to a camera RAW>`
+    /// to sweep (exposure EV, contrast) candidates over the flat develop and
+    /// score them against the camera's embedded JPEG preview (the reference
+    /// look). Writes downscaled comparison PNGs to `tmp/raw-tone/`.
+    #[test]
+    fn raw_develop_tone_tuning_harness() {
+        let Ok(raw_path) = std::env::var("PHOTO_RAW_TONE_COMPARE") else {
+            return;
+        };
+        let path = PathBuf::from(raw_path);
+
+        let preview = decode_embedded_preview(&path)
+            .unwrap()
+            .expect("embedded preview");
+        let reference = srgb_luma_stats(&preview.pixels);
+        println!(
+            "reference embedded preview: mean={:.1} p[5,25,50,75,95]={:?} clip(lo,hi)=({:.3},{:.3})",
+            reference.0, reference.1, reference.2, reference.3
+        );
+
+        let untoned = with_raw_decoder(&path, |rawfile, decoder, params| {
+            let metadata_orientation = raw_orientation_from_metadata(decoder, rawfile, params);
+            let rawimage = decoder
+                .raw_image(rawfile, params, false)
+                .map_err(|e| e.to_string())?;
+            let orientation = resolved_raw_orientation(metadata_orientation, rawimage.orientation);
+            let image = RawDevelop::default()
+                .develop_intermediate(&rawimage)
+                .map_err(|e| e.to_string())?
+                .to_dynamic_image()
+                .ok_or_else(|| "convert".to_string())?;
+            Ok(raw_dynamic_image_to_rgba(image, 1400, orientation))
+        })
+        .unwrap();
+        let flat = srgb_luma_stats(&untoned.0);
+        println!(
+            "flat develop:               mean={:.1} p[5,25,50,75,95]={:?} clip(lo,hi)=({:.3},{:.3})",
+            flat.0, flat.1, flat.2, flat.3
+        );
+
+        let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join("raw-tone");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let save_png = |pixels: &[u8], w: u32, h: u32, name: &str| {
+            image::RgbaImage::from_raw(w, h, pixels.to_vec())
+                .unwrap()
+                .save(out_dir.join(name))
+                .unwrap();
+        };
+        let preview_small =
+            image::RgbaImage::from_raw(preview.width, preview.height, preview.pixels.clone())
+                .unwrap();
+        let preview_small = image::DynamicImage::ImageRgba8(preview_small).thumbnail(1400, 1400);
+        save_png(
+            preview_small.to_rgba8().as_raw(),
+            preview_small.width(),
+            preview_small.height(),
+            "reference-preview.png",
+        );
+        save_png(&untoned.0, untoned.1, untoned.2, "develop-flat.png");
+
+        for ev in [0.0_f32, 0.5, 0.85, 1.0, 1.1, 1.2] {
+            for contrast in [0.0_f32, 25.0, 45.0, 55.0, 65.0, 75.0] {
+                let mut candidate = untoned.0.clone();
+                crate::edit::apply_raw_develop_tone(&mut candidate, ev, contrast);
+                let stats = srgb_luma_stats(&candidate);
+                let score: f32 = stats
+                    .1
+                    .iter()
+                    .zip(reference.1.iter())
+                    .map(|(c, r)| (*c as f32 - *r as f32).abs())
+                    .sum::<f32>()
+                    + (stats.0 - reference.0).abs();
+                println!(
+                    "ev={ev:>4} contrast={contrast:>5}: mean={:.1} p={:?} clip=({:.3},{:.3}) score={score:.1}",
+                    stats.0, stats.1, stats.2, stats.3
+                );
+                if (ev, contrast) == (RAW_DEVELOP_TONE_EXPOSURE_EV, RAW_DEVELOP_TONE_CONTRAST) {
+                    save_png(
+                        &candidate,
+                        untoned.1,
+                        untoned.2,
+                        "develop-toned-current.png",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn raw_develop_applies_the_default_tone_curve() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_test_raw_dng(dir.path(), "tone.dng", 24, 12);
+
+        // Pin the repo root to "absent" so the decode cannot write a cache entry
+        // into the real repo's decoded-cache/ (this test needs no persistence).
+        let toned = with_default_test_decode_cache_dir(|| {
+            with_test_photo_repo_root(Some(None), || decode_image(&path).unwrap())
+        });
+
+        let untoned = with_raw_decoder(&path, |rawfile, decoder, params| {
+            let metadata_orientation = raw_orientation_from_metadata(decoder, rawfile, params);
+            let rawimage = decoder
+                .raw_image(rawfile, params, false)
+                .map_err(|e| e.to_string())?;
+            let orientation = resolved_raw_orientation(metadata_orientation, rawimage.orientation);
+            let image = RawDevelop::default()
+                .develop_intermediate(&rawimage)
+                .map_err(|e| e.to_string())?
+                .to_dynamic_image()
+                .ok_or_else(|| "convert".to_string())?;
+            Ok(raw_dynamic_image_to_rgba(
+                image,
+                MAX_TEXTURE_DIM,
+                orientation,
+            ))
+        })
+        .unwrap();
+
+        assert_ne!(
+            toned.pixels, untoned.0,
+            "the default develop tone must change the flat develop output"
+        );
+        let mut expected = untoned.0.clone();
+        crate::edit::apply_raw_develop_tone(
+            &mut expected,
+            RAW_DEVELOP_TONE_EXPOSURE_EV,
+            RAW_DEVELOP_TONE_CONTRAST,
+        );
+        assert_eq!(
+            toned.pixels, expected,
+            "the develop output must equal the flat develop plus the tone primitive"
         );
     }
 

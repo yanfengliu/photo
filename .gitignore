@@ -5,6 +5,7 @@
 /edited/
 /local-edits/
 /local-edits.json
+/tmp/
 /code_review/
 *.exe
 *.pdb
