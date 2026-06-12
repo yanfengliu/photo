@@ -34,10 +34,14 @@ const DECODE_CACHE_CONTRACT_VERSION: u64 = 6;
 
 // Default tone for developed RAW output, applied through `edit::apply_raw_develop_tone`.
 // rawler's develop carries no tone curve, so it reads flat next to the camera's embedded
-// JPEG; these constants were tuned against the embedded preview of a Sony ARW with the
-// `raw_develop_tone_tuning_harness` test (metrics in the raw-default-tone thread/devlog).
-// Embedded previews and thumbnails are NOT tone-mapped — they already carry the camera curve.
-pub(crate) const RAW_DEVELOP_TONE_EXPOSURE_EV: f32 = 1.0;
+// JPEG; these constants minimize the WORST-CASE luma-percentile distance to the embedded
+// camera previews across a 35-image Sony ARW calibration set (daylight + indoor) while
+// staying within 0.1 of the best mean (the mean-optimal (0.85, 75) clips more shadows) —
+// `raw_develop_tone_tuning_harness`, aggregate table in the 2026-06-12 devlog entry.
+// Embedded previews and thumbnails are NOT tone-mapped — they already carry the camera
+// curve. These constants are part of the decoded-cache contract hash: retuning them
+// automatically invalidates cached developments.
+pub(crate) const RAW_DEVELOP_TONE_EXPOSURE_EV: f32 = 0.85;
 pub(crate) const RAW_DEVELOP_TONE_CONTRAST: f32 = 65.0;
 const DECODE_CACHE_DIR_NAME: &str = "decoded-cache";
 const DECODE_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -522,7 +526,20 @@ fn is_photo_repo_root(candidate: &Path) -> bool {
 }
 
 fn decoded_cache_contract_hash() -> u64 {
-    DECODE_CACHE_CONTRACT_VERSION
+    decoded_cache_contract_hash_for(
+        DECODE_CACHE_CONTRACT_VERSION,
+        RAW_DEVELOP_TONE_EXPOSURE_EV,
+        RAW_DEVELOP_TONE_CONTRAST,
+    )
+}
+
+/// Cached develops store post-tone pixels, so the develop-tone constants are
+/// part of the cache contract: folding them into the hash makes any retune
+/// invalidate stale cached looks automatically. A bare version bump was
+/// forgotten exactly once (the v0.2.6 recalibration — caught in review), which
+/// is why this is structural rather than manual.
+fn decoded_cache_contract_hash_for(version: u64, tone_exposure_ev: f32, tone_contrast: f32) -> u64 {
+    version ^ ((tone_exposure_ev.to_bits() as u64) << 32) ^ (tone_contrast.to_bits() as u64)
 }
 
 fn decoded_cache_temp_file_path(cache_path: &Path) -> PathBuf {
@@ -1600,19 +1617,32 @@ mod tests {
     }
 
     fn srgb_luma_stats(pixels: &[u8]) -> (f32, [u8; 5], f32, f32) {
-        let mut lumas: Vec<u8> = pixels
-            .chunks_exact(4)
-            .map(|px| {
-                (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32).round()
-                    as u8
-            })
-            .collect();
-        lumas.sort_unstable();
-        let n = lumas.len();
-        let mean = (lumas.iter().map(|&l| l as f64).sum::<f64>() / n as f64) as f32;
-        let pct = |p: f32| lumas[(((n - 1) as f32) * p) as usize];
-        let lo_clip = lumas.iter().filter(|&&l| l <= 2).count() as f32 / n as f32;
-        let hi_clip = lumas.iter().filter(|&&l| l >= 253).count() as f32 / n as f32;
+        let mut histogram = [0u64; 256];
+        for px in pixels.chunks_exact(4) {
+            let luma = (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32)
+                .round() as usize;
+            histogram[luma.min(255)] += 1;
+        }
+        let n: u64 = histogram.iter().sum();
+        let mean = (histogram
+            .iter()
+            .enumerate()
+            .map(|(v, &c)| v as u64 * c)
+            .sum::<u64>() as f64
+            / n as f64) as f32;
+        let pct = |p: f32| {
+            let target = ((n - 1) as f64 * p as f64) as u64;
+            let mut seen = 0u64;
+            for (v, &c) in histogram.iter().enumerate() {
+                seen += c;
+                if seen > target {
+                    return v as u8;
+                }
+            }
+            255
+        };
+        let lo_clip = (histogram[0] + histogram[1] + histogram[2]) as f32 / n as f32;
+        let hi_clip = (histogram[253] + histogram[254] + histogram[255]) as f32 / n as f32;
         (
             mean,
             [pct(0.05), pct(0.25), pct(0.50), pct(0.75), pct(0.95)],
@@ -1621,27 +1651,8 @@ mod tests {
         )
     }
 
-    /// Manual tuning harness: set `PHOTO_RAW_TONE_COMPARE=<path to a camera RAW>`
-    /// to sweep (exposure EV, contrast) candidates over the flat develop and
-    /// score them against the camera's embedded JPEG preview (the reference
-    /// look). Writes downscaled comparison PNGs to `tmp/raw-tone/`.
-    #[test]
-    fn raw_develop_tone_tuning_harness() {
-        let Ok(raw_path) = std::env::var("PHOTO_RAW_TONE_COMPARE") else {
-            return;
-        };
-        let path = PathBuf::from(raw_path);
-
-        let preview = decode_embedded_preview(&path)
-            .unwrap()
-            .expect("embedded preview");
-        let reference = srgb_luma_stats(&preview.pixels);
-        println!(
-            "reference embedded preview: mean={:.1} p[5,25,50,75,95]={:?} clip(lo,hi)=({:.3},{:.3})",
-            reference.0, reference.1, reference.2, reference.3
-        );
-
-        let untoned = with_raw_decoder(&path, |rawfile, decoder, params| {
+    fn develop_untoned_for_harness(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
+        with_raw_decoder(path, |rawfile, decoder, params| {
             let metadata_orientation = raw_orientation_from_metadata(decoder, rawfile, params);
             let rawimage = decoder
                 .raw_image(rawfile, params, false)
@@ -1654,12 +1665,59 @@ mod tests {
                 .ok_or_else(|| "convert".to_string())?;
             Ok(raw_dynamic_image_to_rgba(image, 1400, orientation))
         })
-        .unwrap();
-        let flat = srgb_luma_stats(&untoned.0);
-        println!(
-            "flat develop:               mean={:.1} p[5,25,50,75,95]={:?} clip(lo,hi)=({:.3},{:.3})",
-            flat.0, flat.1, flat.2, flat.3
-        );
+    }
+
+    fn harness_score(
+        candidate: &(f32, [u8; 5], f32, f32),
+        reference: &(f32, [u8; 5], f32, f32),
+    ) -> f32 {
+        candidate
+            .1
+            .iter()
+            .zip(reference.1.iter())
+            .map(|(c, r)| (*c as f32 - *r as f32).abs())
+            .sum::<f32>()
+            + (candidate.0 - reference.0).abs()
+    }
+
+    /// Manual tuning harness: set `PHOTO_RAW_TONE_COMPARE=<camera RAW file or
+    /// directory of RAWs>` to sweep (exposure EV, contrast) candidates over the
+    /// flat develop of each file and score them against its embedded camera
+    /// preview (the reference look). Directory mode prints per-image one-liners
+    /// plus an aggregate mean|worst score table; single-file mode also writes
+    /// downscaled comparison PNGs to `tmp/raw-tone/`.
+    ///
+    /// Methodology caveats for future retunes: the reference stats come from the
+    /// native-resolution embedded preview while candidates are scored on the
+    /// ≤1400 px develop — downsampling narrows tail percentiles slightly,
+    /// biasing toward higher-contrast candidates; and clip fractions are
+    /// printed but not folded into the score (apply clipping judgement, and
+    /// visual spot-checks on the extremes, manually).
+    #[test]
+    fn raw_develop_tone_tuning_harness() {
+        let Ok(compare_path) = std::env::var("PHOTO_RAW_TONE_COMPARE") else {
+            return;
+        };
+        let root = PathBuf::from(compare_path);
+        let raw_paths: Vec<PathBuf> = if root.is_dir() {
+            let mut paths: Vec<PathBuf> = std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|p| crate::nav::is_raw_file(p))
+                .collect();
+            paths.sort();
+            paths
+        } else {
+            vec![root]
+        };
+
+        const EVS: [f32; 6] = [0.0, 0.7, 0.85, 1.0, 1.1, 1.2];
+        const CONTRASTS: [f32; 7] = [0.0, 35.0, 45.0, 55.0, 65.0, 75.0, 85.0];
+        let mut totals = [[0.0f64; 7]; 6];
+        let mut worst = [[0.0f32; 7]; 6];
+        let mut scored_images = 0usize;
+        let single = raw_paths.len() == 1;
 
         let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tmp")
@@ -1671,42 +1729,96 @@ mod tests {
                 .save(out_dir.join(name))
                 .unwrap();
         };
-        let preview_small =
-            image::RgbaImage::from_raw(preview.width, preview.height, preview.pixels.clone())
-                .unwrap();
-        let preview_small = image::DynamicImage::ImageRgba8(preview_small).thumbnail(1400, 1400);
-        save_png(
-            preview_small.to_rgba8().as_raw(),
-            preview_small.width(),
-            preview_small.height(),
-            "reference-preview.png",
-        );
-        save_png(&untoned.0, untoned.1, untoned.2, "develop-flat.png");
 
-        for ev in [0.0_f32, 0.5, 0.85, 1.0, 1.1, 1.2] {
-            for contrast in [0.0_f32, 25.0, 45.0, 55.0, 65.0, 75.0] {
-                let mut candidate = untoned.0.clone();
-                crate::edit::apply_raw_develop_tone(&mut candidate, ev, contrast);
-                let stats = srgb_luma_stats(&candidate);
-                let score: f32 = stats
-                    .1
-                    .iter()
-                    .zip(reference.1.iter())
-                    .map(|(c, r)| (*c as f32 - *r as f32).abs())
-                    .sum::<f32>()
-                    + (stats.0 - reference.0).abs();
-                println!(
-                    "ev={ev:>4} contrast={contrast:>5}: mean={:.1} p={:?} clip=({:.3},{:.3}) score={score:.1}",
-                    stats.0, stats.1, stats.2, stats.3
-                );
-                if (ev, contrast) == (RAW_DEVELOP_TONE_EXPOSURE_EV, RAW_DEVELOP_TONE_CONTRAST) {
-                    save_png(
-                        &candidate,
-                        untoned.1,
-                        untoned.2,
-                        "develop-toned-current.png",
-                    );
+        for path in &raw_paths {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Some(preview) = decode_embedded_preview(path).ok().flatten() else {
+                println!("{name}: no embedded preview; skipped");
+                continue;
+            };
+            let reference = srgb_luma_stats(&preview.pixels);
+            let untoned = match develop_untoned_for_harness(path) {
+                Ok(untoned) => untoned,
+                Err(error) => {
+                    println!("{name}: develop failed ({error}); skipped");
+                    continue;
                 }
+            };
+
+            let mut best = (f32::MAX, 0.0f32, 0.0f32);
+            let mut flat_score = 0.0f32;
+            let mut current_score = 0.0f32;
+            for (i, &ev) in EVS.iter().enumerate() {
+                for (j, &contrast) in CONTRASTS.iter().enumerate() {
+                    let mut candidate = untoned.0.clone();
+                    crate::edit::apply_raw_develop_tone(&mut candidate, ev, contrast);
+                    let stats = srgb_luma_stats(&candidate);
+                    let score = harness_score(&stats, &reference);
+                    totals[i][j] += score as f64;
+                    if score > worst[i][j] {
+                        worst[i][j] = score;
+                    }
+                    if score < best.0 {
+                        best = (score, ev, contrast);
+                    }
+                    if (ev, contrast) == (0.0, 0.0) {
+                        flat_score = score;
+                    }
+                    if (ev, contrast) == (RAW_DEVELOP_TONE_EXPOSURE_EV, RAW_DEVELOP_TONE_CONTRAST) {
+                        current_score = score;
+                        if single {
+                            save_png(
+                                &candidate,
+                                untoned.1,
+                                untoned.2,
+                                "develop-toned-current.png",
+                            );
+                        }
+                    }
+                }
+            }
+            scored_images += 1;
+            println!(
+                "{name}: ref mean={:>5.1} | flat={flat_score:>5.1} current={current_score:>5.1} best={:.1} @ (ev {}, contrast {})",
+                reference.0, best.0, best.1, best.2
+            );
+
+            if single {
+                let preview_small = image::RgbaImage::from_raw(
+                    preview.width,
+                    preview.height,
+                    preview.pixels.clone(),
+                )
+                .unwrap();
+                let preview_small =
+                    image::DynamicImage::ImageRgba8(preview_small).thumbnail(1400, 1400);
+                save_png(
+                    preview_small.to_rgba8().as_raw(),
+                    preview_small.width(),
+                    preview_small.height(),
+                    "reference-preview.png",
+                );
+                save_png(&untoned.0, untoned.1, untoned.2, "develop-flat.png");
+            }
+        }
+
+        if scored_images > 1 {
+            println!("\naggregate over {scored_images} images — mean score | worst score:");
+            print!("{:>8}", "ev\\con");
+            for contrast in CONTRASTS {
+                print!("{contrast:>14}");
+            }
+            println!();
+            for (i, &ev) in EVS.iter().enumerate() {
+                print!("{ev:>8}");
+                for j in 0..CONTRASTS.len() {
+                    let mean = totals[i][j] / scored_images as f64;
+                    print!("{:>8.1}|{:<5.1}", mean, worst[i][j]);
+                }
+                println!();
             }
         }
     }
@@ -2387,6 +2499,16 @@ mod tests {
         assert_eq!(first.pixels, vec![1, 2, 3, 255]);
         assert_eq!(second.pixels, vec![9, 8, 7, 255]);
         assert_eq!(third.pixels, second.pixels);
+    }
+
+    #[test]
+    fn decoded_cache_contract_hash_changes_with_tone_constants() {
+        // Cached develops store post-tone pixels, so retuning the develop tone
+        // must invalidate them without anyone remembering a version bump.
+        let base = decoded_cache_contract_hash_for(6, 0.85, 65.0);
+        assert_ne!(base, decoded_cache_contract_hash_for(6, 1.0, 65.0));
+        assert_ne!(base, decoded_cache_contract_hash_for(6, 0.85, 75.0));
+        assert_ne!(base, decoded_cache_contract_hash_for(7, 0.85, 65.0));
     }
 
     #[test]

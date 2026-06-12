@@ -356,6 +356,11 @@ pub fn apply_tone_zones(
     whites: f32,
     blacks: f32,
 ) -> [f32; 3] {
+    // All-zero sliders contribute 0 EV regardless of the band weights; skip the
+    // log2 + four Gaussians per pixel (the dominant cost on slider-free renders).
+    if highlights == 0.0 && shadows == 0.0 && whites == 0.0 && blacks == 0.0 {
+        return px;
+    }
     let l_lin = luminance(px);
     if l_lin <= 1e-6 {
         return px;
@@ -448,6 +453,11 @@ pub fn apply_raw_develop_tone(pixels: &mut [u8], exposure_ev: f32, contrast_slid
 }
 
 pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
+    if amount == 0.0 {
+        // t = 1 reduces to lum + (px - lum), identity to within 1 ULP; return
+        // the exact identity and skip the per-pixel luminance.
+        return px;
+    }
     let lum = luminance(px);
     let t = 1.0 + amount;
     [
@@ -463,6 +473,11 @@ pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
 /// Negative: desaturates vivid colors more while protecting muted/skin tones
 /// (power-law attenuation: high sat → strong desaturation).
 pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
+    if amount == 0.0 {
+        // weight = 1 reduces to lum + (px - lum), identity to within 1 ULP;
+        // return the exact identity and skip the per-pixel powf.
+        return px;
+    }
     let max_c = px[0].max(px[1]).max(px[2]);
     let min_c = px[0].min(px[1]).min(px[2]);
     let sat = if max_c > 0.0 {
@@ -749,6 +764,10 @@ fn sample_tca_rgba(
 
 /// Apply all adjustments to a single pixel (sRGB u8 input -> sRGB u8 output).
 /// `blurred` is the corresponding blurred pixel for clarity/dehaze (linear RGB).
+/// It is read ONLY by the clarity and dehaze branches; `render_edited_image`
+/// relies on exactly that to skip generating and sampling the blur atlas when
+/// both are zero — a new adjustment that consumes `blurred` must also join
+/// that `needs_blur` gate.
 /// `temp_matrix` is the precomputed Bradford CAT matrix.
 /// `uv` is the pixel's normalized position (0..1) for lens vignetting.
 /// `vig` is the lens vignetting coefficients [k1, k2, k3].
@@ -868,7 +887,14 @@ pub fn render_edited_image(
     let (rotated_pixels, rotated_width, rotated_height) =
         rotate_rgba_pixels(pixels, width, height, state.rotation);
     let rotated_pixels = rotated_pixels.as_ref();
-    let blur = generate_cpu_blur(rotated_pixels, rotated_width, rotated_height);
+    // The blur atlas feeds only clarity and dehaze; apply_all never reads the
+    // sample under any other state, so skipping it is output-identical.
+    let needs_blur = state.clarity != 0.0 || state.dehaze != 0.0;
+    let blur = if needs_blur {
+        generate_cpu_blur(rotated_pixels, rotated_width, rotated_height)
+    } else {
+        Vec::new()
+    };
     let crop = state
         .crop
         .map(|crop| crop.snap_to_pixels(rotated_width, rotated_height))
@@ -877,16 +903,30 @@ pub fn render_edited_image(
     let cropped_width = x1.saturating_sub(x0).max(1);
     let cropped_height = y1.saturating_sub(y0).max(1);
 
+    // Degenerate (empty) pixel ranges are unreachable through the crop UI, but
+    // guard them the way the old serial `y0..y1` loop did — an empty pixel
+    // buffer that downstream consumers reject — instead of rendering rows past
+    // the crop bounds.
+    if x0 >= x1 || y0 >= y1 {
+        return RenderedImage {
+            pixels: Vec::new(),
+            width: cropped_width,
+            height: cropped_height,
+        };
+    }
+
     let apply_distortion = state.lens_correction && lens.has_distortion();
     let apply_tca = state.lens_correction && lens.has_tca();
     let apply_vig = state.lens_correction && lens.vig != [0.0; 3];
 
-    let mut output = Vec::with_capacity((cropped_width * cropped_height * 4) as usize);
+    let mut output = vec![0u8; (cropped_width * cropped_height * 4) as usize];
     let w_f = rotated_width as f32;
     let h_f = rotated_height as f32;
     let bw = (rotated_width / 4).max(1);
     let bh = (rotated_height / 4).max(1);
-    for y in y0..y1 {
+    let row_bytes = (cropped_width * 4) as usize;
+
+    let render_row = |y: u32, out_row: &mut [u8]| {
         for x in x0..x1 {
             let uv_rot = [(x as f32 + 0.5) / w_f, (y as f32 + 0.5) / h_f];
             let tex_uv = if apply_distortion {
@@ -927,7 +967,11 @@ pub fn render_edited_image(
             // atlas mirrors what the GPU's linear sampler does — nearest-cell
             // integer indexing would produce stepwise artifacts at 4-pixel
             // boundaries that the preview does not show.
-            let blurred = sample_blur_bilinear(&blur, bw, bh, uv_rot[0], uv_rot[1]);
+            let blurred = if needs_blur {
+                sample_blur_bilinear(&blur, bw, bh, uv_rot[0], uv_rot[1])
+            } else {
+                [0.0; 3]
+            };
 
             // Vignette uses post-distortion UV on the GPU; match that here.
             // Passing zero coefficients makes apply_all's own check skip the
@@ -938,9 +982,31 @@ pub fn render_edited_image(
                 (uv_rot, [0.0; 3])
             };
             let result = apply_all(srgb, state, &temp_matrix, blurred, vig_uv, vig_coeffs);
-            output.extend_from_slice(&result);
+            let out_idx = ((x - x0) * 4) as usize;
+            out_row[out_idx..out_idx + 4].copy_from_slice(&result);
         }
-    }
+    };
+
+    // Rows are independent (all inputs are read-only; each row writes a
+    // disjoint output slice), so chunk them across cores. Per-pixel math is
+    // untouched — output is byte-identical to the serial loop.
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(cropped_height as usize)
+        .max(1);
+    let rows_per_chunk = (cropped_height as usize).div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (chunk_index, out_chunk) in output.chunks_mut(rows_per_chunk * row_bytes).enumerate() {
+            let render_row = &render_row;
+            scope.spawn(move || {
+                let chunk_y0 = y0 + (chunk_index * rows_per_chunk) as u32;
+                for (row_offset, out_row) in out_chunk.chunks_exact_mut(row_bytes).enumerate() {
+                    render_row(chunk_y0 + row_offset as u32, out_row);
+                }
+            });
+        }
+    });
 
     RenderedImage {
         pixels: output,
@@ -1361,6 +1427,27 @@ mod tests {
     }
 
     #[test]
+    fn apply_vibrance_zero_is_identity() {
+        let px = [0.8, 0.2, 0.4];
+        let out = apply_vibrance(px, 0.0);
+        assert_eq!(out, px, "zero vibrance must be the exact identity");
+    }
+
+    #[test]
+    fn render_returns_empty_pixels_for_degenerate_crop_bounds() {
+        // A crop whose snapped pixel range is empty must yield the empty buffer
+        // downstream consumers reject (the old serial loop's behavior), not
+        // render rows past the image bounds.
+        let pixels = [255u8; 16];
+        let state = EditState {
+            crop: Some(CropRect::new(0.0, 1.0, 1.0, 1.0)),
+            ..Default::default()
+        };
+        let out = render_edited_image(&pixels, 2, 2, &state, LensCorrection::default());
+        assert!(out.pixels.is_empty());
+    }
+
+    #[test]
     fn apply_saturation_minus_one_is_grayscale() {
         let px = [0.8, 0.2, 0.4];
         let out = apply_saturation(px, -1.0);
@@ -1618,6 +1705,57 @@ mod tests {
             out_h[0] < highlight[0],
             "negative contrast should darken above-pivot pixels, got {}",
             out_h[0]
+        );
+    }
+
+    /// Manual perf probe: `cargo test render_perf_probe -- --ignored --nocapture`.
+    /// Times render_edited_image on a synthetic 24 MP image for the two
+    /// archetypes (exposure-only commit vs clarity+dehaze). Numbers are
+    /// profile-relative; compare before/after within the same profile.
+    #[test]
+    #[ignore = "manual perf probe"]
+    fn render_perf_probe() {
+        let (width, height) = (6000u32, 4000u32);
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+            px[0] = (i % 251) as u8;
+            px[1] = (i % 241) as u8;
+            px[2] = (i % 239) as u8;
+            px[3] = 255;
+        }
+
+        let exposure_only = EditState {
+            exposure: 0.7,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let out = render_edited_image(
+            &pixels,
+            width,
+            height,
+            &exposure_only,
+            LensCorrection::default(),
+        );
+        println!(
+            "exposure-only 24MP: {:?} ({}x{})",
+            start.elapsed(),
+            out.width,
+            out.height
+        );
+
+        let heavy = EditState {
+            exposure: 0.4,
+            clarity: 30.0,
+            dehaze: 20.0,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let out = render_edited_image(&pixels, width, height, &heavy, LensCorrection::default());
+        println!(
+            "clarity+dehaze 24MP: {:?} ({}x{})",
+            start.elapsed(),
+            out.width,
+            out.height
         );
     }
 
