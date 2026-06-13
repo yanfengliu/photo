@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-06-11
+> Last verified: 2026-06-13
 > Last updated by: claude
 
 ## System Overview
@@ -20,7 +20,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - `src/session_cache.rs`: `SourceFileFingerprint` validation plus the in-memory same-session full-image cache.
 - `src/local_edits.rs`: repo-local baked local-edit persistence — cache file format, paired full/thumbnail generations, validation, thumbnail repair, and the persist task core. Lookups resolve through reachability-independent candidate path keys, and validation fails open to the bake when the source file is absent (fails closed when it is present but its metadata changed).
 - `src/loading.rs`: `LoadedFullImage`/`BaseImageSource`/`LoadedThumbnailBase` types plus full-image and library-thumbnail base loading that prefers valid baked local edits and reports each thumbnail base's provenance.
-- `src/library.rs`: `LibraryEntry`, `library.txt` persistence (offline paths are kept — membership is user intent), and file-dialog extension wiring.
+- `src/library.rs`: `LibraryEntry`, `library.txt` persistence (offline paths are kept — membership is user intent), and file-dialog extension wiring. Also owns `local_app_storage_dir()`, the single per-user storage-dir resolver (`%LOCALAPPDATA%/photo` in production) shared with collection persistence, behind a `#[cfg(test)]` thread-local override that defaults to `None` (set via `with_test_app_storage_dir`) so the test suite can never read or write real user data.
 - `src/repo.rs`: photo repo-root discovery and its test override (decode.rs keeps a pre-existing duplicate; dedup is a tracked follow-up).
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
 - `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
@@ -28,7 +28,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, thumbnail loading, the default RAW develop tone policy (rawler develops carry no tone curve; `edit::apply_raw_develop_tone` applies an exposure lift + contrast S-curve to full develops only — embedded previews/thumbnails keep the camera's own curve), and a repo-local persisted decoded-image cache under `decoded-cache/` (versioned schema/contract, normalized path keys, source-fingerprint validation, collision-safe temp writes, and bounded LRU-style retention).
 - `src/edit.rs`: edit state, undo/redo, CPU-side adjustment math, and save pipeline.
 - `src/lens.rs`: Lensfun XML parsing, EXIF reading, and lens profile lookup.
-- `src/collection.rs`: collection CRUD and JSON persistence.
+- `src/collection.rs`: collection CRUD and JSON persistence; `collections_file_path()` derives `collections.json` from `library::local_app_storage_dir()`, inheriting the same test isolation as the library file.
 - `src/nav.rs`: directory scanning and file navigation with natural sorting.
 
 ## Data Flow
@@ -79,7 +79,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - Only `edit.rs` owns adjustment math and undo/redo history.
 - Only `lens.rs` parses Lensfun XML and reads EXIF data.
 - Only `collection.rs` manages collection persistence and CRUD.
-- Only `library.rs` manages library-path persistence; only `session_cache.rs` owns the in-memory same-session full-image cache; only `local_edits.rs` reads/writes the repo-local `local-edits/` directory; the `app/` module owns session edit histories and all orchestration.
+- Only `library.rs` manages library-path persistence and owns the shared per-user storage-dir resolver (`local_app_storage_dir`) that `collection.rs` derives `collections.json` from; only `session_cache.rs` owns the in-memory same-session full-image cache; only `local_edits.rs` reads/writes the repo-local `local-edits/` directory; the `app/` module owns session edit histories and all orchestration.
 - Only `decode.rs` reads/writes the repo-local `decoded-cache/` directory.
 - File dialogs go through `rfd::AsyncFileDialog`.
 - Image decoding is always async through `tokio::task::spawn_blocking`.

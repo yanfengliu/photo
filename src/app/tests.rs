@@ -736,6 +736,81 @@ fn save_and_load_library_round_trips() {
 }
 
 #[test]
+fn app_storage_dir_is_isolated_from_real_user_location_in_tests() {
+    // Regression for the polluted-library bug: the test suite must never resolve
+    // to the real %LOCALAPPDATA%/photo location. Otherwise save_library and
+    // CollectionStore::save (both reached from App::update during ordinary tests)
+    // overwrite the user's real library.txt / collections.json with temp-dir
+    // fixtures. That is exactly how `first.dng`, `second.dng`, `overlay.svg`, and
+    // a phantom "Favorites" collection leaked into a real user library.
+    assert_eq!(local_app_storage_dir(), None);
+    assert_eq!(library_file_path(), None);
+    assert_eq!(collection::collections_file_path(), None);
+}
+
+#[test]
+fn importing_files_never_writes_the_real_user_library() {
+    // The exact original leak path: FilesPicked -> import_library_paths ->
+    // save_library. With default isolation the save resolves to no real path, so
+    // the entry is tracked in memory but nothing is persisted to the user's disk.
+    let (_src, batch) = setup_dir(&["leak_check.dng"]);
+    let (mut app, _) = App::new();
+    app.clear_library_entries();
+    let _ = app.update(Message::FilesPicked(Some(batch)));
+    assert_eq!(app.library.len(), 1);
+    assert_eq!(library_file_path(), None);
+}
+
+#[test]
+fn import_saves_library_into_overridden_storage_dir_only() {
+    let storage = tempfile::tempdir().unwrap();
+    let (_src, batch) = setup_dir(&["kept.dng"]);
+    let kept = batch[0].clone();
+    with_test_app_storage_dir(storage.path(), || {
+        let (mut app, _) = App::new();
+        app.clear_library_entries();
+        let _ = app.update(Message::FilesPicked(Some(batch)));
+        let saved = std::fs::read_to_string(storage.path().join("library.txt")).unwrap();
+        assert_eq!(saved.trim_end(), kept.to_string_lossy());
+    });
+}
+
+#[test]
+fn save_and_load_library_round_trips_through_overridden_storage() {
+    let storage = tempfile::tempdir().unwrap();
+    let (_src, batch) = setup_dir(&["x.png", "y.jpg"]);
+    with_test_app_storage_dir(storage.path(), || {
+        let entries: Vec<LibraryEntry> = batch
+            .iter()
+            .map(|p| LibraryEntry {
+                path: p.clone(),
+                filename: p.file_name().unwrap().to_string_lossy().into_owned(),
+                thumbnail_image: None,
+                thumbnail_handle: None,
+                thumbnail_base_source: BaseImageSource::Original,
+            })
+            .collect();
+        save_library(&entries);
+        assert_eq!(load_library(), batch);
+    });
+}
+
+#[test]
+fn collection_save_is_isolated_to_overridden_storage_dir() {
+    let storage = tempfile::tempdir().unwrap();
+    with_test_app_storage_dir(storage.path(), || {
+        let mut store = collection::CollectionStore::default();
+        store.create("Favorites");
+        store.save();
+        let reloaded = collection::CollectionStore::load();
+        assert_eq!(reloaded.collections.len(), 1);
+        assert_eq!(reloaded.collections[0].name, "Favorites");
+    });
+    // Outside the override there is no real path to write.
+    assert_eq!(collection::collections_file_path(), None);
+}
+
+#[test]
 fn local_edit_cache_targets_a_visible_repo_local_directory_when_repo_root_is_known() {
     let repo_root = tempfile::tempdir().unwrap();
 

@@ -99,8 +99,10 @@ impl CollectionStore {
 }
 
 pub fn collections_file_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(|dir| Path::new(&dir).join("photo").join("collections.json"))
+    // Share the single per-user storage-dir source of truth so collection
+    // persistence inherits the same test isolation as the library file and can
+    // never write the real %LOCALAPPDATA%/photo/collections.json from a test.
+    crate::library::local_app_storage_dir().map(|dir| dir.join("collections.json"))
 }
 
 #[cfg(test)]
