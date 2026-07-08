@@ -5,6 +5,26 @@ Keep this file short, current, and actionable.
 Note: entries dated before 2026-05-01 predate the evidence-anchor-table mandate in AGENTS.md and are grandfathered as-is; their anchors live in the dated devlog entries. Every new lesson must start with the evidence-anchor table.
 
 ## Active Lessons
+- 2026-07-08 - "Tracked follow-up" duplication debt is not inert: it silently breaks every NEW invariant added to the surviving copy. Repo-root discovery existed twice (repo.rs + decode.rs's private copy, flagged "dedup is a tracked follow-up" since the 2026-06-10 split); when the harness added a runtime sandbox override to repo.rs's copy, decode.rs's copy ignored it by construction and sandboxed harness sessions read/wrote/pruned the REAL decoded-cache/. When adding an invariant to a resolver/helper known to be duplicated, either dedup first (it's now load-bearing) or grep every duplicate for the new contract — a follow-up note is not a guard. The refuting-verifier pass is what caught it: same-model finders + verifiers grounded in the live code, not the diff.
+
+  | Field | Value |
+  |---|---|
+  | Surfaced by | docs/threads/done/agent-harness/2026-07-08/1/REVIEW.md (in-process adversarial workflow, sandbox dimension) |
+  | Reviewer findings | Workflow finder + refuting verifier, CONFIRMED HIGH ("Sandbox hole: decoded-cache/ still reads, writes, and prunes the REAL repo cache during sandboxed harness sessions") |
+  | Fix commit | 36975dd (v0.2.8) |
+  | Test added | decode::tests::decoded_cache_resolution_delegates_to_the_shared_repo_resolver (failing-first) |
+  | Behavior delta | before: `photo --harness` (sandboxed by default) warmed/pruned the real repo's decoded-cache/ — a harness session could evict the user's real cached RAW develops and pollute the cache with fixture entries; after: all cache roots resolve through repo.rs's single owner, so the sandbox override holds for every repo-local directory |
+
+- 2026-07-08 - Async completions that outlive their client must carry connection identity, or reconnect + reused request ids turns them into silent wrong answers: harness screenshot/dump/stats completions held only a request id; a client timing out mid-render and reconnecting (harnessctl restarts ids at 1 every invocation) could receive the PREVIOUS command's stale result as the answer to a different command — the agent would conclude "the slider had no effect" from a pre-change render, corrupting the exact feedback loop the harness exists to provide. Tag in-flight completions with a connection generation at dispatch and drop stale ones at delivery (keep their artifacts — the files are real); ids correlate within a connection, never across connections.
+
+  | Field | Value |
+  |---|---|
+  | Surfaced by | docs/threads/done/agent-harness/2026-07-08/1/REVIEW.md (in-process adversarial workflow, server-concurrency dimension; found independently by two finders) |
+  | Reviewer findings | Workflow finders + refuting verifier, CONFIRMED MEDIUM ("Stale in-flight async completion is delivered to the next connection and mis-correlated due to harnessctl's fixed id=1") |
+  | Fix commit | 36975dd (v0.2.8) |
+  | Test added | app::harness_tests::stale_async_completions_are_dropped_not_misdelivered |
+  | Behavior delta | before: `harnessctl dump_render` timeout → retry → the retry can print the pre-change RenderReport with ok:true (deterministic id collision), and the stale render's stats masquerade as current; after: stale completions are logged and dropped, the retry's own render answers, verified live across four reconnections |
+
 - 2026-06-11 - Fixing an invariant for the path in your diff without auditing the sibling paths that share it leaves the same failure class open: v0.2.2 closed "session edit state must stay relative to its recorded base" for decodes whose base was the Original, and the post-hoc reviewer found the identical corruption alive for bake-as-base reloads (edit over an existing bake → session-cache eviction → reopen loads the new bake → state re-applies and re-bakes, compounding). When a review fix closes an invariant violation, enumerate every site that loads/produces the artifacts the invariant relates (here: every `ImageLoaded` consumer) before declaring it closed — audit the invariant, not the diff. The structural fix was making absorption observable (persists report their written generation; reloads matching `last_baked_generations` reset the absorbed state).
 
   | Field | Value |
