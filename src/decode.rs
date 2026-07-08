@@ -4,7 +4,9 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 use image25::DynamicImage as RawDynamicImage;
@@ -50,7 +52,6 @@ const DECODE_CACHE_PRUNE_WRITE_INTERVAL: u64 = 8;
 const SOURCE_FINGERPRINT_BUFFER_BYTES: usize = 64 * 1024;
 static NEXT_CACHE_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 static CACHE_WRITES_SINCE_PRUNE: AtomicU64 = AtomicU64::new(0);
-static PHOTO_REPO_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 #[cfg(test)]
 static TEST_DECODE_CACHE_DIR_OVERRIDE: OnceLock<std::sync::Mutex<Option<Option<PathBuf>>>> =
     OnceLock::new();
@@ -482,6 +483,11 @@ fn decoded_cache_root(repo_root: &Path) -> PathBuf {
     repo_root.join(DECODE_CACHE_DIR_NAME)
 }
 
+/// Repo-root resolution delegates to `crate::repo` (the single owner of
+/// discovery and of the harness-mode runtime sandbox override) so the decoded
+/// cache can never diverge from where the rest of the app believes the repo
+/// is. decode.rs keeps only its module-local `#[cfg(test)]` override for
+/// decode-specific cache tests.
 fn photo_repo_root() -> Option<PathBuf> {
     #[cfg(test)]
     {
@@ -495,34 +501,7 @@ fn photo_repo_root() -> Option<PathBuf> {
         }
     }
 
-    PHOTO_REPO_ROOT
-        .get_or_init(discover_photo_repo_root)
-        .clone()
-}
-
-fn discover_photo_repo_root() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| find_photo_repo_root(path.parent()?))
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|dir| find_photo_repo_root(&dir))
-        })
-}
-
-fn find_photo_repo_root(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|candidate| is_photo_repo_root(candidate))
-        .map(Path::to_path_buf)
-}
-
-fn is_photo_repo_root(candidate: &Path) -> bool {
-    candidate.join(".git").exists()
-        && candidate.join("AGENTS.md").is_file()
-        && candidate.join("Cargo.toml").is_file()
-        && candidate.join("src").join("decode.rs").is_file()
+    crate::repo::photo_repo_root()
 }
 
 fn decoded_cache_contract_hash() -> u64 {
@@ -2364,18 +2343,20 @@ mod tests {
     }
 
     #[test]
-    fn find_photo_repo_root_ignores_other_rust_repositories() {
-        let repo_root = tempfile::tempdir().unwrap();
-        let nested = repo_root.path().join("target").join("debug");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(
-            repo_root.path().join("Cargo.toml"),
-            "[package]\nname = \"not-photo\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        std::fs::create_dir(repo_root.path().join(".git")).unwrap();
-
-        assert_eq!(find_photo_repo_root(&nested), None);
+    fn decoded_cache_resolution_delegates_to_the_shared_repo_resolver() {
+        // The decoded cache must follow crate::repo's resolution (including the
+        // harness-mode runtime sandbox override in production) whenever
+        // decode.rs's own test override is not set. A private duplicate
+        // resolver here once made sandboxed harness sessions read, write, and
+        // prune the REAL repo's decoded-cache/.
+        let sandbox = tempfile::tempdir().unwrap();
+        with_test_photo_repo_root(None, || {
+            crate::repo::with_test_photo_repo_root(sandbox.path(), || {
+                let raw_path = Path::new("photo.arw");
+                let cache_dir = decoded_cache_dir_for(raw_path).expect("cache dir resolves");
+                assert_eq!(cache_dir, sandbox.path().join(DECODE_CACHE_DIR_NAME));
+            })
+        });
     }
 
     #[test]

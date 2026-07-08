@@ -107,6 +107,9 @@ pub fn parse_lensfun_xml(xml: &str) -> Vec<LensProfile> {
     let mut in_lens = false;
     let mut in_calibration = false;
     let mut current_element = String::new();
+    // quick-xml 0.40+ reports entity references as separate GeneralRef events
+    // between Text runs, so element text accumulates here until the End tag.
+    let mut current_text = String::new();
 
     loop {
         match reader.read_event() {
@@ -120,20 +123,17 @@ pub fn parse_lensfun_xml(xml: &str) -> Vec<LensProfile> {
                 }
                 b"maker" | b"model" | b"mount" if in_lens => {
                     current_element = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    current_text.clear();
                 }
                 _ => {}
             },
-            Ok(Event::Text(e)) if in_lens => {
-                if let Some(ref mut lens) = current_lens {
-                    let text = e.unescape().unwrap_or_default().to_string();
-                    match current_element.as_str() {
-                        "maker" if lens.maker.is_empty() => lens.maker = text,
-                        "model" if lens.model.is_empty() => lens.model = text,
-                        "mount" if lens.mount.is_empty() => lens.mount = text,
-                        _ => {}
-                    }
+            Ok(Event::Text(e)) if in_lens && !current_element.is_empty() => {
+                if let Ok(text) = e.xml10_content() {
+                    current_text.push_str(&text);
                 }
-                current_element.clear();
+            }
+            Ok(Event::GeneralRef(e)) if in_lens && !current_element.is_empty() => {
+                current_text.push_str(&resolve_general_ref(&e));
             }
             Ok(Event::Empty(e)) if in_calibration => {
                 if let Some(ref mut lens) = current_lens {
@@ -152,6 +152,18 @@ pub fn parse_lensfun_xml(xml: &str) -> Vec<LensProfile> {
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
+                b"maker" | b"model" | b"mount" if in_lens => {
+                    if let Some(ref mut lens) = current_lens {
+                        let text = std::mem::take(&mut current_text);
+                        match current_element.as_str() {
+                            "maker" if lens.maker.is_empty() => lens.maker = text,
+                            "model" if lens.model.is_empty() => lens.model = text,
+                            "mount" if lens.mount.is_empty() => lens.mount = text,
+                            _ => {}
+                        }
+                    }
+                    current_element.clear();
+                }
                 b"lens" => {
                     if let Some(lens) = current_lens.take() {
                         profiles.push(lens);
@@ -171,6 +183,23 @@ pub fn parse_lensfun_xml(xml: &str) -> Vec<LensProfile> {
     }
 
     profiles
+}
+
+/// Resolves a general reference event to its text: numeric character refs via
+/// quick-xml, plus the five XML predefined entities. Unknown entities resolve
+/// to empty (the pre-0.40 `unescape()` errored these into an empty string too).
+fn resolve_general_ref(e: &quick_xml::events::BytesRef) -> String {
+    if let Ok(Some(ch)) = e.resolve_char_ref() {
+        return ch.to_string();
+    }
+    match e.decode().ok().as_deref() {
+        Some("amp") => "&".to_string(),
+        Some("lt") => "<".to_string(),
+        Some("gt") => ">".to_string(),
+        Some("apos") => "'".to_string(),
+        Some("quot") => "\"".to_string(),
+        _ => String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------

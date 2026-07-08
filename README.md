@@ -10,6 +10,7 @@ Supports JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, TGA, QOI, HDR, EXR, SVG, and comm
 - **Detail tab** - View individual images with GPU-rendered zoom and pan.
 - **Keyboard navigation** - Arrow keys to cycle through images.
 - **CLI support** - Open a file directly: `photo.exe path/to/image.jpg`
+- **Agent harness** - `photo.exe --harness` starts a localhost control channel so an AI agent can drive the app like a user (open, edit, crop, save) and inspect results via screenshots, CPU render dumps, and image statistics; `harnessctl` is the bundled client. Sandboxed storage by default. See `docs/guides/agent-harness.md`.
 
 ## Prerequisites
 

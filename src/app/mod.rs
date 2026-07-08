@@ -1,7 +1,13 @@
 //! Application state, messages, lifecycle, and shared state accessors.
 
+mod harness_actions;
+mod harness_artifacts;
+mod harness_exec;
+mod harness_observe;
 mod update;
 mod view;
+
+pub(crate) use harness_exec::HarnessMsg;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -154,6 +160,7 @@ pub(crate) struct App {
     current_lens_profile: Option<lens::LensProfile>,
     current_exif: Option<lens::ExifInfo>,
     save_status: Option<String>,
+    save_in_flight: bool,
     crop_mode: bool,
     crop_aspect: CropAspect,
     editing_slider: Option<SliderKind>,
@@ -190,6 +197,17 @@ pub(crate) struct App {
     // has advanced past the loaded base, so even a default state is a revert
     // that must bake.
     loaded_base_generations: std::collections::HashMap<PathBuf, u64>,
+    // Agent-harness session state (all inert unless launched with --harness).
+    harness_responder: Option<tokio::sync::mpsc::UnboundedSender<crate::harness::HarnessResponse>>,
+    // Bumped on every client connection; async completions dispatched under an
+    // older generation are dropped instead of answered (request ids are
+    // per-connection, so a stale response could mis-correlate).
+    harness_connection_generation: u64,
+    harness_artifacts: Vec<String>,
+    harness_idle_waiters: Vec<harness_exec::HarnessIdleWaiter>,
+    harness_idle_poll_armed: bool,
+    harness_artifact_seq: u64,
+    harness_quitting: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +287,8 @@ pub(crate) enum Message {
     TogglePhotoInCollection(usize),
     // Back from detail to collection grid
     ExitCollectionDetail,
+    // Agent-harness control channel (see src/app/harness_exec.rs)
+    Harness(HarnessMsg),
 }
 
 pub(crate) fn path_filename_str(path: &Path) -> &str {
@@ -305,6 +325,7 @@ impl App {
             current_lens_profile: None,
             current_exif: None,
             save_status: None,
+            save_in_flight: false,
             crop_mode: false,
             crop_aspect: CropAspect::Freeform,
             editing_slider: None,
@@ -331,6 +352,13 @@ impl App {
             owed_local_edit_bakes: std::collections::HashMap::new(),
             last_completed_bakes: std::collections::HashMap::new(),
             loaded_base_generations: std::collections::HashMap::new(),
+            harness_responder: None,
+            harness_connection_generation: 0,
+            harness_artifacts: Vec::new(),
+            harness_idle_waiters: Vec::new(),
+            harness_idle_poll_armed: false,
+            harness_artifact_seq: 0,
+            harness_quitting: false,
         };
 
         // Restore saved library entries
@@ -338,18 +366,13 @@ impl App {
         app.add_library_entries(&saved_paths);
         let thumb_task = Self::load_thumbnails(&saved_paths);
 
-        let args: Vec<String> = std::env::args().collect();
-        let cli_task = if args.len() > 1 {
-            let path = PathBuf::from(&args[1]);
-            if path.exists() {
+        let cli_task = match crate::launch::cli_image_path() {
+            Some(path) if path.exists() => {
                 app.tab = Tab::Detail;
                 app.nav = Some(DirNav::new(&path));
                 app.start_load(path)
-            } else {
-                Task::none()
             }
-        } else {
-            Task::none()
+            _ => Task::none(),
         };
 
         (app, Task::batch([thumb_task, cli_task]))
@@ -388,7 +411,16 @@ impl App {
     }
 
     pub(crate) fn subscription(&self) -> Subscription<Message> {
-        event::listen().map(Message::Event)
+        let events = event::listen().map(Message::Event);
+        if crate::harness::config().is_some() {
+            Subscription::batch([
+                events,
+                crate::harness::server::subscription()
+                    .map(|event| Message::Harness(HarnessMsg::Event(event))),
+            ])
+        } else {
+            events
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -723,5 +755,7 @@ pub(crate) fn slider_value_label(kind: SliderKind, value: f32) -> String {
     }
 }
 
+#[cfg(test)]
+mod harness_tests;
 #[cfg(test)]
 mod tests;

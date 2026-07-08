@@ -220,12 +220,12 @@ impl UndoHistory {
         self.current = EditState::default();
     }
 
-    #[cfg(test)]
+    // Production accessors since the agent harness reports them in
+    // observations; tests use them too.
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
 
-    #[cfg(test)]
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }

@@ -11,6 +11,19 @@ pub(crate) static TEST_PHOTO_REPO_ROOT_OVERRIDE: std::sync::OnceLock<
 #[cfg(test)]
 pub(crate) static TEST_PHOTO_REPO_ROOT_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
+// Runtime (harness-mode) override for the repo root. Set once by
+// `harness::prepare_runtime` so harness sessions redirect the repo-local
+// caches (`decoded-cache/`, `local-edits/`, `edited/`) into the run
+// directory's sandbox. Unset in normal launches and in tests (the test
+// override above takes precedence there).
+static RUNTIME_PHOTO_REPO_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Points repo-local cache discovery at `root` for the rest of the process.
+/// Second calls are ignored (the first writer — always `main()` — wins).
+pub(crate) fn set_runtime_photo_repo_root(root: PathBuf) {
+    let _ = RUNTIME_PHOTO_REPO_ROOT.set(root);
+}
+
 pub(crate) fn photo_repo_root() -> Option<PathBuf> {
     #[cfg(test)]
     {
@@ -22,6 +35,10 @@ pub(crate) fn photo_repo_root() -> Option<PathBuf> {
         if let Some(repo_root) = override_root {
             return repo_root;
         }
+    }
+
+    if let Some(root) = RUNTIME_PHOTO_REPO_ROOT.get() {
+        return Some(root.clone());
     }
 
     std::env::current_exe()
@@ -76,4 +93,24 @@ fn with_test_photo_repo_root_override<T>(repo_root: Option<PathBuf>, f: impl FnO
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     clear_test_local_edit_thumbnail_hooks();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_photo_repo_root_ignores_other_rust_repositories() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let nested = repo_root.path().join("target").join("debug");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            repo_root.path().join("Cargo.toml"),
+            "[package]\nname = \"not-photo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(repo_root.path().join(".git")).unwrap();
+
+        assert_eq!(find_photo_repo_root(&nested), None);
+    }
 }

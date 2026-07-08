@@ -399,6 +399,7 @@ impl App {
                     return Task::none();
                 };
                 self.save_status = Some("Saving...".to_string());
+                self.save_in_flight = true;
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -420,6 +421,7 @@ impl App {
             }
 
             Message::SaveCompleted(result) => {
+                self.save_in_flight = false;
                 self.save_status = Some(match result {
                     Ok(path) => format!("Saved: {path}"),
                     Err(e) => format!("Save failed: {e}"),
@@ -756,6 +758,8 @@ impl App {
                 self.context_menu = None;
                 Task::none()
             }
+
+            Message::Harness(msg) => self.handle_harness(msg),
         }
     }
 

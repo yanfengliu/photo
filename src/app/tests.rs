@@ -31,7 +31,7 @@ fn patterned_rgba_pixels(width: u32, height: u32) -> Vec<u8> {
     pixels
 }
 
-fn setup_dir(names: &[&str]) -> (tempfile::TempDir, Vec<PathBuf>) {
+pub(crate) fn setup_dir(names: &[&str]) -> (tempfile::TempDir, Vec<PathBuf>) {
     let dir = tempfile::tempdir().unwrap();
     let mut paths = Vec::new();
     for name in names {
@@ -42,7 +42,7 @@ fn setup_dir(names: &[&str]) -> (tempfile::TempDir, Vec<PathBuf>) {
     (dir, paths)
 }
 
-fn detail_app_with_image(path: &Path, width: u32, height: u32) -> App {
+pub(crate) fn detail_app_with_image(path: &Path, width: u32, height: u32) -> App {
     let (mut app, _) = App::new();
     app.tab = Tab::Detail;
     app.clear_library_entries();
@@ -93,7 +93,7 @@ fn loaded_full_image(path: &Path, image: Arc<decode::ImageData>) -> LoadedFullIm
     }
 }
 
-fn library_app_with_entries(count: usize) -> App {
+pub(crate) fn library_app_with_entries(count: usize) -> App {
     let (mut app, _) = App::new();
     app.tab = Tab::Library;
     app.edit_histories.clear();

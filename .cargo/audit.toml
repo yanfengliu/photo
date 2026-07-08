@@ -1,0 +1,15 @@
+# cargo-audit configuration.
+#
+# Suppressions must carry a reason and an expiry; re-justify or remove at
+# expiry (AGENTS.md dependency-change protocol).
+
+[advisories]
+# RUSTSEC-2026-0194 + RUSTSEC-2026-0195 (quick-xml < 0.41 DoS vectors).
+# The app's direct quick-xml dependency is >= 0.41 (fixed 2026-07-07). These
+# remain only for the transitive quick-xml 0.39.x pinned by wayland-scanner
+# (a Linux-only PROC-MACRO: build-time codegen for winit's Wayland backend,
+# never compiled on this Windows-targeted app and never part of any shipped
+# binary; it parses trusted in-tree Wayland protocol XML). Suppressed until
+# wayland-scanner releases with quick-xml >= 0.41 — re-check by 2026-10-01
+# (cargo update -p wayland-scanner; cargo audit).
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]

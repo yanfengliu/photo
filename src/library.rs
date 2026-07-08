@@ -28,10 +28,24 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+// Runtime (harness-mode) override for the per-user app storage directory. Set
+// once by `harness::prepare_runtime` before the app starts so harness sessions
+// sandbox `library.txt`/`collections.json` into the run directory instead of
+// the user's real `%LOCALAPPDATA%/photo`. Unset in normal launches; unread in
+// test builds (the thread-local test override below governs there).
+static RUNTIME_APP_STORAGE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Points app storage at `dir` for the rest of the process. Second calls are
+/// ignored (the first writer — always `main()` — wins).
+pub(crate) fn set_runtime_app_storage_dir(dir: PathBuf) {
+    let _ = RUNTIME_APP_STORAGE_DIR.set(dir);
+}
+
 /// Per-user app storage directory (`%LOCALAPPDATA%/photo` in production), home of
 /// `library.txt` and `collections.json`. In test builds this resolves to the
 /// thread-local override (default `None`) so the suite cannot clobber real user
-/// data — a save against `None` is a no-op, and a load returns empty.
+/// data — a save against `None` is a no-op, and a load returns empty. In
+/// production it resolves through the harness runtime override first.
 pub(crate) fn local_app_storage_dir() -> Option<PathBuf> {
     #[cfg(test)]
     {
@@ -39,8 +53,20 @@ pub(crate) fn local_app_storage_dir() -> Option<PathBuf> {
     }
     #[cfg(not(test))]
     {
-        std::env::var_os("LOCALAPPDATA").map(|dir| Path::new(&dir).join("photo"))
+        resolve_production_storage_dir(
+            RUNTIME_APP_STORAGE_DIR.get().cloned(),
+            std::env::var_os("LOCALAPPDATA"),
+        )
     }
+}
+
+/// Production resolution order: harness sandbox override, then
+/// `%LOCALAPPDATA%/photo`. Pure so the precedence is testable.
+pub(crate) fn resolve_production_storage_dir(
+    runtime_override: Option<PathBuf>,
+    localappdata: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    runtime_override.or_else(|| localappdata.map(|dir| Path::new(&dir).join("photo")))
 }
 
 /// Runs `f` with the app storage directory pointed at `dir`, restoring the
@@ -105,4 +131,32 @@ pub(crate) fn image_file_dialog_extensions() -> &'static [&'static str] {
 
 pub fn scan_folder_for_images(folder: &Path) -> Vec<PathBuf> {
     nav::scan_images_in_directory(folder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_storage_prefers_harness_sandbox_over_localappdata() {
+        let sandbox = PathBuf::from("run/storage/appdata");
+        let resolved = resolve_production_storage_dir(
+            Some(sandbox.clone()),
+            Some(std::ffi::OsString::from("C:/Users/u/AppData/Local")),
+        );
+        assert_eq!(resolved, Some(sandbox));
+    }
+
+    #[test]
+    fn production_storage_falls_back_to_localappdata_photo() {
+        let resolved = resolve_production_storage_dir(
+            None,
+            Some(std::ffi::OsString::from("C:/Users/u/AppData/Local")),
+        );
+        assert_eq!(
+            resolved,
+            Some(Path::new("C:/Users/u/AppData/Local").join("photo"))
+        );
+        assert_eq!(resolve_production_storage_dir(None, None), None);
+    }
 }

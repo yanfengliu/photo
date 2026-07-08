@@ -41,6 +41,11 @@ This does not lower the verification bar: tests still pass, diffs still get revi
   - Apply the change.
   - Capture an after screenshot.
   - Generate a pixel diff and use that as verification alongside the normal test/build gates.
+  - The agent harness provides all of this against the real app: `photo --harness` + `harnessctl screenshot` / `dump_render` / `compare_images` (see the Agent harness section).
+
+## Agent harness (drive the app like a user)
+
+The app has a built-in agent control channel: launch `./target/release/photo.exe --harness`, drive it with `./target/release/harnessctl.exe <cmd>` from the repo root, and it captures screenshots (real GPU frames), CPU render dumps with image statistics (clipping, percentiles, histograms), and image diffs into a per-run artifact directory under `tmp/harness-runs/`. Storage is sandboxed by default so sessions never touch the real library. **Use it whenever a change affects rendering, edit math, or UI behavior** — observe the result yourself instead of asking the human how it looks, and record findings per the documented contract. The canonical guide (protocol, command table, statistics semantics, the observe→act→measure→verify improvement loop, findings schema) is `docs/guides/agent-harness.md`.
 
 ## Command Execution Rules (project-specific)
 
