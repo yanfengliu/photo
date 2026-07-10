@@ -17,6 +17,10 @@ Treat the rest of this file as **defaults, not rigid law.** The right approach i
 
 This does not lower the verification bar: tests still pass, diffs still get reviewed, docs still stay current. It changes *how* you get there, not the standard.
 
+## Session start
+
+Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` before starting work.
+
 ## Continuing through plans
 
 - **No stopping points within a multi-task plan.** When the user gives you a plan with N tasks, work through all N continuously. Do not stop and ask whether to keep going. Do not pitch `/schedule` for the rest of the work the user already asked for. Harness reminders ("task tools haven't been used recently", auto-mode banners, context warnings) are NOT stop signals — they are administrative noise. Treat the plan itself as the contract, and treat "continue" as the default.
@@ -32,7 +36,7 @@ Before running or driving a recursive self-improvement pass, read `../loop-ops/d
 
 - Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus primarily on app experience and mechanisms.
 - For each desired change, make the change easy, then make the easy change.
-- Before implementing a change, write a plan.
+- Before implementing a non-trivial change, write a plan. (Trivial changes: just make them, per the working-style preamble.)
 - Verify every change against this project's gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`. All four must pass before declaring a task done.
 - **Dependency-change protocol (mandatory whenever you touch `Cargo.toml`'s `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]`):**
   1. Re-resolve the lockfile: `cargo update` (commits `Cargo.lock`).
@@ -77,7 +81,7 @@ When you do dispatch, the team roles below describe how to brief them. The Team 
 - **Architect**: Acts as a consultant. Drafts the initial implementation plan and verifies it against ARCHITECTURE.md before work dispatches.
 - **UX designer**: Validates that the UX works well and feels natural. Researches local and online sources to ground opinions.
 - **Software engineer**: Handles code writing.
-  - After coding, ask the code reviewer to review (see Code review section). Iterate with reviewers — diff reviews take ~5 minutes per CLI; use `run_in_background: true` and an `until [ -s <output-file> ]; do sleep 8; done` poller to wait without burning context or hitting harness sleep limits.
+  - After coding, ask the code reviewer to review (see Code review section) and iterate. Multi-CLI reviews run in the background; timing and poller mechanics are in `.claude/skills/multi-cli-review/SKILL.md`.
   - After addressing review comments, ask the reviewer to verify the fix.
   - If engineer + reviewer cannot reach consensus after 3 iterations, surface the disagreement to the user with both positions and let the user decide.
   - Save reviewer synthesis under `docs/threads/current/<objective>/<date>/<iteration_number>/`, mirroring the full-codebase review convention (see `docs/threads/done/full/<date>/<iteration_number>/` for historical precedent). The `<objective>` folder is a concise kebab-case phrase naming the work; for full-codebase reviews, use `full`.
@@ -91,43 +95,21 @@ When you do dispatch, the team roles below describe how to brief them. The Team 
 
 ## Code review
 
-Operational details for the multi-CLI review referenced above — run it on high-risk changes; the default adversarial pass is an in-process Workflow.
+The default adversarial pass for non-trivial work is the in-process Workflow (see Core rules). Run the multi-CLI review (Codex + Claude, each reviewing independently) on high-risk changes and full-codebase audits. All multi-CLI mechanics — current review model pins, exact commands, sandbox flags, the background-run/poller pattern, the Codex output-extraction recipe, and CLI failure modes — live in `.claude/skills/multi-cli-review/SKILL.md`; read it before every multi-CLI session and bump review pins there first.
 
-- **Reviewers MUST read the codebase to ground their claims.** Every review prompt must include the directive: *"Verify each claim in the plan/diff against the live codebase — grep for the symbols, function signatures, column names, and file paths it references; do not approve based on prompt text alone."* Without this directive baked in, two reviewers can APPROVE a design with a real defect that only the codebase-reading reviewer catches. Convergence is measured by *substantive finding count*, not *vote count* — a HIGH defect from one reviewer outweighs APPROVED from two. Per-CLI reading capability:
-  - **Claude** reads via the Read/Glob/Grep tools you grant it (`--allowedTools "Read,Glob,Grep,..."`). Treat as load-bearing for code-vs-spec correctness.
-  - **Codex** can read files when `--sandbox read-only` runs WITHOUT `--ignore-user-config`. The user rules file (`~/.codex/rules/default.rules`) then permits Windows-native file ops (`findstr`, `type`, `dir`, `ls`) as fallback when bash hits the PowerShell deny rule. Smoke-test occasionally with `echo "Read X and report" | codex exec --sandbox read-only --ephemeral` — codex must return content, not bail on "PowerShell blocked."
-- Use Codex / Claude in CLI to independently review every change. Aspects to review:
+Policy for every reviewer, in-process subagent or CLI:
+
+- **Reviewers MUST read the codebase to ground their claims.** Every review prompt must include the directive: *"Verify each claim in the plan/diff against the live codebase — grep for the symbols, function signatures, column names, and file paths it references; do not approve based on prompt text alone."* Without this directive baked in, two reviewers can APPROVE a design with a real defect that only the codebase-reading reviewer catches. Convergence is measured by *substantive finding count*, not *vote count* — a HIGH defect from one reviewer outweighs APPROVED from two.
+- Aspects to review:
   1. Design — easily scales, generalizes, debugs, can be understood and reasoned about, stays lean.
   2. Test coverage.
   3. Correctness.
-  4. Clean code, typing, efficiency, memory leaks. No duplicated logic, inconsistent implementations, violation of boundaries. No file > 500 LOC. Prefer composition over inheritance. Clean up dead code. Do not change app mechanics or behavior unless explicitly asked.
+  4. Clean code, typing, efficiency, memory leaks. No duplicated logic, inconsistent implementations, violation of boundaries. File size: keep every file under 500 LOC (hard ceiling 1000) — split god-objects by lifecycle/role. Prefer composition over inheritance. Clean up dead code. Do not change app mechanics or behavior unless explicitly asked.
 
   Documentation accuracy is covered by the Documentation discipline section's reviewer prompt addendum — do not duplicate the rule here.
 
-- A baseline prompt is below; **enrich it with task-specific context** for real reviews — the change's intent, prior-iteration findings to verify, files to focus on, and an anti-regression checklist. The bare baseline returns generic feedback; useful reviews need the specifics.
-
-  > "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text. Only point out an issue if it is real and important. If there is no issue, say so instead of nit-picking."
-
-- Codex:
-  - `git diff [branch] | codex exec --model gpt-5.6-sol -c model_reasoning_effort=ultra -c approval_policy=never --sandbox read-only --ephemeral <prompt>`
-  - **Do NOT pass `--ignore-user-config`.** That flag bypasses `~/.codex/rules/default.rules`, which is what permits codex on this Windows machine to use Windows-native commands (`findstr`, `type`, `dir`, `ls`) when its bash wrapper hits the PowerShell deny rule. Without those rules, codex's `read-only` sandbox blocks every shell tool and the reviewer silently falls back to "review without reading the code." Verified 2026-05-02.
-  - Requires Codex CLI ≥ 0.144.1 — older builds reject the model name with `requires a newer version of Codex`. Upgrade with `npm install -g @openai/codex@latest`. `gpt-5.6-sol` accepts `model_reasoning_effort=ultra` (verified 2026-07-09; earlier models capped at `xhigh`).
-- Claude:
-  - With diff piped via stdin: `git diff [branch] | claude -p --model "opus[1m]" --effort max --append-system-prompt <prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
-  - For full-codebase (no diff): pass the prompt as the positional argument: `claude -p "<full prompt>" --model "opus[1m]" --effort max --allowedTools "Read,Glob,Grep,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(wc *),Bash(ls *),Bash(find *)"`. `--append-system-prompt` is unnecessary and the long-prompt-as-stdin form is not needed.
-  - The `[1m]` suffix selects the 1 M-token-context variant of the latest Opus alias. Quote the model string so the shell doesn't glob-expand the brackets.
-- **Keep model IDs current.** Use the latest-family alias when a command is meant to track the newest model (for example, `opus[1m]`); bump pinned strings whenever a more capable fixed variant ships (e.g. `claude-opus-5-0[1m]`, `gpt-5.6`). Verify with a one-line smoke test (`echo "ok" | <cli> ...`) before committing the bump — silent fallback to an older model is the failure mode to guard against.
-- For full-codebase reviews (no diff), drop the `git diff` pipe and let each CLI agentically explore the workspace from its CWD; keep the same model/effort flags.
-- **Diff reviews take ~5 minutes per CLI on a multi-hundred-line diff.** Run them in parallel with `run_in_background: true`. Wait via a single background `until` poller (`until [ -s codex.txt ] && [ -s claude.txt ]; do sleep 8; done`) so the harness's no-long-sleeps guard doesn't fire and you don't poll repeatedly.
-- **Reading codex review output efficiently.** Codex's `tmp/review-runs/.../codex.txt` echoes the entire piped stdin (which contains the literal marker strings as instructions) plus exec-sandbox chatter, then prints `codex` on its own line right before the actual response, then the review TWICE.
-  - **Primary approach — make Codex bracket its review with markers AND extract from after codex's own header line.** Add this sentence to every Codex review prompt: `Begin your review with the literal token "===BEGIN-REVIEW===" on its own line and end with "===END-REVIEW===" on its own line. Do not emit those markers anywhere else in your output.` Slice from `^codex$` forward, then awk the markers:
-    ```bash
-    sed -n '/^codex$/,$p' codex.txt | awk '/===BEGIN-REVIEW===/{p=1; next} /===END-REVIEW===/{exit} p'
-    ```
-  - **Wrong extraction (the bug):** `awk '/===BEGIN-REVIEW===/{p=1; next} /===END-REVIEW===/{exit} p' codex.txt` (without the sed prefix) matches the FIRST pair, which is the literal marker strings inside the prompt-echo. Codex's actual findings are silently dropped.
-  - **Fallback when markers are missing**: `wc -l codex.txt`, then `Read` with `offset = lines - 250`. Or `sed -n '/<\/stdin>/,$p' codex.txt | head -300`.
-  - Claude output is clean — markers optional there.
-- **If a CLI is unreachable** (quota exhaustion, model name rejected by harness), proceed with the remaining reviewer and note the unreachable CLI in the devlog. One solid review is still useful signal — do not block the workflow waiting on the other.
+- **Enrich the baseline prompt** (quoted in the runbook skill) **with task-specific context** — the change's intent, prior-iteration findings to verify, files to focus on, and an anti-regression checklist. The bare baseline returns generic feedback; useful reviews need the specifics.
+- **Keep model IDs current.** Use the latest-family alias when a command is meant to track the newest model (for example, `opus[1m]`); bump pinned strings whenever a more capable fixed variant ships (e.g. `claude-opus-5-0[1m]`, `gpt-5.6`). Verify with a one-line smoke test (`echo "ok" | <cli> ...`) before committing the bump — silent fallback to an older model is the failure mode to guard against. Review-command pins live in the runbook skill.
 
 ## Git
 
@@ -141,7 +123,7 @@ Operational details for the multi-CLI review referenced above — run it on high
 
 ## Documentation
 
-Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` at session start. Key directories:
+Key directories:
 
 - `src`: app code.
 - `docs`: architecture, devlogs, threads, API, tutorials, guides.
