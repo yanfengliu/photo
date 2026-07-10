@@ -109,9 +109,9 @@ Operational details for the multi-CLI review referenced above — run it on high
   > "You are a senior code reviewer. Flag bugs, security issues, and performance concerns. Do NOT modify files or propose patches. Only return findings, explanations, and suggestions in plain text. Only point out an issue if it is real and important. If there is no issue, say so instead of nit-picking."
 
 - Codex:
-  - `git diff [branch] | codex exec --model gpt-5.5 -c model_reasoning_effort=xhigh -c approval_policy=never --sandbox read-only --ephemeral <prompt>`
+  - `git diff [branch] | codex exec --model gpt-5.6-sol -c model_reasoning_effort=ultra -c approval_policy=never --sandbox read-only --ephemeral <prompt>`
   - **Do NOT pass `--ignore-user-config`.** That flag bypasses `~/.codex/rules/default.rules`, which is what permits codex on this Windows machine to use Windows-native commands (`findstr`, `type`, `dir`, `ls`) when its bash wrapper hits the PowerShell deny rule. Without those rules, codex's `read-only` sandbox blocks every shell tool and the reviewer silently falls back to "review without reading the code." Verified 2026-05-02.
-  - Requires Codex CLI ≥ 0.125.0 — older builds reject the model name with `requires a newer version of Codex`. Upgrade with `npm install -g @openai/codex@latest`. Codex caps reasoning effort at `xhigh` (no `max` value).
+  - Requires Codex CLI ≥ 0.144.1 — older builds reject the model name with `requires a newer version of Codex`. Upgrade with `npm install -g @openai/codex@latest`. `gpt-5.6-sol` accepts `model_reasoning_effort=ultra` (verified 2026-07-09; earlier models capped at `xhigh`).
 - Claude:
   - With diff piped via stdin: `git diff [branch] | claude -p --model "opus[1m]" --effort max --append-system-prompt <prompt> --allowedTools "Read,Bash(git diff *),Bash(git log *),Bash(git show *)"`
   - For full-codebase (no diff): pass the prompt as the positional argument: `claude -p "<full prompt>" --model "opus[1m]" --effort max --allowedTools "Read,Glob,Grep,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(wc *),Bash(ls *),Bash(find *)"`. `--append-system-prompt` is unnecessary and the long-prompt-as-stdin form is not needed.
