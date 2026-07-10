@@ -81,7 +81,7 @@ When you do dispatch, the team roles below describe how to brief them. The Team 
 - **Architect**: Acts as a consultant. Drafts the initial implementation plan and verifies it against ARCHITECTURE.md before work dispatches.
 - **UX designer**: Validates that the UX works well and feels natural. Researches local and online sources to ground opinions.
 - **Software engineer**: Handles code writing.
-  - After coding, ask the code reviewer to review (see Code review section) and iterate. Multi-CLI reviews run in the background; timing and poller mechanics are in `.claude/skills/multi-cli-review/SKILL.md`.
+  - After coding, ask the code reviewer to review (see Code review section) and iterate. Multi-CLI reviews run in the background; timing and poller mechanics are in the fleet-canonical runbook `../loop-ops/docs/skills/multi-cli-review.md`.
   - After addressing review comments, ask the reviewer to verify the fix.
   - If engineer + reviewer cannot reach consensus after 3 iterations, surface the disagreement to the user with both positions and let the user decide.
   - Save reviewer synthesis under `docs/threads/current/<objective>/<date>/<iteration_number>/`, mirroring the full-codebase review convention (see `docs/threads/done/full/<date>/<iteration_number>/` for historical precedent). The `<objective>` folder is a concise kebab-case phrase naming the work; for full-codebase reviews, use `full`.
@@ -95,7 +95,7 @@ When you do dispatch, the team roles below describe how to brief them. The Team 
 
 ## Code review
 
-The default adversarial pass for non-trivial work is the in-process Workflow (see Core rules). Run the multi-CLI review (Codex + Claude, each reviewing independently) on high-risk changes and full-codebase audits. All multi-CLI mechanics — current review model pins, exact commands, sandbox flags, the background-run/poller pattern, the Codex output-extraction recipe, and CLI failure modes — live in `.claude/skills/multi-cli-review/SKILL.md`; read it before every multi-CLI session and bump review pins there first.
+The default adversarial pass for non-trivial work is the in-process Workflow (see Core rules). Run the multi-CLI review (Codex + Claude, each reviewing independently) on high-risk changes and full-codebase audits. All multi-CLI mechanics — current review model pins, exact commands, sandbox flags, the background-run/poller pattern, the Codex output-extraction recipe, and CLI failure modes — live in the fleet-canonical runbook `../loop-ops/docs/skills/multi-cli-review.md`; read it before every multi-CLI session, and review pins bump there, once for the whole fleet. `.claude/skills/multi-cli-review/SKILL.md` is this repo's thin stub for repo-specific notes.
 
 Policy for every reviewer, in-process subagent or CLI:
 
@@ -108,8 +108,8 @@ Policy for every reviewer, in-process subagent or CLI:
 
   Documentation accuracy is covered by the Documentation discipline section's reviewer prompt addendum — do not duplicate the rule here.
 
-- **Enrich the baseline prompt** (quoted in the runbook skill) **with task-specific context** — the change's intent, prior-iteration findings to verify, files to focus on, and an anti-regression checklist. The bare baseline returns generic feedback; useful reviews need the specifics.
-- **Keep model IDs current.** Use the latest-family alias when a command is meant to track the newest model (for example, `opus[1m]`); bump pinned strings whenever a more capable fixed variant ships (e.g. `claude-opus-5-0[1m]`, `gpt-5.6`). Verify with a one-line smoke test (`echo "ok" | <cli> ...`) before committing the bump — silent fallback to an older model is the failure mode to guard against. Review-command pins live in the runbook skill.
+- **Enrich the baseline prompt** (quoted in the fleet-canonical runbook) **with task-specific context** — the change's intent, prior-iteration findings to verify, files to focus on, and an anti-regression checklist. The bare baseline returns generic feedback; useful reviews need the specifics.
+- **Keep model IDs current.** Use the latest-family alias when a command is meant to track the newest model (for example, `opus[1m]`); bump pinned strings whenever a more capable fixed variant ships (e.g. `claude-opus-5-0[1m]`, `gpt-5.6`). Verify with a one-line smoke test (`echo "ok" | <cli> ...`) before committing the bump — silent fallback to an older model is the failure mode to guard against. Review-command pins live in the fleet-canonical runbook `../loop-ops/docs/skills/multi-cli-review.md`, the fleet's single bump site.
 
 ## Git
 
