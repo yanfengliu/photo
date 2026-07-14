@@ -30,9 +30,9 @@ const DECODE_CACHE_MAGIC: &[u8; 8] = b"PHOCACHE";
 const DECODE_CACHE_SCHEMA_VERSION: u32 = 3;
 // Older persisted RAW cache entries were observed at bogus oversized dimensions, and RAW
 // orientation is now applied during decode, so force a one-time rebuild rather than trusting
-// pre-fix cache content across sessions. Bumped to 6 when the default develop tone landed:
-// cached flat developments must re-derive with the tone curve.
-const DECODE_CACHE_CONTRACT_VERSION: u64 = 6;
+// pre-fix cache content across sessions. Bumped to 6 when the default develop tone landed,
+// then 7 when RAW conversions became downscale-only so cached accidental upscales rebuild.
+const DECODE_CACHE_CONTRACT_VERSION: u64 = 7;
 
 // Default tone for developed RAW output, applied through `edit::apply_raw_develop_tone`.
 // rawler's develop carries no tone curve, so it reads flat next to the camera's embedded
@@ -229,8 +229,14 @@ fn raw_dynamic_image_to_rgba(
     orientation: Orientation,
 ) -> (Vec<u8>, u32, u32) {
     // Bounding both axes before the orientation transform keeps the final image within
-    // `max_dim` even when a 90-degree rotation swaps width and height afterward.
-    let image = image.thumbnail(max_dim, max_dim);
+    // `max_dim` even when a 90-degree rotation swaps width and height afterward. image 0.25's
+    // `thumbnail` enlarges smaller inputs to the requested bounds, so call it only when an axis
+    // actually exceeds the requested bound.
+    let image = if image.width() > max_dim || image.height() > max_dim {
+        image.thumbnail(max_dim, max_dim)
+    } else {
+        image
+    };
     let image = apply_raw_orientation(image, orientation);
     let rgba = image.to_rgba8();
     let (w, h) = rgba.dimensions();
@@ -1974,6 +1980,8 @@ mod tests {
 
         let normal = decode_image(&normal_path).unwrap();
         let result = decode_image(&path).unwrap();
+        assert_eq!((normal.width, normal.height), (24, 12));
+        assert_eq!((result.width, result.height), (12, 24));
         let expected = oriented_image_data(&normal, Orientation::Rotate270);
         assert_eq!((result.width, result.height), (expected.1, expected.2));
         assert_eq!(result.pixels, expected.0);
@@ -2081,6 +2089,8 @@ mod tests {
 
         let normal = decode_embedded_preview(&normal_path).unwrap().unwrap();
         let result = decode_embedded_preview(&path).unwrap().unwrap();
+        assert_eq!((normal.width, normal.height), (2, 1));
+        assert_eq!((result.width, result.height), (1, 2));
         let expected = oriented_image_data(&normal, Orientation::Rotate90);
         assert_eq!((result.width, result.height), (expected.1, expected.2));
         assert_eq!(result.pixels, expected.0);
@@ -2127,6 +2137,19 @@ mod tests {
         assert_eq!((result.1, result.2), (2, 1));
         assert_rgb_close(&result.0[0..4], [0, 255, 0], 2);
         assert_rgb_close(&result.0[4..8], [255, 0, 0], 2);
+    }
+
+    #[test]
+    fn raw_dynamic_image_to_rgba_never_upscales_below_requested_bound() {
+        let result = raw_dynamic_image_to_rgba(
+            raw_dynamic_image_from_pixels(2, 1, &[[255, 0, 0], [0, 255, 0]]),
+            10,
+            Orientation::Normal,
+        );
+
+        assert_eq!((result.1, result.2), (2, 1));
+        assert_rgb_close(&result.0[0..4], [255, 0, 0], 0);
+        assert_rgb_close(&result.0[4..8], [0, 255, 0], 0);
     }
 
     #[test]
