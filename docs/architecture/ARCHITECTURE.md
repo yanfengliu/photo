@@ -1,7 +1,7 @@
 # Architecture
 
-> Last verified: 2026-07-07
-> Last updated by: claude
+> Last verified: 2026-07-14
+> Last updated by: Codex
 
 ## System Overview
 
@@ -33,7 +33,7 @@ Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. 
 - `src/library.rs`: `LibraryEntry`, `library.txt` persistence (offline paths are kept — membership is user intent), and file-dialog extension wiring. Also owns `local_app_storage_dir()`, the single per-user storage-dir resolver (`%LOCALAPPDATA%/photo` in production) shared with collection persistence, behind a `#[cfg(test)]` thread-local override that defaults to `None` (set via `with_test_app_storage_dir`) so the test suite can never read or write real user data.
 - `src/repo.rs`: the single owner of photo repo-root discovery, its test override, and the harness-mode runtime sandbox override (`set_runtime_photo_repo_root`). decode.rs delegates here for cache-root resolution (its former private duplicate resolver let sandboxed harness sessions touch the real `decoded-cache/` — deduplicated 2026-07-08; decode.rs keeps only its module-local test override).
 - `src/viewer.rs`: custom `iced::widget::shader::Program` for zoom, pan, crop selection overlay, texture upload, uniforms, and GPU resource management.
-- `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, TCA, and gamma encoding.
+- `assets/shaders/image.wgsl`: textured quad shader with exposure, tone zones, contrast, vibrance, saturation, clarity, dehaze, crop preview/overlay handling, lens distortion, vignetting, and TCA. Image and blur textures use hardware sRGB decoding so adjustment math receives linear RGB; the normal sRGB presentation target encodes once in hardware, with a uniform-controlled manual encode only for iced's non-sRGB surface fallback.
 - `assets/shaders/blur.wgsl`: 9-tap separable Gaussian blur pre-pass for clarity/dehaze.
 - `src/decode.rs`: raster, SVG, and RAW decoding, including GPU texture limit pre-downscale, thumbnail-first RAW embedded-image extraction for library loads, staged embedded-preview-plus-full-detail RAW loading, thumbnail loading, the default RAW develop tone policy (rawler develops carry no tone curve; `edit::apply_raw_develop_tone` applies an exposure lift + contrast S-curve to full develops only — embedded previews/thumbnails keep the camera's own curve), and a repo-local persisted decoded-image cache under `decoded-cache/` (versioned schema/contract, normalized path keys, source-fingerprint validation, collision-safe temp writes, and bounded LRU-style retention).
 - `src/edit.rs`: edit state, undo/redo, CPU-side adjustment math, and save pipeline.

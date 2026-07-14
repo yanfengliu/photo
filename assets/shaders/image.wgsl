@@ -41,7 +41,8 @@ struct Uniforms {
     crop_preview: vec4<f32>,
     crop_overlay: vec4<f32>,
     crop_overlay_enabled: f32,
-    _pad2: vec3<f32>,
+    output_needs_srgb_encode: f32,
+    _pad2: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -72,14 +73,18 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 // -- Color math helpers --
 
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 { return c / 12.92; }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
 fn linear_to_srgb(c: f32) -> f32 {
     if c <= 0.0031308 { return c * 12.92; }
     return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+fn encode_for_target(rgb: vec3<f32>) -> vec3<f32> {
+    if u.output_needs_srgb_encode < 0.5 { return rgb; }
+    return vec3(
+        linear_to_srgb(rgb.r),
+        linear_to_srgb(rgb.g),
+        linear_to_srgb(rgb.b),
+    );
 }
 
 fn lum(rgb: vec3<f32>) -> f32 {
@@ -163,7 +168,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Outside image rect: background
     if uv.x < rect.x || uv.x > rect.z || uv.y < rect.y || uv.y > rect.w {
-        return u.bg_color;
+        return vec4(encode_for_target(u.bg_color.rgb), u.bg_color.a);
     }
 
     let display_uv = (uv - rect.xy) / (rect.zw - rect.xy);
@@ -179,8 +184,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var rgb = apply_tca(tex_uv, center);
     let alpha = textureSample(img_tex, img_sampler, tex_uv).a;
 
-    // Linearize
-    var px = vec3(srgb_to_linear(rgb.r), srgb_to_linear(rgb.g), srgb_to_linear(rgb.b));
+    // The Rgba8UnormSrgb source texture is decoded to linear RGB by wgpu.
+    var px = rgb;
 
     // Exposure: pixel * 2^EV
     px = px * pow(2.0, u.exposure);
@@ -266,17 +271,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if u.clarity != 0.0 {
         let blur_uv = viewport_uv_to_tex_uv(uv, rect);
         let blur_sample = textureSample(blur_tex, img_sampler, blur_uv).rgb;
-        let blur_lin = vec3(srgb_to_linear(blur_sample.r), srgb_to_linear(blur_sample.g), srgb_to_linear(blur_sample.b));
         let lc = lum(px);
         let midtone = smooth_step(0.0, 0.5, lc) * (1.0 - smooth_step(0.5, 1.0, lc));
-        px += u.clarity * (px - blur_lin) * midtone;
+        px += u.clarity * (px - blur_sample) * midtone;
     }
 
     // Dehaze
     if u.dehaze != 0.0 {
         let blur_uv2 = viewport_uv_to_tex_uv(uv, rect);
-        let blur_s = textureSample(blur_tex, img_sampler, blur_uv2).rgb;
-        let blur_l = vec3(srgb_to_linear(blur_s.r), srgb_to_linear(blur_s.g), srgb_to_linear(blur_s.b));
+        let blur_l = textureSample(blur_tex, img_sampler, blur_uv2).rgb;
         let atmos = max(max(blur_l.r, blur_l.g), max(blur_l.b, 0.01));
         let dark = min(px.r, min(px.g, px.b));
         let t = max(1.0 - u.dehaze * dark / atmos, 0.1);
@@ -286,10 +289,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Lens vignetting correction
     px = apply_vignette(px, tex_uv, center);
 
-    // Clamp and gamma encode
+    // Clamp in linear light. An sRGB presentation surface applies the display
+    // transfer in hardware; encode_for_target handles a non-sRGB fallback.
     px = clamp(px, vec3(0.0), vec3(1.0));
-    let srgb = vec3(linear_to_srgb(px.r), linear_to_srgb(px.g), linear_to_srgb(px.b));
-    var out_rgb = srgb;
+    var out_rgb = px;
 
     if u.crop_overlay_enabled > 0.5 {
         let inside = display_uv.x >= u.crop_overlay.x
@@ -297,6 +300,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             && display_uv.y >= u.crop_overlay.y
             && display_uv.y <= u.crop_overlay.w;
         if !inside {
+            // UI gray constants are linear, like the viewer background.
             out_rgb = mix(out_rgb, vec3(0.05), 0.6);
         }
     }
@@ -308,8 +312,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let checker = select(0.18, 0.25,
             (floor(pos.x / checker_size) + floor(pos.y / checker_size)) % 2.0 < 1.0);
         let bg = vec3(checker);
-        return vec4(mix(bg, out_rgb, alpha), 1.0);
+        return vec4(encode_for_target(mix(bg, out_rgb, alpha)), 1.0);
     }
 
-    return vec4(out_rgb, 1.0);
+    return vec4(encode_for_target(out_rgb), 1.0);
 }

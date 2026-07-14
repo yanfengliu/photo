@@ -9,6 +9,13 @@ use iced::{Point, Rectangle};
 
 use crate::{decode::ImageData, edit};
 
+const IMAGE_SHADER_SOURCE: &str = include_str!("../assets/shaders/image.wgsl");
+const IMAGE_COLOR_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+fn target_requires_manual_srgb_encode(format: wgpu::TextureFormat) -> bool {
+    !format.is_srgb()
+}
+
 // ---------------------------------------------------------------------------
 // Messages emitted by the viewer shader widget
 // ---------------------------------------------------------------------------
@@ -208,7 +215,8 @@ struct Uniforms {
     crop_preview: [f32; 4],
     crop_overlay: [f32; 4],
     crop_overlay_enabled: f32,
-    _pad2: [f32; 7],
+    output_needs_srgb_encode: f32,
+    _pad2: [f32; 6],
 }
 
 // ---------------------------------------------------------------------------
@@ -681,9 +689,7 @@ impl shader::Primitive for ImagePrimitive {
         if !storage.has::<GpuResources>() {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("photo_shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("../assets/shaders/image.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER_SOURCE.into()),
             });
 
             let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -788,7 +794,7 @@ impl shader::Primitive for ImagePrimitive {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: IMAGE_COLOR_TEXTURE_FORMAT,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -872,7 +878,7 @@ impl shader::Primitive for ImagePrimitive {
                     module: &blur_module,
                     entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        format: IMAGE_COLOR_TEXTURE_FORMAT,
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -974,7 +980,7 @@ impl shader::Primitive for ImagePrimitive {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    format: IMAGE_COLOR_TEXTURE_FORMAT,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
@@ -1033,7 +1039,7 @@ impl shader::Primitive for ImagePrimitive {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        format: IMAGE_COLOR_TEXTURE_FORMAT,
                         usage: wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::RENDER_ATTACHMENT,
                         view_formats: &[],
@@ -1052,7 +1058,7 @@ impl shader::Primitive for ImagePrimitive {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        format: IMAGE_COLOR_TEXTURE_FORMAT,
                         usage: wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::RENDER_ATTACHMENT,
                         view_formats: &[],
@@ -1221,6 +1227,8 @@ impl shader::Primitive for ImagePrimitive {
         let scaled = ScaledAmounts::from_adjustments(adj);
         let uniforms = Uniforms {
             rect: self.rect,
+            // Shader colors are linear; the sRGB surface or its explicit
+            // fallback transfer encodes this intentionally linear gray.
             bg_color: [0.10, 0.10, 0.10, 1.0],
             exposure: scaled.exposure,
             contrast: scaled.contrast,
@@ -1270,7 +1278,12 @@ impl shader::Primitive for ImagePrimitive {
                 .map(|rect| [rect.left, rect.top, rect.right, rect.bottom])
                 .unwrap_or([0.0, 0.0, 1.0, 1.0]),
             crop_overlay_enabled: if adj.crop_overlay.is_some() { 1.0 } else { 0.0 },
-            _pad2: [0.0; 7],
+            output_needs_srgb_encode: if target_requires_manual_srgb_encode(format) {
+                1.0
+            } else {
+                0.0
+            },
+            _pad2: [0.0; 6],
         };
         queue.write_buffer(&res.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
@@ -1402,6 +1415,29 @@ mod tests {
     }
 
     #[test]
+    fn gpu_color_pipeline_relies_on_hardware_srgb_transfer_once() {
+        assert_eq!(
+            IMAGE_COLOR_TEXTURE_FORMAT,
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        );
+        assert!(!IMAGE_SHADER_SOURCE.contains("fn srgb_to_linear"));
+        assert!(IMAGE_SHADER_SOURCE.contains("fn encode_for_target"));
+        assert!(IMAGE_SHADER_SOURCE.contains("u.output_needs_srgb_encode"));
+        assert!(IMAGE_SHADER_SOURCE.contains("var px = rgb;"));
+        assert!(!target_requires_manual_srgb_encode(
+            wgpu::TextureFormat::Bgra8UnormSrgb
+        ));
+        assert!(target_requires_manual_srgb_encode(
+            wgpu::TextureFormat::Bgra8Unorm
+        ));
+
+        let source = edit::srgb_to_linear(128.0 / 255.0);
+        let exposed = edit::apply_exposure([source; 3], 1.0)[0];
+        let encoded = edit::linear_to_srgb(exposed);
+        assert_eq!((encoded * 255.0).round() as u8, 176);
+    }
+
+    #[test]
     fn blur_prepass_is_only_needed_for_clarity_or_dehaze() {
         let default = AdjustmentUniforms::default();
         assert!(!default.needs_blur());
@@ -1473,6 +1509,10 @@ mod tests {
         assert_eq!(field_offset(&uniforms, &uniforms.crop_preview), 176);
         assert_eq!(field_offset(&uniforms, &uniforms.crop_overlay), 192);
         assert_eq!(field_offset(&uniforms, &uniforms.crop_overlay_enabled), 208);
+        assert_eq!(
+            field_offset(&uniforms, &uniforms.output_needs_srgb_encode),
+            212
+        );
     }
 
     // -- compute_image_rect tests --

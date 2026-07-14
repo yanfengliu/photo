@@ -3421,7 +3421,7 @@ dependencies = [
 
 [[package]]
 name = "photo"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "bytemuck",
  "env_logger",
