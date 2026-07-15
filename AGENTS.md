@@ -1,218 +1,52 @@
-## Headless-first execution
+# AGENTS.md — photo
 
-Always work headlessly by default. This is a mandatory execution rule, not an adaptable default. Use a visible browser window, desktop application, GUI automation, or another non-headless interaction only when it is absolutely necessary to complete or adequately verify the task and no headless alternative is sufficient. State the reason before launching the non-headless path.
+## What this is
 
-## Agentic working style
+A GPU-accelerated image viewer/editor for Windows in Rust: iced + wgpu UI with a library thumbnail grid, a detail view with GPU zoom/pan and editing (open, edit, crop, save/export), and broad format support — JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, TGA, QOI, HDR, EXR, SVG, and camera RAW via rawler.
 
-Treat the rest of this file as **defaults, not rigid law.** The right approach is the one that fits the task in front of you — when a rule here would make the work worse, deviate and say why. Hard "always use X / never use Y" mandates go stale and silently mislead faster than principles do; optimize for the outcome (correct, verified, readable) over any prescribed mechanism.
+## Fleet constitution
 
-**Scale the approach to the task.**
+- Work headlessly by default; go non-headless only when nothing else can complete or verify the task, and say why.
+- These rules are strong defaults, not law: when one would make the work worse, deviate and say why.
+- Scale the approach to the task: trivial changes directly; substantial work as explore → plan → implement → verify, with subagents when work is genuinely parallel.
+- Delivery boundary: each minimal coherent verified unit is reviewed, staged (scoped files only), and committed promptly — never commit failing or partial work as a checkpoint. Commit to `main`; push at the end of every task.
+- The repo's gates must pass before every commit that touches code; doc-only changes need a self-reviewed diff.
+- Review: self-review trivial changes; adversarially review non-trivial ones — independent agents that try to refute the change against the live code. High-risk work (persistence/migrations, security/auth, concurrency, money, supply chain, edits that reach sibling repos) escalates to the multi-cli-review skill. Reviewers must read the live code; verify reviewer claims against the codebase before acting on them; substantive findings outweigh approval votes.
+- Dependency changes: re-resolve the lockfile, run the repo's audit gate (a new HIGH/CRITICAL is a blocker), and note the audit result in the commit message.
+- Docs are part of the change: update every affected surface in the same commit; write prose one line per paragraph (no hard wrapping); never reference or mandate files that don't exist.
+- Bias to continue: work through the whole accepted plan without mid-plan check-ins; context management is the harness's job, never a reason to stop. Stop only for a genuine blocker, a direction-changing decision, or an explicit stop. (Established 2026-05-01; reinforced 2026-07-05.)
+- Model pins live only in `../loop-ops/docs/skills/multi-cli-review.md` — never hardcode model IDs anywhere else.
+- Lessons files (`docs/learning/lessons.md` where present) require evidence anchors — source, fix commit, test id, behavior delta; unanchored lessons are folklore.
+- Recursive loop: before running or driving a pass, read `../loop-ops/docs/skills/recursive-playtest.md`; before building loop machinery, read `../loop-ops/docs/skills/building-recursive-loop.md`.
 
-- Trivial or conversational (a one-line fix, a question) → just do it directly.
-- Substantial work (multi-file features, migrations, audits, broad refactors, research) → orchestrate it. Don't grind through it solo when parallel agents would be faster, more thorough, or would keep your own context lean.
+## Gates
 
-**Reach for modern agentic techniques when they fit:**
-
-- **Compose a bespoke harness per task.** Decide the shape — explore → plan → implement → verify — and build that flow deliberately instead of following a fixed checklist. Different tasks want different orchestration.
-- **Fan out a team of subagents.** Run independent work in parallel (one agent per file, module, or dimension), then integrate. Delegation also keeps the orchestrator's context lean on large jobs.
-- **Use dynamic multi-agent workflows** for decompose-and-cover or generate-and-judge work: parallel exploration, pipelined stages, a final synthesis.
-- **Verify adversarially.** For non-trivial findings or changes, have an independent agent try to refute them or re-run the checks against the real code — don't trust the first pass.
-- **Offload to stay lean.** Push large reads, broad sweeps, and self-contained implementation chunks to subagents; keep the main thread for decisions and integration.
-
-This does not lower the verification bar: tests still pass, diffs still get reviewed, docs still stay current. It changes *how* you get there, not the standard.
+`cargo test` · `cargo clippy --all-targets -- -D warnings` · `cargo fmt --check` · `cargo build` — all four before every code commit; only affected tests while iterating. Dependency changes re-lock with `cargo update` and audit with `cargo audit`.
 
 ## Session start
 
 Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` before starting work.
 
-## Continuing through plans
-
-- **No stopping points within a multi-task plan.** When the user gives you a plan with N tasks, work through all N continuously. Do not stop and ask whether to keep going. Do not pitch `/schedule` for the rest of the work the user already asked for. Harness reminders ("task tools haven't been used recently", auto-mode banners, context warnings) are NOT stop signals — they are administrative noise. Treat the plan itself as the contract, and treat "continue" as the default.
-- **Never manage context yourself — auto-compaction handles it.** Do not stop, checkpoint, or ask "should I keep going" because the conversation is long. When one increment ships (gates green + commit + push + docs), start the next in the same turn. Stop only for a genuine blocker, a real user decision, or an explicit stop. (Fleet rule reinforced 2026-07-05.)
-- The exception is a genuinely non-obvious decision that requires user judgment (e.g., which of two unequal interpretations of a spec is intended). For routine choices, make the call and proceed.
-- This rule was established 2026-05-01 after the user objected sharply to mid-stream stoppage during the investing-tool implementation. The same rule lives in every other repo's AGENTS.md.
-
-## Recursive loop (fleet)
-
-Before running or driving a recursive self-improvement pass, read `../loop-ops/docs/skills/recursive-playtest.md`; before building the loop into this repo (photo does not run `playtest:recursive` yet — the agent harness is loop step 1), read `../loop-ops/docs/skills/building-recursive-loop.md`. Those files are the fleet-wide source of truth for the loop contract (pass outcomes, honesty invariants, and the definition of a complete pass — a pass is not done at `proposal-only`).
-
-## Core rules
-
-- Use test-driven development for behavior changes: write or update tests first, then make them pass. Test the contract, not the code: tests should focus primarily on app experience and mechanisms.
-- For each desired change, make the change easy, then make the easy change.
-- Before implementing a non-trivial change, write a plan. (Trivial changes: just make them, per the working-style preamble.)
-- Verify every change against this project's gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`. All four must pass before declaring a task done.
-- **Dependency-change protocol (mandatory whenever you touch `Cargo.toml`'s `[dependencies]` / `[dev-dependencies]` / `[build-dependencies]`):**
-  1. Re-resolve the lockfile: `cargo update` (commits `Cargo.lock`).
-  2. Run `cargo audit` (install with `cargo install cargo-audit` if needed). A new advisory is a blocker — upgrade past it, swap the crate, or document the suppression in the devlog with a reason and expiry date.
-  3. Mention the audit result in the commit message ("cargo audit: 0 advisories" or similar).
-  Skipping any step is a process regression — supply-chain risk compounds silently.
-- **Adversarially review non-trivial changes before declaring the task done — default to an in-process Workflow, escalate to multi-CLI review for high-risk work.** For any non-trivial behavior or code change, run an adversarial review pass first: fan out parallel finder subagents (by dimension/file) plus independent verifiers that try to *refute* each finding against the live code, then fix every real finding and re-review until reviewers only nitpick. This in-process Workflow is the default and is always available — no external CLI required. For **high-risk** changes — persistence/migrations, security/auth, agent-loop or concurrency, money, or anything with data-loss or supply-chain blast radius — *also* run the multi-CLI review (Codex + Claude, per the Code review section) and synthesize findings into `docs/threads/current/<objective>/<date>/<iteration_number>/REVIEW.md` (move to `docs/threads/done/<objective>/` when closed); a different model catches blind spots that same-model subagents share. Trivial changes (typos, comments, pure doc edits with no code implications) need only a self-reviewed diff. Don't rationalize your way out of the adversarial pass on non-trivial work; if you skip a review that should have run, run it post-hoc on the same branch before merge.
-- **Verify reviewer claims against the codebase before acting on them.** As the driver (team lead / main agent), when a reviewer says "function X has signature Y" or "this contract is broken," grep / read the actual file before merging the fix. A reviewer might be working from training knowledge, a stale snapshot, or a hallucinated symbol. The cost of one extra `Read` is negligible; the cost of acting on a stale or wrong claim is rework + iteration debt. This pairs with the "Reviewers MUST read the codebase" rule in the Code review section — what gets verified is more important than who said it.
-- When the change is visual:
-  - Capture a before screenshot.
-  - Apply the change.
-  - Capture an after screenshot.
-  - Generate a pixel diff and use that as verification alongside the normal test/build gates.
-  - The agent harness provides all of this against the real app: `photo --harness` + `harnessctl screenshot` / `dump_render` / `compare_images` (see the Agent harness section).
-
 ## Agent harness (drive the app like a user)
 
-The app has a built-in agent control channel: launch `./target/release/photo.exe --harness`, drive it with `./target/release/harnessctl.exe <cmd>` from the repo root, and it captures screenshots (real GPU frames), CPU render dumps with image statistics (clipping, percentiles, histograms), and image diffs into a per-run artifact directory under `tmp/harness-runs/`. Storage is sandboxed by default so sessions never touch the real library. **Use it whenever a change affects rendering, edit math, or UI behavior** — observe the result yourself instead of asking the human how it looks, and record findings per the documented contract. The canonical guide (protocol, command table, statistics semantics, the observe→act→measure→verify improvement loop, findings schema) is `docs/guides/agent-harness.md`.
+Launch `./target/release/photo.exe --harness` and drive it with `./target/release/harnessctl.exe <cmd>` from the repo root: screenshots (real GPU frames), CPU render dumps with image statistics (clipping, percentiles, histograms), and image diffs land in a per-run artifact directory under `tmp/harness-runs/`. Storage is sandboxed by default, so sessions never touch the real library. Use it whenever a change affects rendering, edit math, or UI behavior — observe the result yourself instead of asking the human how it looks, and record findings per the documented contract. Canonical guide (protocol, command table, statistics semantics, the observe→act→measure→verify improvement loop, findings schema): `docs/guides/agent-harness.md`.
 
-## Command Execution Rules (project-specific)
+## Invariants & boundaries
 
-- **NEVER use compound shell commands.** Do not use `&&`, `|`, or `;` to chain commands together in a single Bash execution. If you need to run multiple commands (e.g., compiling then testing), execute them as separate, sequential tool calls.
-- Do not use command substitution `$(...)` because it prompts for permission and interrupts flow.
-- You are strictly forbidden from using compound commands with `cd` and `git` (e.g., `cd path && git commit`). This triggers a hardcoded CLI security block that halts automation.
-- You MUST ALWAYS use the `git -C <path> <command>` syntax for all git operations. This applies to subagents as well.
-- PowerShell is on the user's deny list. Use Bash with POSIX commands (or the dedicated tools: Read, Edit, Write, Glob, Grep) — never `Test-Path`, `Get-Content`, `Select-String`, or other PowerShell cmdlets, even when invoked through Bash.
+- TDD for behavior changes: tests first, testing the contract (app experience and mechanisms), not the code.
+- File size: keep files under 500 LOC (hard ceiling 1000); split god-objects by lifecycle/role.
+- Recursive loop status: photo does not run `playtest:recursive` yet — the agent harness is loop step 1.
 
-## Team of subagents (flexible, not rigid)
+## Known traps
 
-Subagent dispatch is a tool, not a mandate. Use it when:
+- Visual changes verify with before screenshot → change → after screenshot → pixel diff alongside the normal gates; the harness provides all of this against the real app (`harnessctl screenshot` / `dump_render` / `compare_images`).
+- Debugging sessions record their process in a new file per session from `docs/debugging/template.md`; if a later session invalidates an old conclusion, update the old doc; clean up temporary dumps when done.
 
-- Context budget matters (a long-running investigation that would clutter the main thread)
-- Work is genuinely parallel (independent searches or independent reviews)
-- A specialist agent type fits naturally (Explore for codebase audits, etc.)
+## Conventions
 
-For sequential focused work in the main thread, act as engineer directly — dispatching adds overhead and removes the ability to course-correct quickly.
-
-When you do dispatch, the team roles below describe how to brief them. The Team Lead role is always you (the main agent).
-
-- **Team lead** (always the main agent):
-  - Breaks the human's request into atomic tasks, selects the appropriate domain specialists, routes the tasks, and acts as the final gatekeeper before merging.
-- **Architect**: Acts as a consultant. Drafts the initial implementation plan and verifies it against ARCHITECTURE.md before work dispatches.
-- **UX designer**: Validates that the UX works well and feels natural. Researches local and online sources to ground opinions.
-- **Software engineer**: Handles code writing.
-  - After coding, ask the code reviewer to review (see Code review section) and iterate. Multi-CLI reviews run in the background; timing and poller mechanics are in the fleet-canonical runbook `../loop-ops/docs/skills/multi-cli-review.md`.
-  - After addressing review comments, ask the reviewer to verify the fix.
-  - If engineer + reviewer cannot reach consensus after 3 iterations, surface the disagreement to the user with both positions and let the user decide.
-  - Save reviewer synthesis under `docs/threads/current/<objective>/<date>/<iteration_number>/`, mirroring the full-codebase review convention (see `docs/threads/done/full/<date>/<iteration_number>/` for historical precedent). The `<objective>` folder is a concise kebab-case phrase naming the work; for full-codebase reviews, use `full`.
-  - Thread-level design artifacts live directly under the objective folder as `DESIGN.md` and `PLAN.md`. These are the authoritative design and implementation-plan docs for that objective; `<date>/design-N/REVIEW.md` and `<date>/plan-N/REVIEW.md` are only historical review summaries of design or plan iterations.
-  - Each iteration directory contains only `REVIEW.md`, the concise synthesized summary with severity-tagged findings and the final disposition. Do not commit raw CLI output, stderr/stdout logs, error logs, prompts, or diff snapshots anywhere under `docs`.
-  - If temporary capture files are useful while synthesizing a review, write them outside the thread tree under `tmp/review-runs/<objective>/<date>/<iteration_number>/`, do not stage them, and clean them up when they are no longer useful. The committed thread artifact is the summary only.
-  - `<iteration_number>` starts at 1 and increments for each re-review. Re-reviewers should consider previous iterations' `REVIEW.md` + `docs/learning/lessons.md` + the new diff so they verify earlier fixes landed and don't re-flag old issues.
-  - After folding the final iteration's `REVIEW.md` into the devlog entry for the task, move the objective folder from `docs/threads/current/` to `docs/threads/done/`. The done thread stays as a historical artifact (do not delete — these are valuable audit trails alongside the full-review history).
-  - Continue iterating until reviewers nitpick instead of catching real bugs / giving substantial feedback. Do not get stuck in an infinite loop.
-- **Code reviewer**: Follow the Code review section.
-
-## Code review
-
-The default adversarial pass for non-trivial work is the in-process Workflow (see Core rules). Run the multi-CLI review (Codex + Claude, each reviewing independently) on high-risk changes and full-codebase audits. All multi-CLI mechanics — current review model pins, exact commands, sandbox flags, the background-run/poller pattern, the Codex output-extraction recipe, and CLI failure modes — live in the fleet-canonical runbook `../loop-ops/docs/skills/multi-cli-review.md`; read it before every multi-CLI session, and review pins bump there, once for the whole fleet. `.claude/skills/multi-cli-review/SKILL.md` is this repo's thin stub for repo-specific notes.
-
-Policy for every reviewer, in-process subagent or CLI:
-
-- **Reviewers MUST read the codebase to ground their claims.** Every review prompt must include the directive: *"Verify each claim in the plan/diff against the live codebase — grep for the symbols, function signatures, column names, and file paths it references; do not approve based on prompt text alone."* Without this directive baked in, two reviewers can APPROVE a design with a real defect that only the codebase-reading reviewer catches. Convergence is measured by *substantive finding count*, not *vote count* — a HIGH defect from one reviewer outweighs APPROVED from two.
-- Aspects to review:
-  1. Design — easily scales, generalizes, debugs, can be understood and reasoned about, stays lean.
-  2. Test coverage.
-  3. Correctness.
-  4. Clean code, typing, efficiency, memory leaks. No duplicated logic, inconsistent implementations, violation of boundaries. File size: keep every file under 500 LOC (hard ceiling 1000) — split god-objects by lifecycle/role. Prefer composition over inheritance. Clean up dead code. Do not change app mechanics or behavior unless explicitly asked.
-
-  Documentation accuracy is covered by the Documentation discipline section's reviewer prompt addendum — do not duplicate the rule here.
-
-- **Enrich the baseline prompt** (quoted in the fleet-canonical runbook) **with task-specific context** — the change's intent, prior-iteration findings to verify, files to focus on, and an anti-regression checklist. The bare baseline returns generic feedback; useful reviews need the specifics.
-- **Keep model IDs current.** Use the latest-family alias when a command is meant to track the newest model (for example, `opus[1m]`); bump pinned strings whenever a more capable fixed variant ships (e.g. `claude-opus-5-0[1m]`, `gpt-5.6`). Verify with a one-line smoke test (`echo "ok" | <cli> ...`) before committing the bump — silent fallback to an older model is the failure mode to guard against. Review-command pins live in the fleet-canonical runbook `../loop-ops/docs/skills/multi-cli-review.md`, the fleet's single bump site.
-
-## Git
-
-- **Commit directly to `main`.** This is a solo-developer project; branches add overhead without payoff and block autonomous progress while waiting for merge authorization. Each coherent change lands as its own commit on `main`. The full suite (`cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build`) must pass before each commit.
-- When you iterate, only run affected tests.
-- After confidence in the change, run the full suite to make sure you didn't accidentally break anything before committing.
-- Commit as soon as you have a coherent, self-contained unit of change.
-- Commit durable docs you added if you are not planning to remove them.
-- **No branches needed for normal work.** Branches are reserved for explicit experimentation that you intend to keep isolated from `main` (and even then, prefer revertable single-commit experiments on `main`). The earlier `agent/<task>` branch convention and the merge-authorization gate are removed — they were artifacts of a multi-developer workflow that doesn't apply here.
-- **Push to remote at the end of every task.** If local commits are ahead of the remote, run `git push`. Don't leave the remote behind.
-
-## Documentation
-
-Key directories:
-
-- `src`: app code.
-- `docs`: architecture, devlogs, threads, API, tutorials, guides.
-
-### Discipline (mandatory; not optional)
-
-Code changes are not done until the docs match. Before declaring any task complete, run through this checklist for every shipped change. Skipping any item is a regression and will be caught by the next audit.
-
-**Always update on every feature / behavior change:**
-
-- `docs/changelog.md` — new version entry with what shipped, why, validation, and behavior callouts. Audience is external; focus on what users need to know to migrate. Keep dev-internal commentary in the devlog.
-- `docs/devlog/summary.md` — one line per task; remove outdated info; compact if > 50 lines. Do not cheat by writing super long line.
-- `docs/devlog/detailed/<latest>.md` — full per-task entry per the Devlog convention below.
-- `Cargo.toml` — version bump per the Versioning convention below.
-
-**Always update if the change introduces or removes API surface (new exports, new methods, new types, removed APIs, renamed APIs):**
-
-- `docs/api-reference.md` — every new public type, method, and standalone utility gets its own section. Removed APIs get removed (not just struck through). Stale signatures must be updated.
-- `README.md` — Feature Overview table mentions the new capability if it's a user-visible feature; Public Surface bullets list the new top-level export if applicable.
-
-**Always update if the change is structural (new subsystem, new boundary, changed data flow):**
-
-- `docs/architecture/ARCHITECTURE.md` — Component Map row + Boundaries paragraph for the new subsystem; lifecycle / data-flow ASCII updated if the flow changes.
-- `docs/architecture/drift-log.md` — append a row with date + change + reason.
-- `docs/architecture/decisions.md` — append a Key Architectural Decision row when the change reflects a non-obvious tradeoff worth recording. Never delete an existing decision; add a newer one that supersedes it.
-
-**Update if applicable to the change's topic:**
-
-- `docs/learning/lessons.md` — when you encounter a non-obvious failure mode worth preserving for future sessions (a recurring trap, a rule that prevented a reasonable-seeming mistake, a process step that turned out load-bearing). **Each lesson MUST start with this evidence-anchor table** — without anchors a "lesson" is folklore and self-improvement becomes prompt drift:
-
-  | Field | Value |
-  |---|---|
-  | Surfaced by | path to `REVIEW.md` / debug log / commit / conversation that exposed the failure |
-  | Reviewer findings | which CLI flagged it, severity, finding ID — e.g. `Codex 3-C1`, `Claude iter-2 IMPORTANT` |
-  | Fix commit | short SHA of the commit that closed it |
-  | Test added | exact test node id (or `n/a — process lesson` for review/tooling-only lessons) |
-  | Behavior delta | concrete before/after — what would have happened in production without the fix; for photo-processing changes include the affected image batch ID / sample image / before-after pixel diff or quality metric |
-
-  Code lessons require a real test node id; only genuinely process-level lessons may use `n/a`. One concise entry per lesson; this is the source of process learnings that re-reviewers consult alongside prior `REVIEW.md` files.
-
-**Verification step (mandatory before declaring task done):**
-
-- Invoke the `doc-review` skill or grep for removed-API names across `docs/` and `README.md`. The audit must come back clean for the change's diff. Stale references in historical changelog / devlog / drift-log entries are intentional context and should remain — every other surface must reflect current reality.
-- The multi-CLI code review must explicitly verify doc accuracy as part of its review prompt — include "verify docs in the diff match implementation; flag any stale signatures, removed APIs still mentioned, or missing coverage of new APIs in canonical guides."
-
-**Why this is mandatory:** doc drift compounds. A single stale signature in `api-reference.md` becomes the source of truth for the next reader, then for the next feature built on top, then for an external consumer. Treating documentation as part of the change (not after the change) is the only way to keep the surface trustworthy.
-
-### Architecture
-
-- Respect the boundaries documented in `docs/architecture/ARCHITECTURE.md`. If a boundary seems wrong, flag it instead of silently violating it.
-- If architecture changes, update the relevant sections in `docs/architecture/ARCHITECTURE.md`, append a row to `docs/architecture/drift-log.md`, and mention the update in the devlog.
-- Do not update `docs/architecture/ARCHITECTURE.md` for non-structural fixes, refactors, UI tweaks, or test-only work.
-- Never delete a Key Architectural Decision in `docs/architecture/decisions.md`; add a newer decision that supersedes it.
-
-### Devlog
-
-- Detailed devlogs live under `docs/devlog/detailed/` as files named `START_DATE_END_DATE.md` (e.g. `2026-04-07_2026-04-13.md`).
-- A new active file is created with `START_DATE == END_DATE` (today's date for both halves).
-- Always append new entries to the latest detailed devlog (the file with the most recent `END_DATE`). When looking something up, start from the latest file and work backwards.
-- Periodically archive: when the active file grows larger than 500 lines or a significant time boundary is reached, `git mv` the file to update its `END_DATE` to the date of its last entry, then start a new file whose `START_DATE` is today.
-- After every completed task, append a detailed entry with:
-  - timestamp
-  - action
-  - code reviewer comments, broken down by AI provider and theme as stated above
-  - result
-  - reasoning
-  - notes
-- Keep `docs/devlog/summary.md` current after updating the detailed log. Always remove outdated info. Compact when it grows larger than 50 lines.
-- If a subagent handles summary work, it should extract facts only and avoid interpretation.
-
-### Versioning
-
-- Maintain a version number `a.b.c` in `Cargo.toml`:
-  - Only bump `a` when the human says so.
-  - Whenever you introduce a breaking change, bump `b` and reset `c`.
-  - Whenever you introduce a non-breaking change, bump `c`.
-- **One version bump per coherent shipped change.** If three independent features ship as three commits, each commit gets its own version bump. Do not roll multiple unrelated features into a single version.
-- Maintain `docs/changelog.md` with one entry per version. Check `docs/devlog/` for context.
-
-### Doc formatting
-
-- Don't wrap lines. Only use a new line when you are starting a new paragraph.
-
-## Debugging
-
-- When debugging, use `docs/debugging/template.md` to record your process. Create a new file per debugging session and use it to iterate until you solve the problem.
-- If a future session makes you realize that your previous debug sessions on the same topic did not fully solve the problem, update past docs to avoid misunderstandings.
-- Clean up the temporary files (such as stack dump, test results) created during debugging after you are done.
+- Devlog: `docs/devlog/summary.md` (one line per task; remove outdated info; compact past 50 lines — no cheating with mega-lines) + `docs/devlog/detailed/START_DATE_END_DATE.md` (per-task entry: timestamp, action, reviewer findings by provider/theme, result, reasoning, notes; archive via `git mv` when the active file passes 500 lines, starting a new file dated today).
+- Changelog `docs/changelog.md` + `Cargo.toml` version: user-visible changes only (external audience; migration focus). Bump `c` per non-breaking change, `b` (reset `c`) per breaking change, `a` only when the user says so; one bump per coherent shipped change.
+- Architecture: structural changes update `docs/architecture/ARCHITECTURE.md` and append a row to `docs/architecture/drift-log.md`; non-obvious tradeoffs append to `docs/architecture/decisions.md` (append-only — supersede, never delete). Non-structural fixes touch none of these.
+- Lessons: `docs/learning/lessons.md` per the fleet evidence-anchor rule; code lessons need a real test id; photo-processing lessons record the affected sample image or batch and the before-after pixel diff or quality metric.
+- Review threads: syntheses land in `docs/threads/current/<objective>/<date>/<n>/REVIEW.md` (synthesis only — no raw CLI output; unstaged temp captures go to `tmp/review-runs/`); `DESIGN.md`/`PLAN.md` live at the objective root; move closed objectives to `docs/threads/done/` and keep them as audit trail.
+- Canonical doc surfaces are README, the architecture set, devlogs, changelog, and `docs/guides/agent-harness.md`. There is deliberately no `docs/api-reference.md` — the Rust types are the API reference. README changes when user-visible features change.
