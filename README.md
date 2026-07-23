@@ -139,3 +139,7 @@ The flat `docs/ARCHITECTURE.md` file is a temporary compatibility shim for older
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+## Part of a fleet
+
+This repo is one of ~two dozen sibling repos kept side by side under a single `github/` working folder. Fleet-wide setup, the governance canon, and the recursive self-improvement loop live in **[loop-ops](https://github.com/yanfengliu/loop-ops)** — on a fresh machine, clone that repo and run `npm run clone-fleet` to rehydrate every repo (including this one) and the shared canon.
