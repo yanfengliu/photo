@@ -28,7 +28,7 @@ A GPU-accelerated image viewer/editor for Windows in Rust: iced + wgpu UI with a
 
 ## Session start
 
-Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` before starting work.
+Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` before starting work. Read `docs/learning/lessons.md` too — it records what has already been tried and what it cost, and a lessons file nothing tells anyone to open is write-only.
 
 ## Agent harness (drive the app like a user)
 
