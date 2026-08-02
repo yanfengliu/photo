@@ -272,11 +272,12 @@ pub fn contrast_amount(slider: f32) -> f32 {
 }
 
 /// Tone-zone slider (Highlights/Shadows/Whites/Blacks) → band weight in
-/// [-1, 1]; each band contributes up to ±1.5 EV at its center inside
-/// `apply_tone_zones` (`TONE_ZONE_BAND_EV_RANGE`), with the summed
-/// correction clamped to ±2 EV.
+/// [-0.5, 0.5]. Each UI slider therefore contributes up to ±0.75 EV at its
+/// center inside `apply_tone_zones` (`TONE_ZONE_BAND_EV_RANGE`); this keeps
+/// all endpoint combinations monotone while the summed correction retains
+/// its ±2 EV safety clamp.
 pub fn tone_zone_amount(slider: f32) -> f32 {
-    slider / 100.0
+    slider * (0.5 / 100.0)
 }
 
 /// Vibrance slider → saturation-weighted chroma amount in [-1, 1].
@@ -302,16 +303,16 @@ pub fn dehaze_amount(slider: f32) -> f32 {
     slider * (0.5 / 100.0)
 }
 
-/// Temperature slider → destination illuminant CCT. ±100 spans the validated
-/// tungsten-to-cloudy range 3200K..9800K around D65.
+/// Temperature slider → destination illuminant CCT. Positive values warm and
+/// negative values cool; ±100 spans 3200K..9800K around D65.
 pub fn temperature_kelvin(slider: f32) -> f32 {
-    6500.0 + slider * 33.0
+    6500.0 - slider * 33.0
 }
 
-/// Tint slider → yd chromaticity shift (green/magenta). ±100 spans the
-/// validated ±0.012 range.
+/// Tint slider → yd chromaticity shift. Positive values move toward magenta
+/// (lower yd), negative values toward green; ±100 spans ±0.012.
 pub fn tint_yd_shift(slider: f32) -> f32 {
-    slider * 0.00012
+    slider * -0.00012
 }
 
 // -- Per-pixel adjustments (linear RGB) --
@@ -321,10 +322,11 @@ pub fn apply_exposure(px: [f32; 3], ev: f32) -> [f32; 3] {
     [px[0] * m, px[1] * m, px[2] * m]
 }
 
-/// Zone-based tone adjustments: each slider reaches ±1.5 EV at its band
-/// center (`TONE_ZONE_BAND_EV_RANGE`) and the summed correction is clamped
-/// to ±2 EV, matching darktable tone equalizer's clamp (correction
-/// 0.25x-4.0x). Bands are Gaussians in log2 luminance.
+/// Zone-based tone adjustments: an internal band weight of ±1 reaches
+/// ±1.5 EV at its center (`TONE_ZONE_BAND_EV_RANGE`); the UI mapping caps
+/// weights at ±0.5 for a monotone ±0.75 EV slider reach. The summed
+/// correction is clamped to ±2 EV, matching darktable tone equalizer's
+/// clamp (correction 0.25x-4.0x). Bands are Gaussians in log2 luminance.
 /// Band centers for the 4 tone-zone sliders in EV space. Ported from
 /// darktable's tone equalizer (`src/iop/toneequal.c`), which uses 9 bands
 /// evenly spaced from -8 EV to 0 EV; the 4-slider version collapses those
@@ -343,10 +345,9 @@ const WHITES_EV: f32 = 0.0;
 /// so the summed tone curve stays smooth across the full EV range.
 const TONE_ZONE_SIGMA_SQ_2: f32 = 2.0;
 
-/// Maximum EV a single slider contributes at its band center. 1.5 EV at
-/// ±100 (Lightroom-feel: Highlights -100 recovers about a stop and a half)
-/// while combinations of sliders may still reach the darktable-derived ±2 EV
-/// total clamp below.
+/// EV coefficient for an internal band weight of 1. The public slider mapping
+/// caps weights at ±0.5, so ±100 reaches ±0.75 EV per band while combinations
+/// retain the darktable-derived ±2 EV total clamp below.
 const TONE_ZONE_BAND_EV_RANGE: f32 = 1.5;
 
 pub fn apply_tone_zones(
@@ -469,13 +470,13 @@ pub fn apply_saturation(px: [f32; 3], amount: f32) -> [f32; 3] {
 
 /// Vibrance: selective saturation adjustment.
 /// Positive: boosts muted colors while protecting already-saturated ones
-/// (power-law attenuation: high sat → low boost).
+/// (linear attenuation: high sat → low boost).
 /// Negative: desaturates vivid colors more while protecting muted/skin tones
-/// (power-law attenuation: high sat → strong desaturation).
+/// (linear attenuation: high sat → strong desaturation).
 pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
     if amount == 0.0 {
         // weight = 1 reduces to lum + (px - lum), identity to within 1 ULP;
-        // return the exact identity and skip the per-pixel powf.
+        // return the exact identity and skip the per-pixel luminance.
         return px;
     }
     let max_c = px[0].max(px[1]).max(px[2]);
@@ -485,14 +486,9 @@ pub fn apply_vibrance(px: [f32; 3], amount: f32) -> [f32; 3] {
     } else {
         0.0
     };
-    let exp = amount.abs().max(0.001);
     // Positive: attenuation high for low sat, low for high sat → boost muted
     // Negative: attenuation high for high sat, low for low sat → desaturate vivid
-    let attenuation = if amount >= 0.0 {
-        1.0 - sat.powf(exp)
-    } else {
-        sat.powf(exp)
-    };
+    let attenuation = if amount >= 0.0 { 1.0 - sat } else { sat };
     let weight = 1.0 + amount * attenuation;
     let lum = luminance(px);
     [
@@ -525,7 +521,34 @@ pub fn temperature_tint_matrix(temperature: f32, tint: f32) -> [f32; 9] {
 
     let yd = yd + tint_yd_shift(tint);
 
-    bradford_cat(x_ref, y_ref, xd, yd)
+    // Bradford adaptation is defined in XYZ space. Compose it with the D65
+    // linear-sRGB transforms before applying it to image RGB values; applying
+    // the XYZ CAT directly to RGB skews hue and strength.
+    const LINEAR_SRGB_TO_XYZ: [f32; 9] = [
+        0.412_456_4,
+        0.357_576_1,
+        0.180_437_5,
+        0.212_672_9,
+        0.715_152_2,
+        0.072_175_0,
+        0.019_333_9,
+        0.119_192_0,
+        0.950_304_1,
+    ];
+    const XYZ_TO_LINEAR_SRGB: [f32; 9] = [
+        3.240_454_2,
+        -1.537_138_5,
+        -0.498_531_4,
+        -0.969_266_0,
+        1.876_010_8,
+        0.041_556_0,
+        0.055_643_4,
+        -0.204_025_9,
+        1.057_225_2,
+    ];
+    let cat_xyz = bradford_cat(x_ref, y_ref, xd, yd);
+    let cat_times_rgb_to_xyz = mat3_mul_mat3(&cat_xyz, &LINEAR_SRGB_TO_XYZ);
+    mat3_mul_mat3(&XYZ_TO_LINEAR_SRGB, &cat_times_rgb_to_xyz)
 }
 
 fn daylight_chromaticity(kelvin: f32) -> (f32, f32) {
@@ -762,37 +785,18 @@ fn sample_tca_rgba(
     [r[0], g[1], b[2], g[3]]
 }
 
-/// Apply all adjustments to a single pixel (sRGB u8 input -> sRGB u8 output).
-/// `blurred` is the corresponding blurred pixel for clarity/dehaze (linear RGB).
-/// It is read ONLY by the clarity and dehaze branches; `render_edited_image`
-/// relies on exactly that to skip generating and sampling the blur atlas when
-/// both are zero — a new adjustment that consumes `blurred` must also join
-/// that `needs_blur` gate.
-/// `temp_matrix` is the precomputed Bradford CAT matrix.
-/// `uv` is the pixel's normalized position (0..1) for lens vignetting.
-/// `vig` is the lens vignetting coefficients [k1, k2, k3].
-pub fn apply_all(
-    srgb: [u8; 4],
+fn apply_global_adjustments(
+    mut px: [f32; 3],
     state: &EditState,
     temp_matrix: &[f32; 9],
-    blurred: [f32; 3],
-    uv: [f32; 2],
-    vig: [f32; 3],
-) -> [u8; 4] {
-    let mut px = [
-        srgb_to_linear(srgb[0] as f32 / 255.0),
-        srgb_to_linear(srgb[1] as f32 / 255.0),
-        srgb_to_linear(srgb[2] as f32 / 255.0),
-    ];
-
+) -> [f32; 3] {
     px = apply_exposure(px, state.exposure);
 
     if state.temperature != 0.0 || state.tint != 0.0 {
         px = apply_temperature_tint(px, temp_matrix);
-        // Bradford CAT can rotate highly saturated pixels into slightly
-        // negative channels. Later luminance-dependent stages
-        // (tone zones, contrast, clarity) degenerate to identity when
-        // luminance goes non-positive, producing a visible regime cliff.
+        // Chromatic adaptation can rotate highly saturated pixels into
+        // slightly negative channels. Later luminance-dependent stages
+        // degenerate to identity when luminance goes non-positive.
         px = [px[0].max(0.0), px[1].max(0.0), px[2].max(0.0)];
     }
 
@@ -805,22 +809,57 @@ pub fn apply_all(
     );
 
     px = apply_contrast(px, contrast_amount(state.contrast));
-
     px = apply_vibrance(px, vibrance_amount(state.vibrance));
-    px = apply_saturation(px, saturation_amount(state.saturation));
+    apply_saturation(px, saturation_amount(state.saturation))
+}
+
+/// Apply all adjustments to a single pixel (sRGB u8 input -> sRGB u8 output).
+/// `blurred` is the corresponding source-space blurred pixel for
+/// clarity/dehaze (linear RGB). The same global adjustments are applied to it
+/// before comparison so exposure, white balance, and tone edits cannot invent
+/// local contrast on a spatially uniform image.
+/// It is read ONLY by the clarity and dehaze branches; `render_edited_image`
+/// relies on exactly that to skip generating and sampling the blur atlas when
+/// both are zero — a new adjustment that consumes `blurred` must also join
+/// that `needs_blur` gate.
+/// `temp_matrix` is the precomputed linear-sRGB chromatic-adaptation matrix.
+/// `uv` is the pixel's normalized position (0..1) for lens vignetting.
+/// `vig` is the lens vignetting coefficients [k1, k2, k3].
+pub fn apply_all(
+    srgb: [u8; 4],
+    state: &EditState,
+    temp_matrix: &[f32; 9],
+    blurred: [f32; 3],
+    uv: [f32; 2],
+    vig: [f32; 3],
+) -> [u8; 4] {
+    let source_px = [
+        srgb_to_linear(srgb[0] as f32 / 255.0),
+        srgb_to_linear(srgb[1] as f32 / 255.0),
+        srgb_to_linear(srgb[2] as f32 / 255.0),
+    ];
+    let mut px = apply_global_adjustments(source_px, state, temp_matrix);
+    let adjusted_blur = if state.clarity != 0.0 || state.dehaze != 0.0 {
+        apply_global_adjustments(blurred, state, temp_matrix)
+    } else {
+        blurred
+    };
 
     if state.clarity != 0.0 {
         let a = clarity_amount(state.clarity);
         let lum = luminance(px);
         let midtone = smoothstep(0.0, 0.5, lum) * (1.0 - smoothstep(0.5, 1.0, lum));
         for i in 0..3 {
-            px[i] += a * (px[i] - blurred[i]) * midtone;
+            px[i] += a * (px[i] - adjusted_blur[i]) * midtone;
         }
     }
 
     if state.dehaze != 0.0 {
         let a = dehaze_amount(state.dehaze);
-        let atmos = blurred[0].max(blurred[1]).max(blurred[2]).max(0.01);
+        let atmos = adjusted_blur[0]
+            .max(adjusted_blur[1])
+            .max(adjusted_blur[2])
+            .max(0.01);
         let dark = px[0].min(px[1]).min(px[2]);
         let t = (1.0 - a * dark / atmos).max(0.1);
         for px_c in &mut px {
@@ -1457,6 +1496,69 @@ mod tests {
         assert!(approx(out[2], lum));
     }
 
+    fn assert_tone_curve_preserves_ev_order(label: &str, output_ev: impl Fn(f32) -> f32) {
+        const START_EV: f32 = -8.0;
+        const END_EV: f32 = 0.0;
+        const STEP_EV: f32 = 0.025;
+        const MIN_OUTPUT_SLOPE: f32 = 0.1;
+
+        let mut input_ev = START_EV;
+        let mut previous_output_ev = output_ev(input_ev);
+        while input_ev < END_EV {
+            let next_input_ev = (input_ev + STEP_EV).min(END_EV);
+            let next_output_ev = output_ev(next_input_ev);
+            let output_step = next_output_ev - previous_output_ev;
+            let minimum_step = (next_input_ev - input_ev) * MIN_OUTPUT_SLOPE;
+            assert!(
+                output_step >= minimum_step - 1e-5,
+                "{label} reverses or folds near input EV {input_ev:.3}: output step {output_step:.6} EV, minimum {minimum_step:.6} EV"
+            );
+            input_ev = next_input_ev;
+            previous_output_ev = next_output_ev;
+        }
+    }
+
+    #[test]
+    fn supplied_endpoint_recovery_recipe_preserves_tone_order() {
+        assert_tone_curve_preserves_ev_order("supplied endpoint-recovery recipe", |input_ev| {
+            let mut px = [2.0_f32.powf(input_ev); 3];
+            px = apply_exposure(px, 0.3);
+            px = apply_tone_zones(
+                px,
+                tone_zone_amount(-100.0),
+                tone_zone_amount(100.0),
+                tone_zone_amount(30.0),
+                tone_zone_amount(-30.0),
+            );
+            px = apply_contrast(px, contrast_amount(6.0));
+            luminance(px).log2()
+        });
+    }
+
+    #[test]
+    fn tone_zone_slider_endpoint_combinations_preserve_tone_order() {
+        for bits in 0_u8..16 {
+            let slider = |bit: u8| {
+                if bits & (1 << bit) == 0 {
+                    -100.0
+                } else {
+                    100.0
+                }
+            };
+            let highlights = tone_zone_amount(slider(0));
+            let shadows = tone_zone_amount(slider(1));
+            let whites = tone_zone_amount(slider(2));
+            let blacks = tone_zone_amount(slider(3));
+            assert_tone_curve_preserves_ev_order(
+                &format!("endpoint bits {bits:04b}"),
+                |input_ev| {
+                    let px = [2.0_f32.powf(input_ev); 3];
+                    luminance(apply_tone_zones(px, highlights, shadows, whites, blacks)).log2()
+                },
+            );
+        }
+    }
+
     #[test]
     fn tone_zones_highlights_affects_bright_not_dark() {
         // "Highlights" territory is bright midtones (L_p ≈ 0.65..0.80, peak
@@ -1511,7 +1613,7 @@ mod tests {
         // global exposure cut. With σ = 1 a band's Gaussian weight two stops
         // from its center is e^-2 ≈ 0.135, so a midtone at EV -3 may shift by
         // at most ~0.20 EV (ratio ≤ ~1.15) under a full highlights move
-        // at the 1.5 EV per-band reach.
+        // at the 0.75 EV per-slider reach.
         let midtone = [0.125_f32; 3]; // EV -3
         let out = apply_tone_zones(midtone, 1.0, 0.0, 0.0, 0.0);
         let ratio = out[0] / midtone[0];
@@ -1530,17 +1632,17 @@ mod tests {
     }
 
     #[test]
-    fn tone_zone_full_slider_reaches_1_5_ev_at_band_center() {
-        // Lightroom-feel calibration: a single slider at ±100 moves its band
-        // center by 1.5 EV (Highlights -100 recovers ~1.5 stops at the peak,
-        // not the harsher 2 EV the total clamp allows for combinations).
+    fn tone_zone_full_slider_reaches_0_75_ev_at_band_center() {
+        // Monotone endpoint calibration: a single slider at ±100 moves its
+        // band center by 0.75 EV. Stronger overlapping Gaussian weights can
+        // fold the composite curve when multiple endpoint sliders oppose.
         let at_center = [0.5_f32; 3]; // EV -1 = highlights band center
-        let down = apply_tone_zones(at_center, -1.0, 0.0, 0.0, 0.0);
+        let down = apply_tone_zones(at_center, tone_zone_amount(-100.0), 0.0, 0.0, 0.0);
         let ratio = down[0] / at_center[0];
-        let expected = 2.0_f32.powf(-1.5);
+        let expected = 2.0_f32.powf(-0.75);
         assert!(
             (ratio - expected).abs() < 0.02,
-            "full highlights move at band center should be -1.5 EV (ratio {expected:.3}), got {ratio:.3}"
+            "full highlights move at band center should be -0.75 EV (ratio {expected:.3}), got {ratio:.3}"
         );
     }
 
@@ -2138,6 +2240,29 @@ mod tests {
     }
 
     #[test]
+    fn modest_vibrance_has_balanced_perceptible_response() {
+        // This pixel has HSV-style saturation 0.5. A ±15 move should be
+        // visible without acting like global Saturation, and should not have
+        // the old near-zero positive dead zone.
+        let px = [0.6, 0.3, 0.3];
+        let lum = luminance(px);
+        let chroma = (px[0] - lum).abs();
+        let positive = apply_vibrance(px, 0.15);
+        let negative = apply_vibrance(px, -0.15);
+        let positive_gain = (positive[0] - lum).abs() / chroma - 1.0;
+        let negative_reduction = 1.0 - (negative[0] - lum).abs() / chroma;
+
+        assert!(
+            (0.05..=0.10).contains(&positive_gain),
+            "+15 vibrance should add 5-10% chroma at medium saturation, got {positive_gain:.4}"
+        );
+        assert!(
+            (positive_gain - negative_reduction).abs() < 0.005,
+            "medium-saturation +/-15 response should be balanced, got +{positive_gain:.4} / -{negative_reduction:.4}"
+        );
+    }
+
+    #[test]
     fn tone_zones_total_stops_clamped() {
         // Max all sliders: highlights=1, whites=1 on a bright pixel
         let bright = [0.9, 0.9, 0.9];
@@ -2370,13 +2495,13 @@ mod tests {
 
     #[test]
     fn strong_temperature_does_not_silence_contrast() {
-        // At the tungsten end (slider -100 ≈ 3200 K) the Bradford CAT pushes
+        // At the tungsten end (slider +100 ≈ 3200 K) chromatic adaptation pushes
         // pure blue into negative red/green, giving a negative luminance.
         // Without a guard, apply_contrast short-circuits (lum <= 0 returns
         // identity) and the contrast slider stops affecting the output.
         // Guard the intermediate so contrast remains visible.
         let base = EditState {
-            temperature: -100.0,
+            temperature: 100.0,
             ..Default::default()
         };
         let matrix = temperature_tint_matrix(base.temperature, base.tint);
@@ -2402,7 +2527,7 @@ mod tests {
         );
     }
 
-    /// Renders a representative settings grid from `assets/test.jpg` to
+    /// Renders a representative settings grid from `test_photos/test.jpg` to
     /// `tmp/param-tuning/` for visual review of the Lightroom-convention
     /// tuning. Gated behind PHOTO_RENDER_TUNING_GRID so CI stays hermetic;
     /// run with `PHOTO_RENDER_TUNING_GRID=1 cargo test render_lightroom`.
@@ -2411,7 +2536,7 @@ mod tests {
         if std::env::var("PHOTO_RENDER_TUNING_GRID").is_err() {
             return;
         }
-        let image = crate::decode::decode_thumbnail(Path::new("test.jpg"), 800)
+        let image = crate::decode::decode_thumbnail(Path::new("test_photos/test.jpg"), 800)
             .expect("test asset must decode");
         let out_dir = Path::new("tmp/param-tuning");
         std::fs::create_dir_all(out_dir).unwrap();
@@ -2633,9 +2758,10 @@ mod tests {
 
     #[test]
     fn temperature_mapping_covers_tungsten_to_cloudy_at_lightroom_range() {
-        // The validated 3200K..9800K span now sits at slider ±100.
-        assert!((temperature_kelvin(-100.0) - 3200.0).abs() < 1.0);
-        assert!((temperature_kelvin(100.0) - 9800.0).abs() < 1.0);
+        // Photographer-facing controls conventionally use positive values to
+        // warm and negative values to cool while retaining the validated span.
+        assert!((temperature_kelvin(100.0) - 3200.0).abs() < 1.0);
+        assert!((temperature_kelvin(-100.0) - 9800.0).abs() < 1.0);
         assert!((temperature_kelvin(0.0) - 6500.0).abs() < 1.0);
     }
 
@@ -2643,9 +2769,36 @@ mod tests {
     fn tint_mapping_preserves_validated_chromaticity_span() {
         // Tight tolerance on purpose: the shared approx() helper's absolute
         // 0.01 window would accept an 80% regression of the 0.012 target.
-        assert!((tint_yd_shift(100.0) - 0.012).abs() < 1e-6);
-        assert!((tint_yd_shift(-100.0) + 0.012).abs() < 1e-6);
+        assert!((tint_yd_shift(100.0) + 0.012).abs() < 1e-6);
+        assert!((tint_yd_shift(-100.0) - 0.012).abs() < 1e-6);
         assert!(tint_yd_shift(0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn temperature_and_tint_follow_photographer_facing_color_directions() {
+        let neutral = [0.18; 3];
+
+        let warm = apply_temperature_tint(neutral, &temperature_tint_matrix(50.0, 0.0));
+        let cool = apply_temperature_tint(neutral, &temperature_tint_matrix(-50.0, 0.0));
+        assert!(
+            warm[0] > warm[2],
+            "positive temperature must warm neutral gray, got {warm:?}"
+        );
+        assert!(
+            cool[2] > cool[0],
+            "negative temperature must cool neutral gray, got {cool:?}"
+        );
+
+        let magenta = apply_temperature_tint(neutral, &temperature_tint_matrix(0.0, 50.0));
+        let green = apply_temperature_tint(neutral, &temperature_tint_matrix(0.0, -50.0));
+        assert!(
+            (magenta[0] + magenta[2]) * 0.5 > magenta[1],
+            "positive tint must move neutral gray toward magenta, got {magenta:?}"
+        );
+        assert!(
+            green[1] > (green[0] + green[2]) * 0.5,
+            "negative tint must move neutral gray toward green, got {green:?}"
+        );
     }
 
     #[test]
@@ -2671,9 +2824,39 @@ mod tests {
     }
 
     #[test]
-    fn tone_zone_and_vibrance_mappings_stay_unit_scaled() {
-        assert!(approx(tone_zone_amount(100.0), 1.0));
-        assert!(approx(tone_zone_amount(-50.0), -0.5));
+    fn local_effects_do_not_invent_detail_on_uniform_globally_adjusted_pixels() {
+        let srgb = [118, 118, 118, 255];
+        let source_linear = srgb_to_linear(118.0 / 255.0);
+        let source_blur = [source_linear; 3];
+        let mut base = EditState {
+            exposure: 1.0,
+            contrast: 20.0,
+            shadows: 20.0,
+            ..EditState::default()
+        };
+        let matrix = temperature_tint_matrix(0.0, 0.0);
+        let expected = apply_all(srgb, &base, &matrix, source_blur, [0.5, 0.5], [0.0; 3]);
+
+        base.clarity = 100.0;
+        let with_clarity = apply_all(srgb, &base, &matrix, source_blur, [0.5, 0.5], [0.0; 3]);
+        assert_eq!(
+            with_clarity, expected,
+            "clarity must not create local contrast on a uniform adjusted field"
+        );
+
+        base.clarity = 0.0;
+        base.dehaze = 100.0;
+        let with_dehaze = apply_all(srgb, &base, &matrix, source_blur, [0.5, 0.5], [0.0; 3]);
+        assert_eq!(
+            with_dehaze, expected,
+            "dehaze must not create haze contrast on a uniform adjusted field"
+        );
+    }
+
+    #[test]
+    fn tone_zone_mapping_stays_monotone_and_vibrance_stays_unit_scaled() {
+        assert!(approx(tone_zone_amount(100.0), 0.5));
+        assert!(approx(tone_zone_amount(-50.0), -0.25));
         assert!(approx(vibrance_amount(100.0), 1.0));
         assert!(approx(vibrance_amount(-50.0), -0.5));
     }

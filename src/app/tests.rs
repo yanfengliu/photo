@@ -2918,17 +2918,17 @@ fn temperature_slider_covers_tungsten_and_cloudy_kelvin() {
     // white balance edits can correct indoor and open-shade images without
     // running out of range.
     let (min, max) = slider_range(SliderKind::Temperature);
-    let kelvin_low = edit::temperature_kelvin(min);
-    let kelvin_high = edit::temperature_kelvin(max);
+    let cool_endpoint_kelvin = edit::temperature_kelvin(min);
+    let warm_endpoint_kelvin = edit::temperature_kelvin(max);
     assert!(
-        kelvin_low <= 3300.0,
-        "temperature low end {} does not reach tungsten",
-        kelvin_low
+        warm_endpoint_kelvin <= 3300.0,
+        "positive/warm endpoint {} does not reach tungsten",
+        warm_endpoint_kelvin
     );
     assert!(
-        kelvin_high >= 9700.0,
-        "temperature high end {} does not reach cloudy",
-        kelvin_high
+        cool_endpoint_kelvin >= 9700.0,
+        "negative/cool endpoint {} does not reach cloudy",
+        cool_endpoint_kelvin
     );
 }
 

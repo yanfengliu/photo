@@ -7,7 +7,8 @@ struct Uniforms {
     // mappings (viewer.rs ScaledAmounts). Slider UI ranges follow Lightroom
     // conventions (exposure ±5 EV, everything else ±100):
     //   exposure: raw stops (sent as-is)
-    //   highlights/shadows/whites/blacks/vibrance/saturation: ±100 -> ±1
+    //   highlights/shadows/whites/blacks: ±100 -> ±0.5
+    //   vibrance/saturation: ±100 -> ±1
     //   contrast/clarity/dehaze: ±100 -> ±0.5
     exposure: f32,
     contrast: f32,
@@ -94,6 +95,67 @@ fn lum(rgb: vec3<f32>) -> f32 {
 fn smooth_step(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
+}
+
+fn apply_global_adjustments(px_in: vec3<f32>) -> vec3<f32> {
+    var px = px_in * pow(2.0, u.exposure);
+
+    // Rows are packed from Rust's row-major matrix. Explicit dot products
+    // avoid WGSL's column-vector matrix constructor transposing the transform.
+    px = max(vec3(
+        dot(u.temp_mat_row0.xyz, px),
+        dot(u.temp_mat_row1.xyz, px),
+        dot(u.temp_mat_row2.xyz, px),
+    ), vec3(0.0));
+
+    if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
+        let L_lin = lum(px);
+        if L_lin > 1e-6 {
+            let ev = log2(L_lin);
+            let d_bk = ev - (-7.0);
+            let d_sh = ev - (-4.0);
+            let d_hi = ev - (-1.0);
+            let d_wh = ev - 0.0;
+            let w_bk = exp(-(d_bk * d_bk) / 2.0);
+            let w_sh = exp(-(d_sh * d_sh) / 2.0);
+            let w_hi = exp(-(d_hi * d_hi) / 2.0);
+            let w_wh = exp(-(d_wh * d_wh) / 2.0);
+            let stops = clamp(
+                u.shadows * w_sh * 1.5
+                + u.highlights * w_hi * 1.5
+                + u.blacks * w_bk * 1.5
+                + u.whites * w_wh * 1.5,
+                -2.0, 2.0);
+            px = px * pow(2.0, stops);
+        }
+    }
+
+    if u.contrast != 0.0 {
+        let exponent = 1.0 + u.contrast;
+        let inv_grey = 1.0 / 0.1842;
+        px = vec3(
+            pow(max(px.r, 0.0) * inv_grey, exponent) * 0.1842,
+            pow(max(px.g, 0.0) * inv_grey, exponent) * 0.1842,
+            pow(max(px.b, 0.0) * inv_grey, exponent) * 0.1842,
+        );
+    }
+
+    if u.vibrance != 0.0 {
+        let mx = max(px.r, max(px.g, px.b));
+        let mn = min(px.r, min(px.g, px.b));
+        let sat = clamp(select(0.0, (mx - mn) / mx, mx > 0.0), 0.0, 1.0);
+        let atten = select(sat, 1.0 - sat, u.vibrance >= 0.0);
+        let weight = 1.0 + u.vibrance * atten;
+        let lv = lum(px);
+        px = vec3(lv) + (px - vec3(lv)) * weight;
+    }
+
+    if u.saturation != 0.0 {
+        let ls = lum(px);
+        px = mix(vec3(ls), px, 1.0 + u.saturation);
+    }
+
+    return px;
 }
 
 // -- Lens correction helpers --
@@ -185,102 +247,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = textureSample(img_tex, img_sampler, tex_uv).a;
 
     // The Rgba8UnormSrgb source texture is decoded to linear RGB by wgpu.
-    var px = rgb;
-
-    // Exposure: pixel * 2^EV
-    px = px * pow(2.0, u.exposure);
-
-    // Temperature/Tint: Bradford CAT matrix multiply.
-    // Clamp negative intermediate channels so downstream luminance-based
-    // stages (tone zones, contrast, clarity) don't hit a regime cliff.
-    let temp_mat = mat3x3<f32>(
-        u.temp_mat_row0.xyz,
-        u.temp_mat_row1.xyz,
-        u.temp_mat_row2.xyz,
-    );
-    px = max(temp_mat * px, vec3(0.0));
-
-    // Darktable tone-equalizer-style zone correction. Bands sit at Zone
-    // System EV positions: Blacks -7, Shadows -4, Highlights -1, Whites 0.
-    // Each band is a Gaussian in log2 luminance with σ = 1 (2σ² = 2) —
-    // tighter than darktable's σ = √2 so a full Highlights/Shadows move
-    // stays targeted instead of reading as a global exposure shift
-    // (Lightroom-feel; see the lightroom-param-parity design thread).
-    // The sum of contributions is clamped to ±2 EV — matching darktable's
-    // [0.25, 4.0] linear correction limit. Uniform channel multiplier at
-    // the end preserves hue and saturation.
-    if u.highlights != 0.0 || u.shadows != 0.0 || u.whites != 0.0 || u.blacks != 0.0 {
-        let L_lin = lum(px);
-        if L_lin > 1e-6 {
-            let ev = log2(L_lin);
-            let d_bk = ev - (-7.0);
-            let d_sh = ev - (-4.0);
-            let d_hi = ev - (-1.0);
-            let d_wh = ev - 0.0;
-            let w_bk = exp(-(d_bk * d_bk) / 2.0);
-            let w_sh = exp(-(d_sh * d_sh) / 2.0);
-            let w_hi = exp(-(d_hi * d_hi) / 2.0);
-            let w_wh = exp(-(d_wh * d_wh) / 2.0);
-            // 1.5 = per-band EV reach at full slider (edit.rs
-            // TONE_ZONE_BAND_EV_RANGE); combinations clamp at ±2 EV total.
-            let stops = clamp(
-                u.shadows * w_sh * 1.5
-                + u.highlights * w_hi * 1.5
-                + u.blacks * w_bk * 1.5
-                + u.whites * w_wh * 1.5,
-                -2.0, 2.0);
-            px = px * pow(2.0, stops);
-        }
-    }
-
-    // Darktable basicadj-style power-law contrast applied per channel in
-    // scene-referred linear RGB, pivoting at middle gray (0.1842, which is
-    // the linear Y of CIELab L* 50). Values above the pivot amplify, values
-    // below compress, amount = 0 is exact identity.
-    if u.contrast != 0.0 {
-        let exponent = 1.0 + u.contrast;
-        let inv_grey = 1.0 / 0.1842;
-        px = vec3(
-            pow(max(px.r, 0.0) * inv_grey, exponent) * 0.1842,
-            pow(max(px.g, 0.0) * inv_grey, exponent) * 0.1842,
-            pow(max(px.b, 0.0) * inv_grey, exponent) * 0.1842,
-        );
-    }
-
-    // Vibrance: selective saturation adjustment.
-    // Positive: boosts muted colors, protects saturated (attenuation = 1 - sat^e).
-    // Negative: desaturates vivid colors, protects muted/skin (attenuation = sat^e).
-    if u.vibrance != 0.0 {
-        let mx = max(px.r, max(px.g, px.b));
-        let mn = min(px.r, min(px.g, px.b));
-        let sat = clamp(select(0.0, (mx - mn) / mx, mx > 0.0), 0.0, 1.0);
-        let e = max(abs(u.vibrance), 0.001);
-        let atten = select(pow(sat, e), 1.0 - pow(sat, e), u.vibrance >= 0.0);
-        let weight = 1.0 + u.vibrance * atten;
-        let lv = lum(px);
-        px = vec3(lv) + (px - vec3(lv)) * weight;
-    }
-
-    // Saturation
-    if u.saturation != 0.0 {
-        let ls = lum(px);
-        px = mix(vec3(ls), px, 1.0 + u.saturation);
+    var px = apply_global_adjustments(rgb);
+    var adjusted_blur = vec3(0.0);
+    if u.clarity != 0.0 || u.dehaze != 0.0 {
+        let blur_uv = viewport_uv_to_tex_uv(uv, rect);
+        let source_blur = textureSample(blur_tex, img_sampler, blur_uv).rgb;
+        adjusted_blur = apply_global_adjustments(source_blur);
     }
 
     // Clarity (local contrast from blur texture)
     if u.clarity != 0.0 {
-        let blur_uv = viewport_uv_to_tex_uv(uv, rect);
-        let blur_sample = textureSample(blur_tex, img_sampler, blur_uv).rgb;
         let lc = lum(px);
         let midtone = smooth_step(0.0, 0.5, lc) * (1.0 - smooth_step(0.5, 1.0, lc));
-        px += u.clarity * (px - blur_sample) * midtone;
+        px += u.clarity * (px - adjusted_blur) * midtone;
     }
 
     // Dehaze
     if u.dehaze != 0.0 {
-        let blur_uv2 = viewport_uv_to_tex_uv(uv, rect);
-        let blur_l = textureSample(blur_tex, img_sampler, blur_uv2).rgb;
-        let atmos = max(max(blur_l.r, blur_l.g), max(blur_l.b, 0.01));
+        let atmos = max(max(adjusted_blur.r, adjusted_blur.g), max(adjusted_blur.b, 0.01));
         let dark = min(px.r, min(px.g, px.b));
         let t = max(1.0 - u.dehaze * dark / atmos, 0.1);
         px = (px - vec3(atmos)) / t + vec3(atmos);
