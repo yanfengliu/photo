@@ -113,3 +113,17 @@ Tests that rewrite a file with same-length content race the filesystem timestamp
 | Fix commit | b00919b |
 | Test added | n/a — process lesson; the existing 298-test suite is the detector |
 | Behavior delta | without the re-added cfg(test) imports the test binary failed to compile (E0425/E0433 x17) while `cargo check` on the bin passed, so a bin-only check would have shipped a broken test build |
+
+## A closed debugging doc is read as a settled premise
+
+**Date:** 2026-04-23
+
+A closed debugging doc is read as a settled premise by the next session, so a conclusion that was only partly true costs that session the hours it already cost you. `docs/debugging/2026-04-20-detail-load-latency.md` closed the Detail-latency topic on staged RAW loading and named exactly one remaining risk — "RAW files without any embedded image still fall back to the slower full RAW decode" — saying nothing about the Library→Detail reopen path. Three days later the user re-reported the same symptom, and the second session's own record cites the 04-20 doc under "Relevant docs or notes" while stating that reopening "still takes a long time even though the in-memory cache exists"; it then had to re-derive that the reopen was still routed through the generic load path. The rule to correct superseded debugging docs was written into AGENTS.md 38 minutes before that second doc landed — and the 04-20 doc has never been edited since the day it was created, so the rule was authored and then not applied to the very doc that prompted it. Amend the old file in the same session that disproves it: a "Related" link pointing at a stale conclusion propagates the stale premise instead of flagging it.
+
+| Field | Value |
+|---|---|
+| Surfaced by | The user re-reporting Detail latency on 2026-04-23, three days after `docs/debugging/2026-04-20-detail-load-latency.md` (added by 7e6990c, 2026-04-20 16:10) closed the topic |
+| Reviewer findings | n/a — no reviewer caught it; the gap reached the user, and the second session recorded it in `docs/debugging/2026-04-23-detail-reopen-latency.md` |
+| Fix commit | b4e23ec (rule added 2026-04-23 13:15), 0807793 (second session's doc and the reopen fast path, 13:53) |
+| Test added | n/a — the failure was in the doc, not the code; the code half of that session is the separate 2026-04-23 lesson on short-circuiting the Library reopen before `start_load(...)` |
+| Behavior delta | before: the 04-20 doc read as "Detail latency handled" and the next session on the same symptom started from that premise; after: the rule exists, but `git log -- docs/debugging/2026-04-20-detail-load-latency.md` still shows a single commit, so the correction this lesson demands is outstanding on that file |
