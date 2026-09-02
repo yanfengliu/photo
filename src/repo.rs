@@ -99,6 +99,86 @@ fn with_test_photo_repo_root_override<T>(repo_root: Option<PathBuf>, f: impl FnO
 mod tests {
     use super::*;
 
+    /// Every directory this app persists into under the repo root, as
+    /// `(constant name, value)`. A new repo-local store belongs in this list.
+    fn repo_local_dir_names() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "DECODE_CACHE_DIR_NAME",
+                crate::decode::DECODE_CACHE_DIR_NAME,
+            ),
+            (
+                "LOCAL_EDIT_CACHE_DIR_NAME",
+                crate::local_edits::LOCAL_EDIT_CACHE_DIR_NAME,
+            ),
+            (
+                "EDITED_EXPORT_DIR_NAME",
+                crate::edit::EDITED_EXPORT_DIR_NAME,
+            ),
+        ]
+    }
+
+    /// A cache you cannot see is a cache you cannot debug. These stores hold the
+    /// decoded pixels and the baked edits the app serves instead of re-reading
+    /// the source, so when the app shows the wrong image the first question is
+    /// what is actually on disk — and the answer has to be one `ls` away in the
+    /// repo, not behind a leading dot or inside a per-user profile directory
+    /// that differs between the machine reporting the bug and the machine
+    /// debugging it.
+    ///
+    /// Asserting a path against the very constant that defines it proves
+    /// nothing: renaming the constant moves the test with it. The contract is
+    /// about the shape of the value, so the value is what gets asserted.
+    #[test]
+    fn repo_local_stores_stay_visible_and_repo_relative() {
+        for (constant, name) in repo_local_dir_names() {
+            assert!(
+                !name.is_empty(),
+                "{constant} is empty, so its store would land on the repo root itself"
+            );
+            assert!(
+                !name.starts_with('.'),
+                "{constant} is {name:?}; a leading dot hides the store from an ordinary directory listing"
+            );
+            assert_eq!(
+                Path::new(name).components().count(),
+                1,
+                "{constant} is {name:?}; a repo-local store is one directory directly under the repo root"
+            );
+            assert!(
+                !Path::new(name).is_absolute(),
+                "{constant} is {name:?}, an absolute path, so it escapes the repo root and the harness sandbox override with it"
+            );
+            assert!(
+                !name.contains(".."),
+                "{constant} is {name:?} and climbs out of the repo root"
+            );
+        }
+    }
+
+    /// The harness sandboxes a session by pointing repo-root discovery at a run
+    /// directory. That only sandboxes a store if the store's path is derived
+    /// from the root it is given — a store that reads the environment, the user
+    /// profile, or its own cached root writes to the real repo during a
+    /// sandboxed session and evicts the user's real cached work.
+    #[test]
+    fn every_repo_local_store_follows_the_overridden_repo_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        with_test_photo_repo_root(sandbox.path(), || {
+            let root = photo_repo_root().expect("the override supplies a repo root");
+            assert_eq!(root, sandbox.path());
+            for (constant, name) in repo_local_dir_names() {
+                let resolved = root.join(name);
+                assert!(
+                    resolved.starts_with(sandbox.path()),
+                    "{constant} resolved to {} outside the sandbox root {}",
+                    resolved.display(),
+                    sandbox.path().display()
+                );
+            }
+        });
+    }
+
     #[test]
     fn find_photo_repo_root_ignores_other_rust_repositories() {
         let repo_root = tempfile::tempdir().unwrap();

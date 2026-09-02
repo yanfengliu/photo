@@ -45,7 +45,7 @@ const DECODE_CACHE_CONTRACT_VERSION: u64 = 7;
 // automatically invalidates cached developments.
 pub(crate) const RAW_DEVELOP_TONE_EXPOSURE_EV: f32 = 0.85;
 pub(crate) const RAW_DEVELOP_TONE_CONTRAST: f32 = 65.0;
-const DECODE_CACHE_DIR_NAME: &str = "decoded-cache";
+pub(crate) const DECODE_CACHE_DIR_NAME: &str = "decoded-cache";
 const DECODE_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DECODE_CACHE_TRIM_TARGET_BYTES: u64 = 1_536 * 1024 * 1024;
 const DECODE_CACHE_PRUNE_WRITE_INTERVAL: u64 = 8;
@@ -2457,18 +2457,38 @@ mod tests {
         );
     }
 
+    /// A test that rewrites a file with same-length content and assumes the
+    /// write is therefore visible is asserting a race, not a fact: the
+    /// persisted cache treats same-size + same-mtime as unchanged by design,
+    /// and a fast machine lands both writes inside one coarse Windows
+    /// file-time tick. The assumption stays true until something else gets
+    /// faster — here, optimized dev dependencies — and then it fails on CI
+    /// only, looking like a cache bug rather than a test bug.
+    ///
+    /// One rewrite reproduces that collision only sometimes, so this hammers
+    /// the helper: back-to-back same-length rewrites make at least one
+    /// same-tick collision near certain, and any rewrite left invisible fails
+    /// here instead of flaking somewhere else months later.
     #[test]
     fn rewrite_with_distinct_mtime_makes_same_size_rewrites_observable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("frame.svg");
         std::fs::write(&path, b"<svg>A</svg>").unwrap();
-        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-        rewrite_with_distinct_mtime(&path, b"<svg>B</svg>");
+        for round in 0..40u32 {
+            let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let contents = format!("<svg>{}</svg>", char::from(b'A' + (round % 26) as u8));
+            assert_eq!(contents.len(), "<svg>A</svg>".len());
 
-        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_ne!(before, after);
-        assert_eq!(std::fs::read(&path).unwrap(), b"<svg>B</svg>");
+            rewrite_with_distinct_mtime(&path, contents.as_bytes());
+
+            let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+            assert_ne!(
+                before, after,
+                "same-length rewrite {round} left the file metadata unchanged; the persisted cache would keep serving the pre-rewrite pixels"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), contents.as_bytes());
+        }
     }
 
     #[test]

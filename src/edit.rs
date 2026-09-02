@@ -1607,6 +1607,14 @@ mod tests {
         );
     }
 
+    /// A tone band that peaks in exactly the right place can still be wrong.
+    /// Peak-position tests and direction-only assertions ("highlights got
+    /// darker") both pass while a band's Gaussian tails carry most of its
+    /// weight into the midtones, so the slider reads as a global exposure
+    /// shift instead of the targeted recovery it claims to be. What binds is
+    /// ISOLATION — a ratio bound at off-center EVs — plus a pinned reach at
+    /// the center. The leak that produced this test was invisible to every
+    /// existing unit test and obvious in a single render.
     #[test]
     fn tone_zone_bands_stay_isolated_from_midtones() {
         // Lightroom feel: Highlights at full strength must not read as a

@@ -1504,10 +1504,183 @@ mod tests {
         (field as *const U as usize) - (base as *const T as usize)
     }
 
+    /// Members of the WGSL `Uniforms` struct, in declaration order, as
+    /// `(name, align, size)`. WGSL's uniform address space follows std140:
+    /// `f32` is 4/4 and `vec4<f32>` is 16/16, so a scalar sitting where the
+    /// shader expects a vector silently shifts every field after it.
+    fn wgsl_uniform_members() -> Vec<(String, usize, usize)> {
+        let body = IMAGE_SHADER_SOURCE
+            .split_once("struct Uniforms {")
+            .expect("image.wgsl declares struct Uniforms")
+            .1
+            .split_once('}')
+            .expect("struct Uniforms is closed")
+            .0;
+
+        body.lines()
+            .map(|line| line.split("//").next().unwrap_or("").trim())
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let decl = line.trim_end_matches(',');
+                let (name, ty) = decl
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("unparsed WGSL uniform member: {decl:?}"));
+                let (align, size) = match ty.trim() {
+                    "f32" | "i32" | "u32" => (4, 4),
+                    "vec2<f32>" => (8, 8),
+                    "vec3<f32>" => (16, 12),
+                    "vec4<f32>" => (16, 16),
+                    other => panic!(
+                        "WGSL uniform member {name:?} has type {other:?}, whose std140 alignment this gate does not know; teach it the rule rather than assuming the Rust side happens to agree"
+                    ),
+                };
+                (name.trim().to_string(), align, size)
+            })
+            .collect()
+    }
+
+    fn round_up(value: usize, align: usize) -> usize {
+        value.div_ceil(align) * align
+    }
+
+    /// Rust and WGSL describe the same bytes twice, and nothing in the compiler
+    /// or in `wgpu`'s type system relates the two. A field added, reordered, or
+    /// retyped on one side only still compiles, still passes every test that
+    /// looks at one side alone, and then either renders with every uniform after
+    /// it read from the wrong offset or aborts the first frame with a fatal
+    /// `wgpu` validation panic - at runtime, in release, on someone else's
+    /// machine. The two layouts have to be asserted against each other, with the
+    /// explicit padding that keeps them aligned, or they are not locked together.
     #[test]
     fn uniforms_layout_matches_wgsl_uniform_buffer() {
         let uniforms = Uniforms::zeroed();
 
+        // Offsets of the Rust struct's real (non-padding) fields. A field added
+        // to the shader with no counterpart here fails the coverage assertion
+        // below, so this table cannot silently fall behind image.wgsl.
+        let rust_offsets: Vec<(&str, usize)> = vec![
+            ("rect", field_offset(&uniforms, &uniforms.rect)),
+            ("bg_color", field_offset(&uniforms, &uniforms.bg_color)),
+            ("exposure", field_offset(&uniforms, &uniforms.exposure)),
+            ("contrast", field_offset(&uniforms, &uniforms.contrast)),
+            ("highlights", field_offset(&uniforms, &uniforms.highlights)),
+            ("shadows", field_offset(&uniforms, &uniforms.shadows)),
+            ("whites", field_offset(&uniforms, &uniforms.whites)),
+            ("blacks", field_offset(&uniforms, &uniforms.blacks)),
+            ("vibrance", field_offset(&uniforms, &uniforms.vibrance)),
+            ("saturation", field_offset(&uniforms, &uniforms.saturation)),
+            ("clarity", field_offset(&uniforms, &uniforms.clarity)),
+            ("dehaze", field_offset(&uniforms, &uniforms.dehaze)),
+            (
+                "temp_mat_row0",
+                field_offset(&uniforms, &uniforms.temp_mat_row0),
+            ),
+            (
+                "temp_mat_row1",
+                field_offset(&uniforms, &uniforms.temp_mat_row1),
+            ),
+            (
+                "temp_mat_row2",
+                field_offset(&uniforms, &uniforms.temp_mat_row2),
+            ),
+            (
+                "lens_enabled",
+                field_offset(&uniforms, &uniforms.lens_enabled),
+            ),
+            (
+                "lens_dist_a",
+                field_offset(&uniforms, &uniforms.lens_dist_a),
+            ),
+            (
+                "lens_dist_b",
+                field_offset(&uniforms, &uniforms.lens_dist_b),
+            ),
+            (
+                "lens_dist_c",
+                field_offset(&uniforms, &uniforms.lens_dist_c),
+            ),
+            (
+                "lens_vig_k1",
+                field_offset(&uniforms, &uniforms.lens_vig_k1),
+            ),
+            (
+                "lens_vig_k2",
+                field_offset(&uniforms, &uniforms.lens_vig_k2),
+            ),
+            (
+                "lens_vig_k3",
+                field_offset(&uniforms, &uniforms.lens_vig_k3),
+            ),
+            (
+                "lens_tca_r_scale",
+                field_offset(&uniforms, &uniforms.lens_tca_r_scale),
+            ),
+            (
+                "lens_tca_b_scale",
+                field_offset(&uniforms, &uniforms.lens_tca_b_scale),
+            ),
+            (
+                "image_aspect",
+                field_offset(&uniforms, &uniforms.image_aspect),
+            ),
+            ("rotation", field_offset(&uniforms, &uniforms.rotation)),
+            (
+                "crop_preview",
+                field_offset(&uniforms, &uniforms.crop_preview),
+            ),
+            (
+                "crop_overlay",
+                field_offset(&uniforms, &uniforms.crop_overlay),
+            ),
+            (
+                "crop_overlay_enabled",
+                field_offset(&uniforms, &uniforms.crop_overlay_enabled),
+            ),
+            (
+                "output_needs_srgb_encode",
+                field_offset(&uniforms, &uniforms.output_needs_srgb_encode),
+            ),
+        ];
+
+        let members = wgsl_uniform_members();
+        let mut offset = 0usize;
+        let mut struct_align = 16usize; // uniform address space minimum
+        let mut wgsl_offsets: Vec<(String, usize)> = Vec::new();
+        for (name, align, size) in &members {
+            offset = round_up(offset, *align);
+            struct_align = struct_align.max(*align);
+            if !name.starts_with("_pad") {
+                wgsl_offsets.push((name.clone(), offset));
+            }
+            offset += size;
+        }
+        let wgsl_size = round_up(offset, struct_align);
+
+        assert_eq!(
+            std::mem::size_of::<Uniforms>(),
+            wgsl_size,
+            "the Rust Uniforms struct is {} bytes but image.wgsl's is {wgsl_size}; wgpu writes the Rust bytes into a buffer the shader reads with the WGSL layout, so every field past the divergence is garbage",
+            std::mem::size_of::<Uniforms>()
+        );
+
+        let wgsl_names: Vec<&str> = wgsl_offsets.iter().map(|(n, _)| n.as_str()).collect();
+        let rust_names: Vec<&str> = rust_offsets.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            wgsl_names, rust_names,
+            "image.wgsl's uniform fields and the Rust struct's fields disagree in name or order; add the field on both sides, with the padding that keeps the following fields 16-byte aligned"
+        );
+
+        for ((wgsl_name, wgsl_offset), (rust_name, rust_offset)) in
+            wgsl_offsets.iter().zip(rust_offsets.iter())
+        {
+            assert_eq!(
+                wgsl_offset, rust_offset,
+                "field {wgsl_name}/{rust_name} sits at byte {wgsl_offset} in image.wgsl and byte {rust_offset} in the Rust struct"
+            );
+        }
+
+        // Pin the current shape too, so a change that happens to keep both
+        // sides consistent still has to be noticed and re-approved.
         assert_eq!(std::mem::size_of::<Uniforms>(), 240);
         assert_eq!(field_offset(&uniforms, &uniforms.crop_preview), 176);
         assert_eq!(field_offset(&uniforms, &uniforms.crop_overlay), 192);

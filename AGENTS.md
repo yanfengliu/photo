@@ -4,6 +4,10 @@
 
 A GPU-accelerated image viewer/editor for Windows in Rust: iced + wgpu UI with a library thumbnail grid, a detail view with GPU zoom/pan and editing (open, edit, crop, save/export), and broad format support — JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, TGA, QOI, HDR, EXR, SVG, and camera RAW via rawler.
 
+## Local rules
+
+`docs/policies/local-rules.md` — this repo's own rules: colour-science conventions, CPU/GPU parity layers, persistence and caching contracts, and test-infrastructure rules. Read it when working in those areas. What could be gated instead is a gate, with its claim in the gate's own header and its mutation proof in `docs/learning/gate-proofs.md`.
+
 <!-- FLEET-CANON:BEGIN sha=af5909ec8deb generated from ../fleet/FLEET.md by `npm run sync-canon` — do not edit inside this block; this repo's own rules go in docs/policies/local-rules.md -->
 ## Fleet constitution
 
@@ -57,6 +61,9 @@ Launch `./target/release/photo.exe --harness` and drive it with `./target/releas
 - TDD for behavior changes: tests first, testing the contract (app experience and mechanisms), not the code.
 - File size: keep files under 500 LOC (hard ceiling 1000); split god-objects by lifecycle/role.
 - Recursive loop status: photo does not run `playtest:recursive` yet — the agent harness is loop step 1.
+- `src/repo.rs` is the single owner of repo-root discovery and of the harness sandbox override. Every repo-local store (`decoded-cache/`, `local-edits/`, `edited/`) resolves through it, stays a visible directory directly under the repo root, and is added to the list in `repo::tests::repo_local_dir_names`. A private copy of discovery anywhere else escapes the sandbox by construction.
+- The Rust `viewer::Uniforms` struct and `assets/shaders/image.wgsl`'s `Uniforms` describe the same bytes twice with nothing relating them; a field added, reordered or retyped goes in on both sides in the same change, with the explicit padding that keeps std140 alignment. `uniforms_layout_matches_wgsl_uniform_buffer` asserts them against each other.
+- Rotation and crop are decided once and read by four legs — preview fit, actual-size zoom, status text, and the exported file. A new consumer reads the same rotated, pixel-snapped rectangle, not the pre-rotation size.
 
 ## Conventions
 

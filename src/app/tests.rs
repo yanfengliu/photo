@@ -358,6 +358,84 @@ fn capture_drawn_image_bounds(
     renderer.drawn_images
 }
 
+/// Orientation and crop are decided once and then consumed four times over:
+/// the preview's fit-to-window scale, the actual-size zoom, the status bar's
+/// dimensions, and the exported file. Each reads the geometry for itself, and a
+/// leg that reads the pre-rotation size or the unsnapped crop still looks right
+/// on a square photo, on an unrotated one, and to any test that compares a leg
+/// against itself — `actual_size_zoom` is literally `1.0 / fit_scale`, so the
+/// two agree no matter how wrong they both are. What separates them is an
+/// asymmetric case with an expected NUMBER: a 200x100 photo turned a quarter
+/// turn is 100x200, and its fit into a 300x100 canvas is 0.5, not 1.0.
+#[test]
+fn every_display_geometry_leg_reads_the_same_rotated_snapped_rectangle() {
+    let path = PathBuf::from("frame.png");
+    let app = detail_app_with_image(&path, 200, 100);
+    let img = app.image.clone().expect("detail app carries an image");
+    let canvas = [300.0f32, 100.0f32];
+
+    let upright = edit::QuarterTurns::new(0);
+    let quarter = edit::QuarterTurns::new(1);
+
+    // Unrotated: 200x100 fits a 300x100 canvas at 1.0 (height-bound).
+    assert_eq!(
+        app.fit_scale_for_rotation_and_crop(canvas, &img, upright, None),
+        1.0
+    );
+    // A quarter turn makes it 100x200, which is height-bound at 0.5. Reading
+    // the pre-rotation size here would leave the preview at 1.0 and clip it.
+    assert_eq!(
+        app.fit_scale_for_rotation_and_crop(canvas, &img, quarter, None),
+        0.5
+    );
+    // Actual-size zoom is the reciprocal, so it inherits the same geometry.
+    assert_eq!(
+        app.actual_size_zoom_for_rotation_and_crop(canvas, &img, quarter, None),
+        2.0
+    );
+    // The status bar reports the same rotated rectangle.
+    assert_eq!(
+        display_dimensions_for_edit_state((img.width, img.height), quarter, None),
+        (100, 200)
+    );
+    // And so does what gets saved.
+    let saved = edit::render_edited_image(
+        &img.pixels,
+        img.width,
+        img.height,
+        &edit::EditState {
+            rotation: quarter,
+            ..Default::default()
+        },
+        edit::LensCorrection::default(),
+    );
+    assert_eq!((saved.width, saved.height), (100, 200));
+
+    // A crop whose edges fall between pixels must be snapped the same way by
+    // every leg. 1/3 of the 100px rotated width lands mid-pixel, so the crop
+    // covers 34 whole pixels everywhere, or the preview frames one width while
+    // the exported file has another.
+    let ragged = edit::CropRect {
+        left: 0.0,
+        top: 0.0,
+        right: 1.0 / 3.0,
+        bottom: 1.0,
+    };
+    let cropped_dims =
+        display_dimensions_for_edit_state((img.width, img.height), quarter, Some(ragged));
+    assert_eq!(cropped_dims, (34, 200));
+    assert_eq!(
+        app.fit_scale_for_rotation_and_crop(canvas, &img, quarter, Some(ragged)),
+        (canvas[1] / cropped_dims.1 as f32).min(canvas[0] / cropped_dims.0 as f32)
+    );
+}
+
+/// Thumbnails live in fixed square slots, so containment is the widget's job
+/// and nothing about the layout says so out loud. A layout tweak that swaps the
+/// content fit, or a new slot built without it, stretches every non-square photo
+/// in the Library and in the drag preview — a defect that is obvious to look at
+/// and invisible to every test that only checks sizes and counts. These assert
+/// the bounds the renderer is actually handed.
 #[test]
 fn thumbnail_slot_draws_wide_images_without_stretching() {
     let bounds = capture_drawn_image_bounds(
@@ -484,6 +562,11 @@ fn scan_folder_finds_raw_images() {
     assert_eq!(results.len(), 2);
 }
 
+/// Supported formats are one list, read by three consumers: directory scans,
+/// arrow-key navigation, and the file dialog. A second list added next to any
+/// one of them means a newly supported format opens from disk but is invisible
+/// in the picker, or scans past in navigation — a partial rollout nobody
+/// notices until a user reports the format "not working".
 #[test]
 fn file_dialog_extensions_match_supported_image_extensions() {
     assert_eq!(image_file_dialog_extensions(), nav::image_extensions());
@@ -528,6 +611,30 @@ fn library_grid_uses_latest_window_width_after_returning_from_detail() {
         wide_columns > narrow_columns,
         "expected library thumbnails to reflow after resizing in detail view"
     );
+}
+
+/// The grid decides how many cards fit and then draws each one; both halves
+/// need the same card size. A second size constant in the breakpoint math makes
+/// the count right for a card nobody draws, so the grid either overflows its
+/// container or leaves a column of dead space at every width -- and both halves
+/// stay internally consistent, so a test that asks the layout about itself
+/// still passes. This walks exact-fit widths and demands the count the shared
+/// constant implies.
+#[test]
+fn grid_breakpoints_and_rendering_share_one_card_size() {
+    let thumb_size = ThumbnailGridLayout::new(1000.0).thumb_size;
+    assert_eq!(thumb_size, GRID_THUMB_SIZE);
+    let card = thumb_size + GRID_CARD_PADDING * 2.0;
+
+    for columns in 1..=8usize {
+        let content_width =
+            GRID_PADDING * 2.0 + card * columns as f32 + GRID_SPACING * (columns as f32 - 1.0);
+        assert_eq!(
+            ThumbnailGridLayout::new(content_width).columns,
+            columns,
+            "a window exactly wide enough for {columns} cards of {card}px reported a different column count; the breakpoint math is sizing a card the renderer does not draw"
+        );
+    }
 }
 
 #[test]
@@ -944,6 +1051,14 @@ fn library_thumbnail_ignores_a_stale_persisted_thumbnail_when_full_copy_changed(
     });
 }
 
+/// The persisted local-edit cache stores a full image and a thumbnail as two
+/// files. Writing two files is not atomic, so a partial write or a race leaves
+/// a thumbnail from one edit beside a full image from another, and their
+/// dimensions can agree while their contents do not. Tagging both with the same
+/// generation, and refusing a thumbnail whose generation does not match its
+/// full sibling — on the fast paths too, not only under the repair lock — is
+/// what stops Library and Detail from disagreeing about the same photo after a
+/// restart.
 #[test]
 fn library_thumbnail_ignores_a_generation_mismatch_even_when_dimensions_match() {
     let repo_root = tempfile::tempdir().unwrap();
@@ -3934,6 +4049,12 @@ fn save_request_exports_the_visible_full_image_in_crop_mode() {
     assert_eq!(img.get_pixel(1, 0).0, [0, 255, 0, 255]);
 }
 
+/// Symbol-only glyphs are not consistently present in the default text font on
+/// Windows, and a missing glyph renders as a blank or a tofu box rather than
+/// failing anything. Asserting the font and shaping constants proves only that
+/// the constants exist; the defect is a button built without applying them. So
+/// this drives the real widget through a capturing paragraph and reads the font
+/// and shaping the renderer is actually handed.
 #[test]
 fn rotation_controls_use_icon_buttons() {
     use iced::advanced::widget::Tree;
