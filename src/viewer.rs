@@ -1423,7 +1423,10 @@ mod tests {
         assert!(!IMAGE_SHADER_SOURCE.contains("fn srgb_to_linear"));
         assert!(IMAGE_SHADER_SOURCE.contains("fn encode_for_target"));
         assert!(IMAGE_SHADER_SOURCE.contains("u.output_needs_srgb_encode"));
-        assert!(IMAGE_SHADER_SOURCE.contains("var px = rgb;"));
+        // The sampled texel enters the adjustment chain untouched. Any decode
+        // inserted here would be the second one, the hardware having already
+        // applied the sRGB transfer at sample time.
+        assert!(IMAGE_SHADER_SOURCE.contains("var px = apply_global_adjustments(rgb);"));
         assert!(!target_requires_manual_srgb_encode(
             wgpu::TextureFormat::Bgra8UnormSrgb
         ));

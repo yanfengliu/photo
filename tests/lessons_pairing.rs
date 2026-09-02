@@ -86,7 +86,9 @@ fn parses_entries_from_both_sides() {
 
 #[test]
 fn every_rule_points_at_an_evidence_entry_that_exists() {
-    let known: BTreeSet<String> = evidence_slugs(&read("lessons-evidence.md")).into_iter().collect();
+    let known: BTreeSet<String> = evidence_slugs(&read("lessons-evidence.md"))
+        .into_iter()
+        .collect();
     let dangling: BTreeSet<String> = index_anchors(&read("lessons.md"))
         .into_iter()
         .filter(|a| !known.contains(a))
@@ -115,5 +117,8 @@ fn the_index_stays_short_enough_to_read_at_session_start() {
     let lines = read("lessons.md").lines().count();
     // Length is what decides whether a session-start file gets read at all. Retire lessons
     // that have become gates rather than raising this ceiling.
-    assert!(lines <= 120, "lessons.md is {lines} lines; the ceiling is 120");
+    assert!(
+        lines <= 120,
+        "lessons.md is {lines} lines; the ceiling is 120"
+    );
 }
