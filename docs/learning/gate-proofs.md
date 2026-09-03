@@ -2,6 +2,18 @@
 
 Every lesson this repo retired left behind a gate, and every one of those gates was made to go red by reintroducing the defect the lesson describes before its prose was deleted.
 
+
+## If a gate here is wrong
+
+A gate and the claim in its header can be wrong together, and when they are they look exactly like a gate that is right: retiring 356 lessons across this fleet found 43 that named a defect their own named test did not catch. Auditing one means reaching what was actually believed, measured, and abandoned — never the sentence the gate carries about itself, which is the same self-agreement these gates exist to catch.
+
+That evidence was deleted in the retirement commits, not lost. This repo's evidence file as it stood immediately before, all 9 entries with their anchors:
+
+    git show 7fba822:docs/learning/lessons-evidence.md
+
+`git log -- docs/learning/lessons-evidence.md` lists every earlier revision, and `git log -S'<phrase from the gate header>' -- docs/learning/` finds the entry a particular gate came from.
+
+
 This file is the standing answer to "did the gates actually do their job". A claim here that cannot be reproduced by re-running its mutation is a claim to fix, not a claim to trust.
 
 Method: apply the smallest edit to product code that reintroduces the defect, run `cargo test --bin photo` (green at baseline: 435 passing), confirm the failure names the defect, revert byte-for-byte, confirm green. Proved 2026-09-02.
