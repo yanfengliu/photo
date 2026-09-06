@@ -1,6 +1,6 @@
 # Agent Harness Guide
 
-The agent harness lets an AI agent drive this app the way a user does — open photos, move sliders, crop, rotate, save — while inspecting the result both visually (real window screenshots, CPU render dumps) and mechanically (histograms, clipping fractions, percentiles, image diffs). It exists to close the edit-quality feedback loop: value-range problems and tuning-algorithm drift used to need a human looking at the screen and relaying "it still looks weird"; with the harness the agent sees and measures the render itself, decides the next adjustment, and iterates. Design and history: `docs/threads/done/agent-harness/DESIGN.md` (civ-engine's visual-playtest / improvement-loop principles adapted to a desktop iced app).
+The agent harness lets an AI agent drive this app the way a user does — open photos, move sliders, crop, rotate, save — while inspecting the result both visually (real window screenshots, CPU render dumps) and mechanically (histograms, clipping fractions, percentiles, image diffs). It exists to close the edit-quality feedback loop: value-range problems and tuning-algorithm drift used to need a human looking at the screen and relaying "it still looks weird"; with the harness the agent sees and measures the render itself, decides the next adjustment, and iterates. Design and history: `docs/work/10_agent-harness/historical/threads/done/agent-harness/DESIGN.md` (civ-engine's visual-playtest / improvement-loop principles adapted to a desktop iced app).
 
 ## Quick start
 

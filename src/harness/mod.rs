@@ -3,7 +3,7 @@
 //! JSON-stable vocabulary for the agent control channel: requests, responses,
 //! observations, run manifests, and the process-wide harness configuration.
 //! Design and loop documentation: `docs/guides/agent-harness.md`; thread:
-//! `docs/threads/current/agent-harness/DESIGN.md`. Protocol changes bump
+//! `docs/work/10_agent-harness/historical/threads/done/agent-harness/DESIGN.md`. Protocol changes bump
 //! [`HARNESS_PROTOCOL_VERSION`].
 
 pub(crate) mod run;

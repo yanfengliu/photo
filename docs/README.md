@@ -8,7 +8,7 @@ This directory contains the canonical project documentation.
 - `devlog/` - compact summary plus dated detailed task logs.
 - `learning/` - short, durable lessons worth keeping.
 - `debugging/` - templates and notes for debugging sessions.
-- `reviews/` - review artifacts and short reviewer notes when they are useful to keep.
+- `work/` - numbered work units, planning entries, and retained review rounds.
 
 ## Legacy paths
 
@@ -23,4 +23,4 @@ Edit only these locations for durable documentation updates:
 - `docs/devlog/`
 - `docs/learning/`
 - `docs/debugging/`
-- `docs/reviews/`
+- `docs/work/`

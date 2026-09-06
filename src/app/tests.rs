@@ -2976,7 +2976,7 @@ fn scan_folder_no_duplicates_in_entries() {
 #[test]
 fn slider_ranges_match_lightroom_conventions() {
     // Lightroom Basic-panel UI ranges (see
-    // docs/threads .../lightroom-param-parity/DESIGN.md): Exposure is ±5 EV
+    // docs/work/3_lightroom-param-parity/historical/threads/done/lightroom-param-parity/DESIGN.md): Exposure is ±5 EV
     // and every other slider runs -100..+100.
     let (min, max) = slider_range(SliderKind::Exposure);
     assert_eq!(min, -5.0);

@@ -1,5 +1,7 @@
 # Devlog Summary
 
+- 2026-09-05: Moved 12 historical work units (34 source files) to numbered docs/work folders; preserved original review rounds and source provenance, and updated live documentation pointers. Migration coordination: ../fleet/docs/work/3_numbered-work-docs/plan.md.
+
 ## Current state
 - Rust + iced 0.13 + wgpu 0.19 GPU image viewer/editor for Windows; v0.2.10; external changelog lives in `docs/changelog.md`.
 - Agent harness (`photo --harness` + `harnessctl`): token-gated localhost JSON-lines control channel driving the app through real dispatch paths (drag-semantics sliders, keyboard, crop commits; dialogs refused in favor of `open`/`import_*`), dual observation (window screenshots of the true GPU frame + full-res CPU render dumps with percentile/clipping/histogram/saturation stats + image compare), `wait_idle` covering loads/EXIF/persists/saves, per-run artifact dirs under `tmp/harness-runs/` (session log = replayable script, finalized manifest), storage sandboxed by default. Canonical guide: `docs/guides/agent-harness.md`.

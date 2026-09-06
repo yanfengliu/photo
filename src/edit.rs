@@ -263,7 +263,7 @@ fn luminance(rgb: [f32; 3]) -> f32 {
 // the internal math amounts; both the CPU save path (`apply_all`) and the GPU
 // uniform packing (`viewer.rs`) go through them. Strengths at the extremes are
 // pinned to the envelope validated by the 2026-04-24 tuning audit (see
-// docs/threads .../lightroom-param-parity/DESIGN.md for the full contract).
+// docs/work/3_lightroom-param-parity/historical/threads/done/lightroom-param-parity/DESIGN.md for the full contract).
 
 /// Contrast slider → power-law exponent offset (exponent = 1 + amount).
 /// ±100 spans the validated exponent envelope 0.5..1.5.
@@ -2715,7 +2715,7 @@ mod tests {
         std::fs::write(out_dir.join("metrics.txt"), metrics).unwrap();
     }
 
-    // -- Lightroom-convention slider mapping (see docs/threads .../lightroom-param-parity/DESIGN.md) --
+    // -- Lightroom-convention slider mapping (see docs/work/3_lightroom-param-parity/historical/threads/done/lightroom-param-parity/DESIGN.md) --
 
     #[test]
     fn contrast_mapping_spreads_validated_envelope_across_lightroom_range() {
