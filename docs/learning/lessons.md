@@ -4,7 +4,7 @@ A queue, not a record. An entry lands here the session it is learned, anchored t
 
 Keep this file short: every session in the repo pays to read it, so an entry that has been sitting here has already cost more than it is worth.
 
-If an entry can name no gate, it does not belong here. Knowledge with no mechanical trigger that is true fleet-wide goes to `../../fleet/FLEET.md`; knowledge with no mechanical trigger that is true only here goes to `../policies/local-rules.md`. Everything else is folklore and is dropped.
+If an entry can name no gate, it does not belong here. Knowledge with no mechanical trigger that is true fleet-wide is proposed in [canon-candidates.md](../../../fleet/canon-candidates.md); knowledge with no mechanical trigger that is true only here goes to `../policies/local-rules.md`. Everything else is folklore and is dropped.
 
 Shape: `../../fleet/docs/lessons-template.md`. War story and evidence-anchor table go in [lessons-evidence.md](lessons-evidence.md), one entry per rule, linked both ways.
 
