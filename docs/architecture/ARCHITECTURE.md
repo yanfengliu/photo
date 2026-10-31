@@ -3,6 +3,18 @@
 > Last verified: 2026-07-14
 > Last updated by: Codex
 
+## Section map
+
+Read this map first, then only the sections the work needs.
+
+- [System Overview](#system-overview): what the app is, its Library and Detail tabs, and the agent harness.
+- [Component Map](#component-map), the largest: one bullet per source file, from `src/main.rs` and the harness through `src/app/`, the loaders and caches, the viewer and its shaders, to decoding, editing, lenses, collections and navigation.
+- [Data Flow](#data-flow): [Image Loading](#image-loading), [Thumbnail Loading](#thumbnail-loading), [Edit and Save Flow](#edit-and-save-flow), the [Agent Harness](#agent-harness-opt-in---harness), and [Navigation and Collections](#navigation-and-collections).
+- [Boundaries and Rules](#boundaries-and-rules): the one module allowed to do each thing.
+- [Technology Map](#technology-map): each library, its version and what it is for.
+- [Diagram](#diagram): the modules as a Mermaid diagram.
+- [See Also](#see-also): the decisions and the drift log.
+
 ## System Overview
 
 Photo is a GPU-accelerated image viewer and editor for Windows written in Rust. It has a Library tab for browsing image collections as a thumbnail grid and a Detail tab for viewing individual images with zoom/pan and real-time editing through a custom wgpu shader pipeline. Users interact through the iced GUI, keyboard shortcuts, file dialogs, drag-and-drop, or CLI arguments. An AI agent can interact through the same message-dispatch paths via the opt-in harness mode (`--harness`): a token-gated localhost JSON-lines control channel with screenshot / CPU-render / image-statistics observation and per-run artifact directories, sandboxed storage by default (guide: `docs/guides/agent-harness.md`). Image editing includes 12 adjustments rendered in the GPU shader at uniform-update cost, plus Lensfun-based lens corrections, 90-degree rotation, and crop preview/export support. The decode path now covers raster, SVG, and common camera RAW formats, and RAW Detail view uses a staged load that shows an embedded preview first when available before upgrading to the fully developed image. Edits remain non-destructive within a session, committed edits bake into repo-local local-copy files across restarts with source-metadata validation and paired full/thumbnail generations, and save-as-copy exports a separate edited file into the repo-local gitignored `edited/` directory (falling back beside the source only when no repo root exists). Baked local edits stay authoritative when the source media is offline: library membership, edited thumbnails, and Detail opening all work without the original file present (a reachable-but-rewritten source still invalidates the bake).

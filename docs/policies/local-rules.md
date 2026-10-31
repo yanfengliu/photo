@@ -1,6 +1,6 @@
 # photo — local rules
 
-Rules that apply to this repo and no other. The fleet constitution lives in AGENTS.md's FLEET-CANON block and is written by the sync; this file is the one the sync never opens.
+Rules that apply to this repo and no other. The fleet constitution's core lives in AGENTS.md's FLEET-CANON block and is written by the sync; the rest of it is in `../fleet/docs/skills/coordinator.md` and `../fleet/docs/work-rules.md`. This file is the one the sync never opens.
 
 Everything here has no mechanical trigger. Anything that could be gated is a gate instead, with its claim in the gate's own header and its mutation proof in `docs/learning/gate-proofs.md`.
 
