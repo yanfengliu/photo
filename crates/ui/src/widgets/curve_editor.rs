@@ -16,7 +16,7 @@ use egui::{
 use photo_core::develop::{CurvePoint, PointCurve};
 
 use super::histogram::{BINS, area_mesh, grid_color};
-use super::{end_click_burst, in_click_burst, recall, remember};
+use super::{end_click_burst, in_click_burst, meant_double_click, recall, remember};
 use crate::theme::{self, palette, radius};
 
 /// How close to a control point a press must be to grab it.
@@ -153,7 +153,7 @@ impl<'a> CurveEditor<'a> {
         let burst = in_click_burst(ui.ctx(), response.id);
         let mut finished = false;
 
-        if response.double_clicked() {
+        if meant_double_click(response, burst) {
             drag = None;
             let points = self.curve.points();
             let hit = response

@@ -32,6 +32,7 @@ pub use scale::Scale;
 use track::Track;
 use value_field::ValueField;
 
+use super::{end_click_burst, in_click_burst, meant_double_click};
 use crate::theme::{self, palette, size, space};
 
 /// What a slider reports for one frame.
@@ -140,8 +141,10 @@ impl<'a> AdjSlider<'a> {
 
         if let Some(label_rect) = parts.label {
             let label = ui.interact(label_rect, id.with("label"), Sense::CLICK);
-            if label.double_clicked() {
+            let burst = in_click_burst(ui.ctx(), label.id);
+            if meant_double_click(&label, burst) {
                 edit.commit(value, default);
+                end_click_burst(ui.ctx(), label.id);
             }
             if ui.is_rect_visible(label_rect) {
                 let color = if label.hovered() {

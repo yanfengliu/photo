@@ -5,7 +5,9 @@ use photo_core::develop::{Adj, CurvePoint, GradeWheel, PointCurve};
 use photo_ui::harness::{Harness, HarnessBuilder, Host};
 use photo_ui::widgets::color_wheel::handle_pos;
 use photo_ui::widgets::curve_editor::point_pos;
-use photo_ui::widgets::{ClippingToggles, ColorWheel, CurveEditor, HistogramData, histogram};
+use photo_ui::widgets::{
+    AdjSlider, ClippingToggles, ColorWheel, CurveEditor, HistogramData, histogram,
+};
 
 use crate::TestResult;
 
@@ -266,6 +268,42 @@ fn a_secondary_click_does_not_edit_the_curve() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn typing_a_number_above_the_curve_does_not_break_a_drag_on_it() -> TestResult {
+    let curve = PointCurve::new(IDENTITY.iter().map(|(x, y)| CurvePoint::new(*x, *y)));
+    let mut harness = HarnessBuilder::new().size([320.0, 320.0]).build_ui(
+        (0.0_f32, curve),
+        |ui, (contrast, curve)| {
+            AdjSlider::new(Adj::Contrast.spec(), contrast, 0.0).show(ui);
+            let drawn = curve.clone();
+            let sample = |x: f32| straight(drawn.points(), x);
+            CurveEditor::new("Tone curve", curve, &sample)
+                .size([200.0, 200.0])
+                .show(ui);
+        },
+    );
+    harness.run()?;
+    harness.click(Role::TextInput, "Contrast")?;
+    harness.type_text("30")?;
+
+    // The press that ends the typing (the number goes back to plain text
+    // above the plot) adds a point to the curve and goes on to drag it.
+    let plot = harness.control(Role::Canvas, "Tone curve")?.rect;
+    harness.drag(
+        point_pos(plot, CurvePoint::new(0.5, 0.5)),
+        point_pos(plot, CurvePoint::new(0.5, 0.7)),
+    )?;
+    assert_eq!(harness.app().state.0, 30.0);
+    let points = harness.app().state.1.points();
+    assert_eq!(points.len(), 3, "{points:?}");
+    let dragged = points[1];
+    assert!(
+        (dragged.x - 0.5).abs() < 0.01 && (dragged.y - 0.7).abs() < 0.01,
+        "{points:?}"
+    );
+    Ok(())
+}
+
 // ---- Colour wheel ----
 
 struct WheelProbe {
@@ -415,5 +453,26 @@ fn a_secondary_click_does_not_tint() -> TestResult {
     harness.secondary_click_at(handle_pos(disc, 45.0, 80.0))?;
     let wheel = harness.app().state.wheel;
     assert_eq!((wheel.hue, wheel.saturation), (0.0, 0.0));
+    Ok(())
+}
+
+#[test]
+fn one_click_too_many_does_not_tint_a_cleared_wheel_again() -> TestResult {
+    let mut harness = color_wheel(GradeWheel {
+        hue: 45.0,
+        saturation: 80.0,
+        luminance: 0.0,
+    });
+    harness.run()?;
+    let disc = harness.control(Role::ColorWell, "Shadows wheel")?.rect;
+    let handle = handle_pos(disc, 45.0, 80.0);
+
+    harness.double_click_at(handle)?;
+    // A third click right away, where the handle was.
+    harness.pointer_down(handle)?;
+    harness.pointer_up(handle)?;
+    let wheel = harness.app().state.wheel;
+    assert_eq!((wheel.hue, wheel.saturation), (0.0, 0.0));
+    assert_eq!(harness.app().state.finishes, 1);
     Ok(())
 }

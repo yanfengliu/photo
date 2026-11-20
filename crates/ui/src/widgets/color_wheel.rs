@@ -14,7 +14,7 @@ use egui::{
 use photo_core::develop::{AdjSpec, GradeWheel};
 
 use super::adj_slider::AdjSlider;
-use super::{end_click_burst, in_click_burst, recall, remember};
+use super::{end_click_burst, in_click_burst, meant_double_click, recall, remember};
 use crate::theme::{self, palette, size, space};
 
 /// Triangles in the disc.
@@ -185,7 +185,7 @@ fn pointer(ui: &Ui, response: &Response, square: Rect, wheel: &mut GradeWheel) -
     let burst = in_click_burst(ui.ctx(), response.id);
     let mut finished = false;
 
-    if response.double_clicked() {
+    if meant_double_click(response, burst) {
         drag = None;
         if wheel.saturation != 0.0 {
             wheel.saturation = 0.0;

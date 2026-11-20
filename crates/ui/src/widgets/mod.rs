@@ -78,6 +78,19 @@ struct Burst {
     pos: egui::Pos2,
 }
 
+/// Whether `response` was double-clicked as the user meant it. `burst` is
+/// what [`in_click_burst`] says for the widget this frame.
+///
+/// egui counts the second click of a double-click as a triple-click when the
+/// first came right after a click anywhere else: its triple-click test does
+/// not look at where the click before last was. Resetting one slider after
+/// another by double-clicking each is how that happens, so such a triple is
+/// taken for a double-click, unless it is one click too many of a
+/// double-click this widget has just acted on.
+fn meant_double_click(response: &egui::Response, burst: bool) -> bool {
+    response.double_clicked() || (response.triple_clicked() && !burst)
+}
+
 /// Note that the widget `id` has just acted on a double-click.
 fn end_click_burst(ctx: &egui::Context, id: egui::Id) {
     let burst = ctx.input(|input| {

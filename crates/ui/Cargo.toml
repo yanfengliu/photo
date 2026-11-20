@@ -10,7 +10,6 @@ workspace = true
 
 [dependencies]
 photo-core = { workspace = true }
-photo-engine = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
 # The headless harness is part of the crate's public API (the `photo harness`
