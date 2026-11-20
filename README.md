@@ -4,17 +4,21 @@ A catalog-based, non-destructive photo organiser and raw developer for macOS and
 
 Photo is an independent project. It is not affiliated with Adobe, uses none of Adobe's code, artwork or names, and does not aim for pixel-identical output: slider names, ranges and `crs:` XMP values follow shared conventions, while the rendering math is its own and is documented with its real sources.
 
-> Status: under construction. Version 0.3.0 is the foundation of a from-scratch restart — the workspace, the shared data model and the design. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the plan](docs/work/12_lightroom-workflow-restart/plan.md) and [the design](docs/work/12_lightroom-workflow-restart/design.md) for what is being built and in what order.
+> Status: under construction. Version 0.3.1 has a working Library module: import, browse, rate, flag, label, keyword, collect and filter your photos. The Develop module and export come next. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the plan](docs/work/12_lightroom-workflow-restart/plan.md) and [the design](docs/work/12_lightroom-workflow-restart/design.md) for what is being built and in what order.
 
 ## Feature overview
 
-| Area | State at 0.3.0 |
+| Area | State at 0.3.1 |
 | --- | --- |
-| Shared data model (`photo-core`): develop settings, the adjustment table, metadata, colour spaces | Done |
-| Headless UI rendering and automation (egui + `egui_kittest`) | Proven by a spike test |
-| Colour science, imaging primitives, decoding, catalog, XMP sidecars | In progress |
-| Develop pipeline, export, application engine | Planned |
-| Library and Develop modules | Planned |
+| Library module: import, grid, loupe, compare, survey, filter bar, catalog, folders, collections and smart collections, keywords, metadata, undo | Working |
+| Catalog (SQLite) and XMP sidecars | Working, reviewed by two models |
+| RAW and raster decoding, colour science, imaging primitives, the develop pipeline | Built and tested; the pipeline is not yet wired into the app |
+| Develop module, export | In progress |
+| Agent harness (`photo --harness`, `harnessctl`) | Planned |
+
+## Where your data lives
+
+Run from a checkout of this repository, Photo keeps its catalog and previews in a `catalog/` folder at the repository root and exports in `edited/`, both visible and both ignored by git. Run from anywhere else, it keeps them in `Photo/` under your Pictures folder. Photo never writes to your original files; it writes XMP sidecars beside them only when you ask it to.
 
 ## Prerequisites
 
@@ -24,8 +28,8 @@ Photo is an independent project. It is not affiliated with Adobe, uses none of A
 ## Build, run, test
 
 ```sh
+cargo run --release    # launch the app (recommended: fast previews)
 cargo build            # debug build; dependencies and the pixel-math crates are optimized even in debug
-cargo run              # launch the app
 cargo build --release  # optimized build with thin LTO
 ```
 
@@ -43,7 +47,8 @@ They cover the whole workspace: the root manifest lists every crate in `default-
 ## Project structure
 
 ```
-src/main.rs          Entry point (CLI, default catalog location, launching the UI)
+src/main.rs          Entry point: finds the stores and launches the UI
+src/repo.rs          Where Photo keeps its data (the only code that decides a location)
 crates/
   core/              photo-core: shared data types and colour-space constants
   color/             photo-color: per-pixel colour science

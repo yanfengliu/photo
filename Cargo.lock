@@ -3257,7 +3257,7 @@ dependencies = [
 
 [[package]]
 name = "photo"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "directories",
  "env_logger",
@@ -3268,7 +3268,7 @@ dependencies = [
 
 [[package]]
 name = "photo-catalog"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "log",
  "photo-core",
@@ -3281,14 +3281,14 @@ dependencies = [
 
 [[package]]
 name = "photo-color"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "photo-core",
 ]
 
 [[package]]
 name = "photo-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "photo-decode"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "kamadak-exif",
@@ -3311,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "photo-develop"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "photo-color",
@@ -3324,7 +3324,7 @@ dependencies = [
 
 [[package]]
 name = "photo-engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "log",
@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "photo-export"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "log",
@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "photo-imaging"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "photo-core",
  "rayon",
@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "photo-testkit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "photo-core",
@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "photo-ui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eframe",
  "egui",
@@ -3389,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "photo-xmp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "photo-core",
  "quick-xml",

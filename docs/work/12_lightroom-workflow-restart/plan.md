@@ -3,7 +3,7 @@
 Status: active
 Owner: Coordinating Claude session of 2026-11-19
 Created: 2026-11-19
-Updated: 2026-11-19
+Updated: 2026-11-20
 
 ## Problem and outcome
 
@@ -45,11 +45,12 @@ Releases follow what a user can see: 0.3.0 was the foundation, the next bump is 
 
 - [x] Clear the repository; old app reachable at `94bd2cf` (commit `00dc686`).
 - [x] Foundation: twelve-package workspace, `photo-core` data model, headless UI rendering proven, design written (commit `c59c2bf`, version 0.3.0).
-- [ ] Wave 1, one builder per crate, each depending only on `photo-core`: `photo-color`, `photo-imaging`, `photo-decode` with `photo-testkit`, `photo-catalog`, `photo-xmp`, and the UI widget kit with its headless driver.
-- [ ] `photo-develop`: the pipeline over `photo-color` and `photo-imaging`, with its contracts and a rendered tuning grid.
-- [ ] `photo-engine`, Library side: catalog session, import, previews, selection, undoable attributes, collections, keywords, sidecars.
+- [x] Wave 1, one builder per crate, each depending only on `photo-core`: `photo-color`, `photo-imaging`, `photo-decode` with `photo-testkit`, `photo-catalog`, `photo-xmp`, and the UI widget kit with its headless driver (2026-11-20).
+- [x] `photo-develop`: the pipeline over `photo-color` and `photo-imaging`, with its contracts and a rendered tuning grid (2026-11-20; the recovery recipe's top-stop re-clipping is an open tuning item).
+- [x] `photo-engine`, Library side: catalog session, import, previews, selection, undoable attributes, collections, keywords, sidecars (2026-11-20).
+- [x] Independent review of the catalog and sidecars, rounds 0 and 1, and their repairs ([reviews](reviews/)).
 - [ ] `photo-export`, and the engine's Develop side: edit session, render worker, history, snapshots, presets, copy and paste, export jobs.
-- [ ] Library module: shell, grid, loupe, compare, survey, panels, filter bar, filmstrip, import dialog. Version 0.3.1.
+- [x] Library module: shell, grid, loupe, compare, survey, panels, filter bar, filmstrip, import dialog. Version 0.3.1 (2026-11-20).
 - [ ] Develop module: canvas, every panel, crop, healing and masking tools, before and after, export dialog. Version 0.3.2.
 - [ ] Integration: `src/main.rs`, storage-root discovery, `photo --harness` and `harnessctl`, end-to-end run, performance check.
 - [ ] Independent review of the whole, repairs, and a documentation pass.
