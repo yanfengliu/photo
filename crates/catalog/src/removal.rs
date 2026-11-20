@@ -1,19 +1,21 @@
 //! Removing photos from the catalog, undoably.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use photo_core::meta::PhotoId;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::catalog::Catalog;
-use crate::error::{CatalogError, Result};
+use crate::develop::next_develop_version;
+use crate::error::{CatalogError, Entity, Result};
 use crate::folders::ensure_folder;
 use crate::membership::make_places;
 use crate::paths;
 use crate::photos::{master_at_path, require_photos, sync_copies};
 use crate::rows::{RowSet, integer, text};
 use crate::sql::id_list;
+use crate::tree::{COLLECTIONS, KEYWORDS, Tree};
 
 const LISTED: &str = "id IN (SELECT value FROM json_each(?1))";
 const OF_LISTED: &str = "photo_id IN (SELECT value FROM json_each(?1))";
@@ -83,25 +85,28 @@ impl Catalog {
     /// attributes and develop state, history, snapshots, keywords and
     /// collection memberships (at their old places in each collection).
     ///
-    /// What changed in the meantime is handled rather than failed on: a
-    /// keyword or collection that has since been deleted is simply not
-    /// re-attached; a folder that has since been removed is created again;
-    /// and a virtual copy that was removed without its master follows the
-    /// master to wherever its file is now. If a restored file's path has
-    /// since been imported again, the call fails with
-    /// [`CatalogError::DuplicatePath`] and restores nothing.
+    /// Each photo comes back under a new develop version (see
+    /// [`PhotoRecord::develop_version`](crate::PhotoRecord::develop_version)).
+    /// A folder that has since been removed is created again, and a virtual
+    /// copy that was removed without its master follows the master to
+    /// wherever its file is now.
+    ///
+    /// Anything else that stands in the way fails the call, and nothing is
+    /// restored: [`CatalogError::AlreadyExists`] if the photos are back
+    /// already; [`CatalogError::DuplicatePath`] if a file's path has been
+    /// imported again; and [`CatalogError::NotFound`] if a keyword or
+    /// collection they belonged to has since been deleted, because the link
+    /// could not come back with them. Put that back first
+    /// ([`Catalog::restore_keywords`], [`Catalog::restore_collections`]),
+    /// as an undo stack does.
     pub fn restore_photos(&mut self, removed: &RemovedPhotos) -> Result<()> {
         self.write(|tx, _| {
             restore_rows(tx, &removed.photos)?;
             removed.history.insert(tx)?;
             removed.snapshots.insert(tx)?;
-            surviving(
-                tx,
-                &removed.keywords,
-                "keyword_id",
-                "SELECT id FROM keywords",
-            )?
-            .insert(tx)?;
+            require_all(tx, &removed.keywords, "keyword_id", &KEYWORDS)?;
+            removed.keywords.insert(tx)?;
+            require_all(tx, &removed.collections, "collection_id", &COLLECTIONS)?;
             restore_memberships(tx, removed)
         })
     }
@@ -128,13 +133,32 @@ fn places_in_collections(conn: &Connection, photos: &str) -> Result<HashMap<(i64
     Ok(places)
 }
 
-/// Re-insert photo rows, masters before the copies that refer to them.
+/// Re-insert photo rows, masters before the copies that refer to them. Each
+/// comes back under a new develop version: a version is never issued twice,
+/// so one that was handed out after the removal (by an undo, say) cannot
+/// now name a second look.
 fn restore_rows(tx: &Transaction<'_>, photos: &RowSet) -> Result<()> {
-    let (master, folder, path) = (
+    let (id, master, folder, path, version) = (
+        photos.column("id")?,
         photos.column("master_id")?,
         photos.column("folder_id")?,
         photos.column("path")?,
+        photos.column("develop_version")?,
     );
+    let mut photos = photos.clone();
+    for row in photos.rows_mut() {
+        if let Some(photo) = integer(&row[id])
+            && tx
+                .prepare_cached("SELECT 1 FROM photos WHERE id = ?1")?
+                .exists([photo])?
+        {
+            return Err(CatalogError::AlreadyExists {
+                entity: Entity::Photo,
+                id: photo,
+            });
+        }
+        row[version] = Value::Integer(next_develop_version(tx)?);
+    }
     let mut masters = photos.clone();
     masters.rows_mut().retain(|row| row[master] == Value::Null);
     for row in masters.rows_mut() {
@@ -177,18 +201,12 @@ fn restore_rows(tx: &Transaction<'_>, photos: &RowSet) -> Result<()> {
 /// Re-insert collection memberships, each at the place it had in its
 /// collection's order.
 fn restore_memberships(tx: &Transaction<'_>, removed: &RemovedPhotos) -> Result<()> {
-    let memberships = &removed.collections;
+    let mut memberships = removed.collections.clone();
     let (collection_at, photo_at, position_at) = (
         memberships.column("collection_id")?,
         memberships.column("photo_id")?,
         memberships.column("position")?,
     );
-    let mut memberships = surviving(
-        tx,
-        memberships,
-        "collection_id",
-        "SELECT id FROM collections",
-    )?;
     let membership =
         |row: &[Value]| Some((integer(&row[collection_at])?, integer(&row[photo_at])?));
 
@@ -219,21 +237,16 @@ fn restore_memberships(tx: &Transaction<'_>, removed: &RemovedPhotos) -> Result<
     memberships.insert(tx)
 }
 
-/// The link rows whose other end (`parent`) still exists.
-fn surviving(
-    conn: &Connection,
-    links: &RowSet,
-    parent: &str,
-    existing: &'static str,
-) -> Result<RowSet> {
-    let column = links.column(parent)?;
-    let mut stmt = conn.prepare_cached(existing)?;
-    let alive: HashSet<i64> = stmt
-        .query_map([], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut links = links.clone();
-    links
-        .rows_mut()
-        .retain(|row| integer(&row[column]).is_some_and(|id| alive.contains(&id)));
-    Ok(links)
+/// Fail with [`CatalogError::NotFound`] unless the keyword or collection
+/// that every one of `links` points at (in `column`) still exists.
+fn require_all(conn: &Connection, links: &RowSet, column: &str, tree: &Tree) -> Result<()> {
+    let at = links.column(column)?;
+    let targets: BTreeSet<i64> = links
+        .rows()
+        .iter()
+        .filter_map(|row| integer(&row[at]))
+        .collect();
+    targets
+        .into_iter()
+        .try_for_each(|id| tree.require(conn, id))
 }

@@ -18,7 +18,9 @@ fn exposure(stops: f32) -> DevelopSettings {
     settings
 }
 
-/// Everything the public API can say about one photo.
+/// Everything the public API can say about one photo, except its develop
+/// version: a restore renews that on purpose (see `develop_versions.rs`),
+/// and the tests here check it separately.
 #[derive(Debug, PartialEq)]
 struct Everything {
     record: PhotoRecord,
@@ -32,8 +34,10 @@ struct Everything {
 
 fn everything(catalog: &Catalog, photo: PhotoId) -> Everything {
     let history = catalog.history(photo).unwrap();
+    let mut record = catalog.photo(photo).unwrap();
+    record.develop_version = 0;
     Everything {
-        record: catalog.photo(photo).unwrap(),
+        record,
         settings: catalog.develop_settings(photo).unwrap(),
         history_settings: history
             .iter()
@@ -51,14 +55,18 @@ fn everything(catalog: &Catalog, photo: PhotoId) -> Everything {
     }
 }
 
-/// The catalog as the Library shows it: every cell, and each collection's
-/// own order.
+/// The catalog as the Library shows it: every cell (develop versions left
+/// out, as in [`everything`]), and each collection's own order.
 fn library_view(
     catalog: &Catalog,
     collections: &[CollectionId],
 ) -> (Vec<PhotoSummary>, Vec<Vec<PhotoId>>) {
+    let mut cells = catalog.query(&PhotoQuery::default()).unwrap();
+    for cell in &mut cells {
+        cell.develop_version = 0;
+    }
     (
-        catalog.query(&PhotoQuery::default()).unwrap(),
+        cells,
         collections
             .iter()
             .map(|id| catalog.collection_photos(*id).unwrap())
@@ -206,6 +214,10 @@ fn restoring_reproduces_ids_attributes_history_snapshots_keywords_and_membership
     let before = [master, copy, bystander].map(|id| everything(&catalog, id));
     let view_before = library_view(&catalog, &collections);
     let stats_before = catalog.stats().unwrap();
+    let versions = |catalog: &Catalog| {
+        [master, copy, bystander].map(|id| catalog.photo(id).unwrap().develop_version)
+    };
+    let versions_before = versions(&catalog);
     assert_eq!(before[0].history.len(), 3);
     assert!(
         before[0].history[1].is_current,
@@ -217,6 +229,15 @@ fn restoring_reproduces_ids_attributes_history_snapshots_keywords_and_membership
 
     let after = [master, copy, bystander].map(|id| everything(&catalog, id));
     assert_eq!(after, before);
+    let versions_after = versions(&catalog);
+    assert!(
+        versions_after[0] > versions_before[0] && versions_after[1] > versions_before[1],
+        "the restored photos get new develop versions: {versions_before:?} -> {versions_after:?}"
+    );
+    assert_eq!(
+        versions_after[2], versions_before[2],
+        "the bystander keeps its version"
+    );
     assert_eq!(library_view(&catalog, &collections), view_before);
     assert_eq!(catalog.stats().unwrap(), stats_before);
     assert_eq!(catalog.check_integrity().unwrap(), Vec::<String>::new());
@@ -328,13 +349,13 @@ fn ids_of_removed_photos_are_never_given_to_new_photos() {
 }
 
 #[test]
-fn restoring_copes_with_what_was_deleted_in_the_meantime() {
+fn restoring_waits_for_deleted_keywords_and_collections_and_recreates_a_removed_folder() {
     let Scene {
         mut catalog,
         master,
         copy,
+        bystander,
         album,
-        ..
     } = scene();
     let sea = catalog
         .photo_keywords(master)
@@ -347,17 +368,25 @@ fn restoring_copes_with_what_was_deleted_in_the_meantime() {
 
     // While the photos are gone, a keyword, a collection and (after moving
     // the bystander out) their folder are deleted.
-    catalog.delete_keyword(sea.id).unwrap();
-    catalog.delete_collection(album).unwrap();
-    let bystander = catalog
-        .find_by_path("/shoot/bystander.jpg")
-        .unwrap()
-        .unwrap();
+    let keyword = catalog.delete_keyword(sea.id).unwrap();
+    let collection = catalog.delete_collection(album).unwrap();
     catalog
         .relink_photo(bystander, Path::new("/elsewhere/bystander.jpg"))
         .unwrap();
     catalog.remove_folder(folder).unwrap();
 
+    // The master cannot come back without the keyword it carried, so
+    // rather than drop that link the restore is refused.
+    let before = catalog.stats().unwrap();
+    assert!(matches!(
+        catalog.restore_photos(&removed),
+        Err(CatalogError::NotFound { entity: Entity::Keyword, id }) if id == sea.id.0
+    ));
+    assert_eq!(catalog.stats().unwrap(), before);
+
+    // Undone in reverse order, everything comes back.
+    catalog.restore_collections(&collection).unwrap();
+    catalog.restore_keywords(&keyword).unwrap();
     catalog.restore_photos(&removed).unwrap();
 
     let names = |id| -> Vec<String> {
@@ -368,17 +397,16 @@ fn restoring_copes_with_what_was_deleted_in_the_meantime() {
             .map(|keyword| keyword.name)
             .collect()
     };
-    assert_eq!(
-        names(master),
-        ["boats"],
-        "the deleted keyword is not resurrected"
-    );
+    assert_eq!(names(master), ["boats", "sea"]);
     assert_eq!(names(copy), ["mono"]);
     assert_eq!(
         catalog.photo_collections(master).unwrap(),
-        [catalog.quick_collection()]
+        [catalog.quick_collection(), album]
     );
-    assert!(catalog.photo_collections(copy).unwrap().is_empty());
+    assert_eq!(
+        catalog.collection_photos(album).unwrap(),
+        [copy, bystander, master]
+    );
     let restored_folder = catalog.photo(master).unwrap().folder_id;
     let folders = catalog.folders().unwrap();
     let listed = folders.iter().find(|f| f.id == restored_folder).unwrap();
@@ -413,7 +441,10 @@ fn restoring_is_refused_when_the_file_was_imported_again_or_is_already_back() {
     catalog.remove_photos(&[reimported]).unwrap();
     catalog.restore_photos(&removed).unwrap();
     assert!(
-        catalog.restore_photos(&removed).is_err(),
+        matches!(
+            catalog.restore_photos(&removed),
+            Err(CatalogError::AlreadyExists { entity: Entity::Photo, id }) if id == master.0
+        ),
         "restoring twice cannot duplicate anything"
     );
     assert_eq!(catalog.stats().unwrap().photos, 3);

@@ -10,8 +10,8 @@ use crate::collections::CollectionKind;
 /// Result alias used by every catalog operation.
 pub type Result<T> = std::result::Result<T, CatalogError>;
 
-/// The kind of record an id refers to, for [`CatalogError::NotFound`] and
-/// [`CatalogError::Cycle`].
+/// The kind of record an id refers to, for [`CatalogError::NotFound`],
+/// [`CatalogError::AlreadyExists`] and [`CatalogError::Cycle`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Entity {
     /// A photo or virtual copy.
@@ -85,6 +85,16 @@ pub enum CatalogError {
         /// What kind of record was looked for.
         entity: Entity,
         /// The id that was not found.
+        id: i64,
+    },
+
+    /// A restore found a record with this id in the catalog already: what it
+    /// would put back has been put back before. Nothing was changed.
+    #[error("{entity} {id} is already in the catalog")]
+    AlreadyExists {
+        /// What kind of record it is.
+        entity: Entity,
+        /// The id that is already in use.
         id: i64,
     },
 

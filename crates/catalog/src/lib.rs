@@ -24,8 +24,13 @@
 //!   case, for non-ASCII letters too.
 //! - **Mutations can be undone.** Setters take one value per photo, develop
 //!   writes return a [`DevelopChange`], membership changes report exactly
-//!   what they added or removed, and a removal returns [`RemovedPhotos`],
-//!   so a caller's undo stack can restore the previous state exactly.
+//!   what they added or removed, and removing photos or deleting keywords
+//!   or collections returns what went ([`RemovedPhotos`],
+//!   [`DeletedKeywords`], [`DeletedCollections`]) to be put back under the
+//!   same ids, so a caller's undo stack can restore the previous state
+//!   exactly. Undone in reverse order, every restore is exact; one that
+//!   could only be partial (a photo's keyword is still deleted, say) is
+//!   refused rather than dropping anything.
 //! - **Unreadable data is never papered over.** Stored JSON this build
 //!   cannot read (damaged, or from a newer version) is reported or passed
 //!   over, and always left in the file as it is; it is never replaced by
@@ -71,12 +76,12 @@ mod text;
 mod tree;
 
 pub use catalog::Catalog;
-pub use collections::{CollectionInfo, CollectionKind};
+pub use collections::{CollectionInfo, CollectionKind, DeletedCollections};
 pub use develop::{DevelopChange, DevelopEdit, HistoryStep};
 pub use error::{CatalogError, Entity, Result};
 pub use folders::FolderInfo;
 pub use imports::ImportRun;
-pub use keywords::KeywordInfo;
+pub use keywords::{DeletedKeywords, KeywordInfo};
 pub use membership::CollectionEntry;
 pub use photos::{NewPhoto, PhotoRecord, TextField};
 pub use presets::Preset;

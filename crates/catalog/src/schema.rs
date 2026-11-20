@@ -154,5 +154,14 @@ CREATE TABLE settings (
     value  TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
 
+-- Numbers drawn for the whole catalog, which only ever count up. Every new
+-- develop_version of any photo is the next value of 'develop_version', so a
+-- photo never gets a version twice, even when it is removed and restored.
+CREATE TABLE counters (
+    name   TEXT PRIMARY KEY NOT NULL,
+    value  INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+INSERT INTO counters (name, value) VALUES ('develop_version', 0);
+
 INSERT INTO collections (kind, name, created_at) VALUES (3, 'Quick Collection', 0);
 ";

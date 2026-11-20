@@ -143,8 +143,11 @@ pub struct PhotoRecord {
     pub creator: String,
     /// Copyright notice; empty for none.
     pub copyright: String,
-    /// Increases on every change to the develop settings; with the id it
-    /// identifies a rendering.
+    /// With the id, identifies a rendering. A new one is drawn from a single
+    /// counter for the whole catalog on every change to the develop settings
+    /// (an undo, redo or history jump included) and when the photo is
+    /// restored, so a photo's version only ever grows and never names two
+    /// different looks.
     pub develop_version: u64,
     /// True when the develop settings differ from the default for the kind.
     pub has_edits: bool,

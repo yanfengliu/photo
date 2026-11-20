@@ -12,7 +12,7 @@ use crate::error::{CatalogError, Entity, Result};
 use crate::query::Source;
 use crate::smart::SmartRules;
 use crate::text::natural_key;
-use crate::tree::{COLLECTIONS, clean_name};
+use crate::tree::{COLLECTIONS, DeletedTree, clean_name};
 
 /// What a collection is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,6 +78,27 @@ pub struct CollectionInfo {
     /// How many photos selecting it shows: members, matches of a smart
     /// collection, or for a set the distinct members of everything inside.
     pub photo_count: u64,
+}
+
+/// Collections that were deleted together: the one asked for and everything
+/// inside it, with their kinds, names, smart rules and members in order.
+///
+/// Returned by [`Catalog::delete_collection`]; hand it to
+/// [`Catalog::restore_collections`] to put everything back under the same
+/// ids. It only lives in memory, and only makes sense for the catalog it
+/// came from.
+#[derive(Clone, Debug)]
+pub struct DeletedCollections {
+    ids: Vec<CollectionId>,
+    deleted: DeletedTree,
+}
+
+impl DeletedCollections {
+    /// Every collection that was deleted: the one asked for first, then
+    /// everything that was inside it, each after the set that held it.
+    pub fn collection_ids(&self) -> &[CollectionId] {
+        &self.ids
+    }
 }
 
 impl Catalog {
@@ -220,12 +241,31 @@ impl Catalog {
 
     /// Delete a collection. Deleting a set deletes everything inside it.
     /// Memberships go with their collection; photos are never deleted.
-    pub fn delete_collection(&mut self, id: CollectionId) -> Result<()> {
+    /// Everything deleted is returned, so that
+    /// [`Catalog::restore_collections`] can undo it.
+    pub fn delete_collection(&mut self, id: CollectionId) -> Result<DeletedCollections> {
         self.write(|tx, _| {
             require_not_quick(tx, id)?;
-            tx.execute("DELETE FROM collections WHERE id = ?1", [id.0])?;
-            Ok(())
+            let deleted = COLLECTIONS.delete_branch(tx, id.0)?;
+            Ok(DeletedCollections {
+                ids: deleted.ids.iter().copied().map(CollectionId).collect(),
+                deleted,
+            })
         })
+    }
+
+    /// Put deleted collections back exactly as they were: the same ids,
+    /// kinds, names and places in the hierarchy, smart rules, and members in
+    /// their order.
+    ///
+    /// Refused, changing nothing, unless that can be done exactly:
+    /// [`CatalogError::AlreadyExists`] if they are back already;
+    /// [`CatalogError::NotFound`] if the set that held them, or a photo in
+    /// them, is gone (put that back first, as an undo stack does); and
+    /// [`CatalogError::NameTaken`] if another collection in that set has
+    /// taken the name.
+    pub fn restore_collections(&mut self, deleted: &DeletedCollections) -> Result<()> {
+        self.write(|tx, _| COLLECTIONS.restore_branch(tx, &deleted.deleted))
     }
 
     /// The rules of a smart collection.

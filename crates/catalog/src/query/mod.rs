@@ -263,7 +263,8 @@ pub struct PhotoSummary {
     pub height: u32,
     /// When the picture was taken, if the file says.
     pub capture_time: Option<DateTime>,
-    /// With `id`, identifies the rendering to show.
+    /// With `id`, identifies the rendering to show; see
+    /// [`PhotoRecord::develop_version`](crate::PhotoRecord::develop_version).
     pub develop_version: u64,
     /// True when the develop settings differ from the default for the kind.
     pub has_edits: bool,
