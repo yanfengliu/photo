@@ -188,7 +188,7 @@ impl Engine {
             capture_time: record.metadata.capture_time,
             develop: Some(self.catalog.develop_settings(record.id)?),
             // Only reading fills this in; it plays no part in a write.
-            newer_settings_format: None,
+            unreadable_settings_format: None,
         })
     }
 
