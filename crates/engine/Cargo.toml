@@ -13,6 +13,9 @@ photo-catalog = { workspace = true }
 photo-core = { workspace = true }
 photo-decode = { workspace = true }
 photo-develop = { workspace = true }
+# Only for re-exporting the tone-curve shapes the curve editor plots, so the
+# interface draws the very functions the pipeline renders with.
+photo-color = { workspace = true }
 photo-export = { workspace = true }
 photo-imaging = { workspace = true }
 photo-xmp = { workspace = true }

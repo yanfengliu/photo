@@ -3335,6 +3335,7 @@ dependencies = [
  "image",
  "log",
  "photo-catalog",
+ "photo-color",
  "photo-core",
  "photo-decode",
  "photo-develop",
