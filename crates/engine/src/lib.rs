@@ -112,12 +112,12 @@ pub use photo_catalog::{
     RatingFilter, SmartField, SmartOp, SmartRule, SmartRules, SmartValue, SmartValueKind, Snapshot,
     Sort, SortDirection, SortKey, Source, TextField,
 };
-pub use photo_decode::{RASTER_EXTENSIONS, RAW_EXTENSIONS, file_kind, is_supported};
 /// The tone-curve shapes the pipeline renders with: the curve editor plots
 /// these, never a copy of their math. `MonotoneCubic` is a point curve
 /// (Fritsch–Carlson), `ParametricShape` the region curve, `ToneCurves` the
 /// whole composite of a set of settings.
 pub use photo_color::tone::{MonotoneCubic, ParametricShape, ToneCurves};
+pub use photo_decode::{RASTER_EXTENSIONS, RAW_EXTENSIONS, file_kind, is_supported};
 pub use photo_develop::Quality;
 pub use photo_export::{
     Anchor, BitDepth, ExistingFile, ExportOutcome, ExportSettings, ExtensionCase, Folder, Format,
