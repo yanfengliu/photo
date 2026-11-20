@@ -16,7 +16,7 @@ use super::*;
 /// The format and the FNV-1a hash of the shape it names. When the test below
 /// fails, bump [`SmartRules::FORMAT`] and replace both numbers here with the
 /// ones its message prints.
-const PINNED: (u32, u64) = (1, 0xcbfb_651a_3ad9_9a39);
+const PINNED: (u32, u64) = (1, 0xd051_98fe_2614_cfcf);
 
 /// Every field. The match has no catch-all arm, so a new field does not
 /// compile until it is looked at here.
@@ -110,8 +110,13 @@ fn key_paths(value: &Value, prefix: &str, out: &mut BTreeSet<String>) {
                 key_paths(item, &format!("{prefix}[]"), out);
             }
         }
-        Value::String(text) if prefix.is_empty() => {
-            out.insert(format!("value:{text}"));
+        // Every string value is recorded at its path, not only the names
+        // listed at the root: a name nested inside a rule (a field, an
+        // operator, or the tag of a value that ever gets one) is part of the
+        // format too. Photo-core's gate was blind to nested names (review
+        // round 1, F27); this one is kept the same.
+        Value::String(text) => {
+            out.insert(format!("{prefix}={text}"));
         }
         _ => {}
     }

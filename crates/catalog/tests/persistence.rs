@@ -375,3 +375,44 @@ fn a_removal_that_fails_part_way_through_leaves_every_photo_in_place() {
     drop(catalog);
     assert_eq!(dump(&Catalog::open(&path).unwrap()), before);
 }
+
+#[test]
+fn a_restore_that_fails_at_its_last_statement_keeps_none_of_the_earlier_ones() {
+    // A removal is one statement, which SQLite undoes on its own; putting
+    // the photos back takes many, so only the transaction around them can
+    // undo the ones that had already succeeded.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.photocat");
+    let mut catalog = Catalog::open(&path).unwrap();
+    let mut photo = raster("/r/a.jpg");
+    photo.keywords = vec!["kept".into()];
+    let ids = import(&mut catalog, &[photo, raster("/r/b.jpg")]);
+    catalog
+        .set_develop_settings(ids[0], &exposure(0.5), Some("Edit"))
+        .unwrap();
+    catalog
+        .create_snapshot(ids[0], "Snap", &exposure(0.5))
+        .unwrap();
+    let album = catalog.create_collection("Album", None).unwrap();
+    catalog.add_to_collection(album, &ids).unwrap();
+    let removed = catalog.remove_photos(&ids[..1]).unwrap();
+    let before = dump(&catalog);
+    drop(catalog);
+    // A trigger left by another program refuses the photo's way back into
+    // the album, the last thing a restore writes: by then its row, history,
+    // snapshot and keyword are all back in the file.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER keep_out BEFORE INSERT ON collection_photos WHEN new.photo_id = {}
+             BEGIN SELECT RAISE(ABORT, 'kept out'); END;",
+            ids[0].0
+        ))
+        .unwrap();
+
+    let mut catalog = Catalog::open(&path).unwrap();
+    assert!(catalog.restore_photos(&removed).is_err());
+    assert_eq!(dump(&catalog), before);
+    drop(catalog);
+    assert_eq!(dump(&Catalog::open(&path).unwrap()), before);
+}
