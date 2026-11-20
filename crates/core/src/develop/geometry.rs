@@ -185,13 +185,18 @@ impl CropRect {
         self.width * frame_aspect / self.height
     }
 
-    /// This rectangle with its sides forced into `MIN_SIDE..=1` and its
-    /// centre moved just far enough that, unrotated, it lies inside the
-    /// frame; `None` when a number is not finite and there is no rectangle
-    /// to keep. Straightened, it can still reach past the frame at its
-    /// corners: whether it does depends on the frame's aspect ratio, which
-    /// settings alone do not know.
-    pub fn sanitized(self) -> Option<Self> {
+    /// This rectangle, as straightened by `angle_degrees`, with its sides
+    /// forced into `MIN_SIDE..=1`; `None` when a number is not finite and
+    /// there is no rectangle to keep.
+    ///
+    /// Unrotated (an angle of zero, or one that is not finite and so will
+    /// be reset to zero), its centre is moved just far enough that it lies
+    /// inside the frame. Straightened, a valid rectangle's centre can sit
+    /// nearer an edge than half its width, and whether its corners fit
+    /// depends on the frame's aspect ratio, which settings alone do not
+    /// know; so the centre is only kept inside the frame and the rectangle
+    /// is otherwise left where it is.
+    pub fn sanitized(self, angle_degrees: f32) -> Option<Self> {
         let finite = [self.cx, self.cy, self.width, self.height]
             .iter()
             .all(|value| value.is_finite());
@@ -200,9 +205,18 @@ impl CropRect {
         }
         let width = self.width.clamp(Self::MIN_SIDE, 1.0);
         let height = self.height.clamp(Self::MIN_SIDE, 1.0);
+        let unrotated = angle_degrees == 0.0 || !angle_degrees.is_finite();
+        let (cx, cy) = if unrotated {
+            (
+                self.cx.clamp(width / 2.0, 1.0 - width / 2.0),
+                self.cy.clamp(height / 2.0, 1.0 - height / 2.0),
+            )
+        } else {
+            (self.cx.clamp(0.0, 1.0), self.cy.clamp(0.0, 1.0))
+        };
         Some(Self {
-            cx: self.cx.clamp(width / 2.0, 1.0 - width / 2.0),
-            cy: self.cy.clamp(height / 2.0, 1.0 - height / 2.0),
+            cx,
+            cy,
             width,
             height,
         })

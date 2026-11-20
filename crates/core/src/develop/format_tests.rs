@@ -17,7 +17,9 @@ use crate::geom::Point;
 /// The format and the FNV-1a hash of the shape it names. When the test below
 /// fails, bump [`SETTINGS_FORMAT`] and replace both numbers here with the
 /// ones its message prints.
-const PINNED: (u32, u64) = (1, 0x4303_a0ef_ec0b_cc6b);
+/// (Re-pinned at format 1 when the gate began recording nested string
+/// values; the stored shape itself did not change.)
+const PINNED: (u32, u64) = (1, 0x4cae_c224_af68_5818);
 
 /// Settings that use every field, every field-carrying enum variant and every
 /// optional value, so their JSON holds every key the format can contain.
@@ -127,8 +129,12 @@ fn key_paths(value: &Value, prefix: &str, out: &mut BTreeSet<String>) {
                 key_paths(item, &format!("{prefix}[]"), out);
             }
         }
-        Value::String(text) if prefix.is_empty() => {
-            out.insert(format!("value:{text}"));
+        // Every string value is recorded at its path, not only the enum
+        // names listed at the root: a tag nested inside the settings, such
+        // as a mask shape's "kind", is part of the format too (review round
+        // 1, F27, found the gate blind to it).
+        Value::String(text) => {
+            out.insert(format!("{prefix}={text}"));
         }
         _ => {}
     }

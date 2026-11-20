@@ -176,7 +176,8 @@ impl DevelopSettings {
     /// spot, gradient or crop rectangle whose position is not finite is
     /// dropped, as is a brush stroke with no finite point.
     pub fn sanitize_for(&mut self, kind: FileKind) {
-        self.crop.rect = self.crop.rect.and_then(CropRect::sanitized);
+        let angle = self.crop.angle;
+        self.crop.rect = self.crop.rect.and_then(|rect| rect.sanitized(angle));
         self.crop.constraint = self.crop.constraint.sanitized();
         for mask in &mut self.masks {
             mask.components = std::mem::take(&mut mask.components)
@@ -435,6 +436,31 @@ mod tests {
         };
         kept.sanitize_for(FileKind::Raster);
         assert_eq!(kept.crop, legal);
+    }
+
+    /// A straightened crop is valid when its rotated corners fit, which can
+    /// put its centre nearer an edge than half its unrotated width. Review
+    /// round 1 (F26) found the sanitiser moving such a crop on every read.
+    #[test]
+    fn sanitize_leaves_a_straightened_crop_that_fits_where_it_is() {
+        let rect = CropRect {
+            cx: 0.16,
+            cy: 0.5,
+            width: 0.4,
+            height: 0.02,
+        };
+        assert!(rect.fits(45.0, 1.0), "the example fits a square frame");
+        let crop = Crop {
+            rect: Some(rect),
+            angle: 45.0,
+            constraint: CropConstraint::Free,
+        };
+        let mut settings = DevelopSettings {
+            crop,
+            ..Default::default()
+        };
+        settings.sanitize_for(FileKind::Raster);
+        assert_eq!(settings.crop, crop);
     }
 
     /// JSON has no infinity, but a number too large for `f32`, such as
