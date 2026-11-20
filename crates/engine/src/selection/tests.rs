@@ -136,14 +136,22 @@ fn when_nothing_selected_survives_the_nearest_photo_in_the_list_becomes_active()
     selection.select_only(&before, p(3));
     let after = Ids::of(&[1, 2, 5, 6]);
     selection.retain(&before.0, &after);
-    assert_eq!(selection.active(), Some(p(2)), "2 is one place from 3, 5 is two");
+    assert_eq!(
+        selection.active(),
+        Some(p(2)),
+        "2 is one place from 3, 5 is two"
+    );
     assert_eq!(ids(&selection), [2]);
 
     let mut selection = Selection::default();
     selection.select_only(&before, p(3));
     let after = Ids::of(&[1, 2, 4, 5]);
     selection.retain(&before.0, &after);
-    assert_eq!(selection.active(), Some(p(4)), "the following photo wins a tie");
+    assert_eq!(
+        selection.active(),
+        Some(p(4)),
+        "the following photo wins a tie"
+    );
 
     let mut selection = Selection::default();
     selection.select_only(&before, p(3));

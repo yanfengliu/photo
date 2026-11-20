@@ -56,7 +56,7 @@ fn finished(receiver: &Receiver<TestEvent>, count: usize) -> Vec<(JobId, u32)> {
                 outcome: Outcome::Finished(value),
             } => out.push((job, value)),
             Event::Done { .. } => panic!("a job did not finish"),
-            Event::Progress { .. } => {}
+            Event::Progress(_) => {}
         }
     }
     out
@@ -120,7 +120,7 @@ fn progress_arrives_before_the_outcome() {
         }),
     });
     match events.recv_timeout(PATIENCE).unwrap() {
-        Event::Progress { progress, .. } => assert_eq!(progress, "half way"),
+        Event::Progress(progress) => assert_eq!(progress, "half way"),
         Event::Done { .. } => panic!("the outcome overtook the progress"),
     }
     assert_eq!(finished(&events, 1)[0].1, 7);
@@ -225,7 +225,14 @@ fn dropping_the_pool_abandons_queued_jobs_and_joins_every_thread() {
 
     let start = Instant::now();
     drop(pool);
-    assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
-    assert!(shared.upgrade().is_none(), "a worker thread outlived the pool");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(
+        shared.upgrade().is_none(),
+        "a worker thread outlived the pool"
+    );
     assert!(ran.load(Ordering::SeqCst) < 50);
 }

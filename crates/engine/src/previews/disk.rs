@@ -133,11 +133,7 @@ pub(crate) fn write(path: &Path, header: &Header, image: &Rgba8Image) -> io::Res
         .parent()
         .ok_or_else(|| io::Error::other("a preview path has no directory"))?;
     fs::create_dir_all(dir)?;
-    let temporary = dir.join(format!(
-        ".{}-{}.tmp",
-        std::process::id(),
-        next_temporary()
-    ));
+    let temporary = dir.join(format!(".{}-{}.tmp", std::process::id(), next_temporary()));
     let written = fs::write(&temporary, &bytes).and_then(|()| fs::rename(&temporary, path));
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -150,24 +146,43 @@ fn next_temporary() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The develop versions of this photo's files of `size`, with their paths.
+/// Only the photo's own directory is listed.
+fn versions(root: &Path, photo: PhotoId, size: PreviewSize) -> Vec<(u64, PathBuf)> {
+    let Ok(entries) = fs::read_dir(photo_dir(root, photo)) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}-", size.file_tag());
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let version = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix(&prefix))
+                .and_then(|rest| rest.strip_suffix(".jpg"))
+                .and_then(|number| number.parse::<u64>().ok())?;
+            Some((version, entry.path()))
+        })
+        .collect()
+}
+
+/// Whether a file of `size` for a develop version newer than `version` is
+/// already there, which makes one for `version` stale before it is written.
+pub(crate) fn newer_exists(root: &Path, photo: PhotoId, size: PreviewSize, version: u64) -> bool {
+    versions(root, photo, size)
+        .iter()
+        .any(|(found, _)| *found > version)
+}
+
 /// Delete this photo's files of `size` for develop versions older than
 /// `version`. Only the photo's own directory is listed.
 pub(crate) fn remove_older(root: &Path, photo: PhotoId, size: PreviewSize, version: u64) {
-    let dir = photo_dir(root, photo);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-    let prefix = format!("{}-", size.file_tag());
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let older = name
-            .to_str()
-            .and_then(|name| name.strip_prefix(&prefix))
-            .and_then(|rest| rest.strip_suffix(".jpg"))
-            .and_then(|number| number.parse::<u64>().ok())
-            .is_some_and(|found| found < version);
-        if older && let Err(error) = fs::remove_file(entry.path()) {
-            log::warn!("cannot delete stale preview {}: {error}", entry.path().display());
+    for (found, path) in versions(root, photo, size) {
+        if found < version
+            && let Err(error) = fs::remove_file(&path)
+        {
+            log::warn!("cannot delete stale preview {}: {error}", path.display());
         }
     }
 }
@@ -293,7 +308,9 @@ fn find_header(jpeg: &[u8]) -> Option<&[u8]> {
         if marker[0] != 0xff || marker[1] == START_OF_SCAN {
             return None;
         }
-        let length = usize::from(u16::from_be_bytes(jpeg.get(at + 2..at + 4)?.try_into().ok()?));
+        let length = usize::from(u16::from_be_bytes(
+            jpeg.get(at + 2..at + 4)?.try_into().ok()?,
+        ));
         let payload = jpeg.get(at + 4..at + 2 + length)?;
         if marker[1] == COMMENT && payload.starts_with(MAGIC) {
             return Some(payload);

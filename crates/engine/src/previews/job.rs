@@ -93,9 +93,17 @@ impl PreviewJob {
                     source: stamp,
                     histogram,
                 };
-                match disk::write(&file, &header, &rendered.image) {
-                    Ok(()) => disk::remove_older(&self.root, self.photo, self.size, self.version),
-                    Err(error) => log::warn!("cannot write preview {}: {error}", file.display()),
+                // A job for a newer version can finish first; this one's
+                // file would then be stale before it was written.
+                if !disk::newer_exists(&self.root, self.photo, self.size, self.version) {
+                    match disk::write(&file, &header, &rendered.image) {
+                        Ok(()) => {
+                            disk::remove_older(&self.root, self.photo, self.size, self.version);
+                        }
+                        Err(error) => {
+                            log::warn!("cannot write preview {}: {error}", file.display());
+                        }
+                    }
                 }
                 JobResult {
                     preview: Ok(Preview::new(

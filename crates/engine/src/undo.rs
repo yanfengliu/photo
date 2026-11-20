@@ -2,13 +2,20 @@
 //!
 //! Every command holds exactly what it needs to move the catalog between its
 //! two states, per photo: the values each photo had before and after, the
-//! develop changes the catalog returned, the restore data of a removal. The
-//! stacks live in memory for the session only; they are never persisted.
+//! develop changes the catalog returned, the restore data of a removal or a
+//! deletion. Restore data is only exact when the stack is unwound in order,
+//! which is the only way it is used: newest first for undo, and a batch's
+//! parts in reverse. The stacks live in memory for the session only; they
+//! are never persisted.
+
+mod tree;
 
 use photo_catalog::{
     Catalog, CatalogError, CollectionEntry, DevelopChange, RemovedPhotos, TextField,
 };
 use photo_core::meta::{CollectionId, ColorLabel, Flag, KeywordId, PhotoId, Rating};
+
+pub(crate) use tree::{Branch, Collections, Keywords, RulesEdit, TreeEdit};
 
 use crate::browse::{Attribute, Change};
 
@@ -23,26 +30,21 @@ pub(crate) struct Values<T> {
     after: Vec<(PhotoId, T)>,
 }
 
-impl<T: Clone + PartialEq> Values<T> {
-    /// The change that gives each photo `next(current)`. `None` when no
+impl<T: PartialEq> Values<T> {
+    /// The change from each photo's value before to its value after,
+    /// leaving out the photos whose value stays the same. `None` when no
     /// photo would change.
-    pub(crate) fn new(current: Vec<(PhotoId, T)>, next: impl Fn(&T) -> T) -> Option<Self> {
-        let (before, after): (Vec<_>, Vec<_>) = current
+    pub(crate) fn changes(items: impl IntoIterator<Item = (PhotoId, T, T)>) -> Option<Self> {
+        let (before, after): (Vec<_>, Vec<_>) = items
             .into_iter()
-            .filter_map(|(photo, value)| {
-                let changed = next(&value);
-                (changed != value).then(|| ((photo, value), (photo, changed)))
-            })
+            .filter(|(_, before, after)| before != after)
+            .map(|(photo, before, after)| ((photo, before), (photo, after)))
             .unzip();
         (!after.is_empty()).then_some(Self { before, after })
     }
 
     pub(crate) fn photos(&self) -> Vec<PhotoId> {
         self.after.iter().map(|(photo, _)| *photo).collect()
-    }
-
-    pub(crate) fn after(&self) -> &[(PhotoId, T)] {
-        &self.after
     }
 }
 
@@ -70,11 +72,11 @@ pub(crate) struct Membership {
 #[derive(Clone, Debug)]
 pub(crate) enum Presence {
     Present(Vec<PhotoId>),
-    Removed(RemovedPhotos),
+    Removed(Box<RemovedPhotos>),
 }
 
 /// One undoable change to the catalog.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum Command {
     Ratings(Values<Rating>),
     Flags(Values<Flag>),
@@ -87,6 +89,9 @@ pub(crate) enum Command {
     /// Photos removed from the catalog: removed after the command.
     Removal(Presence),
     Membership(Membership),
+    Collections(TreeEdit<Collections>),
+    Keywords(TreeEdit<Keywords>),
+    SmartRules(RulesEdit),
     /// Several commands that undo and redo as one, in order.
     Batch(Vec<Command>),
 }
@@ -104,6 +109,9 @@ impl Command {
             Self::Copies(presence) => remove(catalog, presence),
             Self::Removal(presence) => restore(catalog, presence),
             Self::Membership(membership) => toggle_membership(catalog, membership),
+            Self::Collections(edit) => edit.undo(catalog),
+            Self::Keywords(edit) => edit.undo(catalog),
+            Self::SmartRules(edit) => edit.undo(catalog),
             Self::Batch(commands) => commands
                 .iter_mut()
                 .rev()
@@ -123,6 +131,9 @@ impl Command {
             Self::Copies(presence) => restore(catalog, presence),
             Self::Removal(presence) => remove(catalog, presence),
             Self::Membership(membership) => toggle_membership(catalog, membership),
+            Self::Collections(edit) => edit.redo(catalog),
+            Self::Keywords(edit) => edit.redo(catalog),
+            Self::SmartRules(edit) => edit.redo(catalog),
             Self::Batch(commands) => commands
                 .iter_mut()
                 .try_for_each(|command| command.redo(catalog)),
@@ -149,6 +160,9 @@ impl Command {
                 membership.collection,
                 membership.photos.clone(),
             )),
+            Self::Collections(_) | Self::Keywords(_) | Self::SmartRules(_) => {
+                out.push(Change::Organisation);
+            }
             Self::Batch(commands) => commands.iter().for_each(|command| command.changes(out)),
         }
     }
@@ -164,7 +178,10 @@ fn toggle_keyword(catalog: &mut Catalog, link: &mut KeywordLink) -> Result<(), C
     Ok(())
 }
 
-fn toggle_membership(catalog: &mut Catalog, membership: &mut Membership) -> Result<(), CatalogError> {
+fn toggle_membership(
+    catalog: &mut Catalog,
+    membership: &mut Membership,
+) -> Result<(), CatalogError> {
     if membership.inside {
         membership.entries =
             catalog.remove_from_collection(membership.collection, &membership.photos)?;
@@ -178,7 +195,7 @@ fn toggle_membership(catalog: &mut Catalog, membership: &mut Membership) -> Resu
 /// Remove present photos, keeping what it takes to restore them.
 fn remove(catalog: &mut Catalog, presence: &mut Presence) -> Result<(), CatalogError> {
     if let Presence::Present(photos) = presence {
-        *presence = Presence::Removed(catalog.remove_photos(photos)?);
+        *presence = Presence::Removed(Box::new(catalog.remove_photos(photos)?));
     }
     Ok(())
 }
@@ -193,7 +210,7 @@ fn restore(catalog: &mut Catalog, presence: &mut Presence) -> Result<(), Catalog
 }
 
 /// A command with the label the UI shows for it.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Entry {
     pub(crate) label: String,
     pub(crate) command: Command,
@@ -255,14 +272,13 @@ mod tests {
 
     #[test]
     fn values_list_only_the_photos_that_change() {
-        let current = vec![
-            (PhotoId(1), Rating::new(5)),
-            (PhotoId(2), Rating::new(3)),
-        ];
-        let values = Values::new(current, |_| Rating::new(5)).unwrap();
+        let five = Rating::new(5);
+        let changes = [(PhotoId(1), five, five), (PhotoId(2), Rating::new(3), five)];
+        let values = Values::changes(changes).unwrap();
         assert_eq!(values.before, [(PhotoId(2), Rating::new(3))]);
-        assert_eq!(values.after(), [(PhotoId(2), Rating::new(5))]);
-        assert!(Values::new(vec![(PhotoId(1), Rating::new(5))], |_| Rating::new(5)).is_none());
+        assert_eq!(values.after, [(PhotoId(2), five)]);
+        assert_eq!(values.photos(), [PhotoId(2)]);
+        assert!(Values::changes([(PhotoId(1), five, five)]).is_none());
     }
 
     #[test]
@@ -276,7 +292,10 @@ mod tests {
         assert_eq!(history.undo[0].label, "step 5");
         let entry = history.pop_undo().unwrap();
         history.undone(entry);
-        assert_eq!(history.redo_label(), Some(format!("step {}", LIMIT + 4).as_str()));
+        assert_eq!(
+            history.redo_label(),
+            Some(format!("step {}", LIMIT + 4).as_str())
+        );
         history.record("new".into(), command());
         assert_eq!(history.redo_label(), None);
         assert_eq!(history.undo_label(), Some("new"));

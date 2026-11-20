@@ -1,0 +1,194 @@
+//! What the Library shows and how the user moves through it: the source,
+//! filter and sort; the photo list; the panel lists; the selection; the full
+//! record of any photo. Every accessor here is a cheap read of state the
+//! engine already holds, unless it says otherwise.
+
+use photo_catalog::{
+    CatalogError, CollectionInfo, Entity, Facet, FacetValue, Filter, FolderInfo, HistoryStep,
+    KeywordInfo, PhotoRecord, PhotoSummary, Sort, Source,
+};
+use photo_core::develop::DevelopSettings;
+use photo_core::meta::PhotoId;
+
+use crate::browse::{Browser, Refresh, SourceCounts};
+use crate::engine::Engine;
+use crate::error::EngineError;
+use crate::selection::{Listing, Movement, Selection};
+
+impl Engine {
+    /// Where the list looks.
+    pub fn source(&self) -> &Source {
+        &self.browser.query().source
+    }
+
+    /// Which of the source's photos the list keeps.
+    pub fn filter(&self) -> &Filter {
+        &self.browser.query().filter
+    }
+
+    /// The list's order.
+    pub fn sort(&self) -> Sort {
+        self.browser.query().sort
+    }
+
+    /// Show another source. A folder, collection or keyword that does not
+    /// exist is refused and the list stays as it was.
+    pub fn set_source(&mut self, source: Source) -> Result<(), EngineError> {
+        if let Some((entity, id)) = self.unknown(&source) {
+            return Err(CatalogError::NotFound { entity, id }.into());
+        }
+        self.requery(|browser| browser.set_source(source))
+    }
+
+    /// Filter the list.
+    pub fn set_filter(&mut self, filter: Filter) -> Result<(), EngineError> {
+        self.requery(|browser| browser.set_filter(filter))
+    }
+
+    /// Order the list.
+    pub fn set_sort(&mut self, sort: Sort) -> Result<(), EngineError> {
+        self.requery(|browser| browser.set_sort(sort))
+    }
+
+    /// The record a source refers to that the catalog does not hold.
+    fn unknown(&self, source: &Source) -> Option<(Entity, i64)> {
+        match *source {
+            Source::AllPhotos | Source::QuickCollection | Source::PreviousImport => None,
+            Source::Folder { id, .. } => (!self.folders().iter().any(|folder| folder.id == id))
+                .then_some((Entity::Folder, id.0)),
+            Source::Collection(id) => (id != self.quick_collection()
+                && !self
+                    .collections()
+                    .iter()
+                    .any(|collection| collection.id == id))
+            .then_some((Entity::Collection, id.0)),
+            Source::Keyword(id) => (!self.keywords().iter().any(|keyword| keyword.id == id))
+                .then_some((Entity::Keyword, id.0)),
+        }
+    }
+
+    /// Change the query and re-read the list; on failure put the query
+    /// back as it was.
+    fn requery(&mut self, change: impl FnOnce(&mut Browser)) -> Result<(), EngineError> {
+        let before = self.browser.query().clone();
+        change(&mut self.browser);
+        if let Err(error) = self.refresh(&Refresh::list()) {
+            self.browser.set_source(before.source);
+            self.browser.set_filter(before.filter);
+            self.browser.set_sort(before.sort);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// The photos the source, filter and sort select, in order.
+    pub fn photos(&self) -> &[PhotoSummary] {
+        self.browser.photos()
+    }
+
+    /// Where a photo is in [`Engine::photos`]. Constant time.
+    pub fn index_of(&self, photo: PhotoId) -> Option<usize> {
+        self.browser.index_of(photo)
+    }
+
+    /// The summary of a photo in the list.
+    pub fn summary(&self, photo: PhotoId) -> Option<&PhotoSummary> {
+        self.browser.summary(photo)
+    }
+
+    /// Every folder with its photo count, ordered by path.
+    pub fn folders(&self) -> &[FolderInfo] {
+        self.browser.folders()
+    }
+
+    /// Every collection, set and smart collection (not the quick
+    /// collection) with its photo count, in name order.
+    pub fn collections(&self) -> &[CollectionInfo] {
+        self.browser.collections()
+    }
+
+    /// Every keyword with the number of photos it is assigned to directly,
+    /// in name order.
+    pub fn keywords(&self) -> &[KeywordInfo] {
+        self.browser.keywords()
+    }
+
+    /// Photo counts of All Photographs, the Quick Collection and Previous
+    /// Import.
+    pub fn source_counts(&self) -> SourceCounts {
+        self.browser.counts()
+    }
+
+    /// The values of a metadata facet among the photos of the current
+    /// source that pass the filter (ignoring the filter's own condition on
+    /// that facet), with counts. Computed on first use after each change of
+    /// the list, then cached.
+    pub fn facet_values(&self, facet: Facet) -> Result<Vec<FacetValue>, EngineError> {
+        Ok(self.browser.facet_values(&self.catalog, facet)?)
+    }
+
+    /// Everything the catalog knows about a photo, whether or not it is in
+    /// the list. Reads the catalog.
+    pub fn photo(&self, photo: PhotoId) -> Result<PhotoRecord, EngineError> {
+        Ok(self.catalog.photo(photo)?)
+    }
+
+    /// A photo's develop settings. Reads the catalog.
+    pub fn develop_settings(&self, photo: PhotoId) -> Result<DevelopSettings, EngineError> {
+        Ok(self.catalog.develop_settings(photo)?)
+    }
+
+    /// A photo's develop history, oldest first. Reads the catalog.
+    pub fn history(&self, photo: PhotoId) -> Result<Vec<HistoryStep>, EngineError> {
+        Ok(self.catalog.history(photo)?)
+    }
+
+    /// The selection.
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// The active photo, if any.
+    pub fn active_photo(&self) -> Option<PhotoId> {
+        self.selection.active()
+    }
+
+    /// Select only `photo`. Photos not in the list cannot be selected;
+    /// returns whether the selection changed.
+    pub fn select_only(&mut self, photo: PhotoId) -> bool {
+        self.selection.select_only(&self.browser, photo)
+    }
+
+    /// Add `photo` to the selection or take it out; see
+    /// [`Selection`] for how the active photo follows.
+    pub fn toggle_selected(&mut self, photo: PhotoId) -> bool {
+        self.selection.toggle(&self.browser, photo)
+    }
+
+    /// Select the range from the anchor to `photo`.
+    pub fn extend_selection_to(&mut self, photo: PhotoId) -> bool {
+        self.selection.extend_to(&self.browser, photo)
+    }
+
+    /// Select every photo in the list.
+    pub fn select_all(&mut self) {
+        self.selection.select_all(&self.browser);
+    }
+
+    /// Select nothing.
+    pub fn select_none(&mut self) {
+        self.selection.clear();
+    }
+
+    /// Move the active photo; with `extend`, grow the range from the anchor
+    /// instead of selecting the photo alone. Returns false when the list is
+    /// empty.
+    pub fn move_active(&mut self, movement: Movement, extend: bool) -> bool {
+        self.selection.move_active(&self.browser, movement, extend)
+    }
+
+    /// How many photos the list holds.
+    pub fn photo_count(&self) -> usize {
+        self.browser.count()
+    }
+}

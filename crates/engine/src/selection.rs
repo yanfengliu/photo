@@ -250,7 +250,11 @@ fn nearest(list: &impl Listing, candidates: &[PhotoId], at: usize) -> Option<Pho
 
 /// The photo of `candidates` whose place in `previous` is closest to `at`,
 /// preferring the following one on a tie.
-fn nearest_by_old_place(previous: &[PhotoId], candidates: &[PhotoId], at: usize) -> Option<PhotoId> {
+fn nearest_by_old_place(
+    previous: &[PhotoId],
+    candidates: &[PhotoId],
+    at: usize,
+) -> Option<PhotoId> {
     let places: HashMap<PhotoId, usize> = previous
         .iter()
         .enumerate()

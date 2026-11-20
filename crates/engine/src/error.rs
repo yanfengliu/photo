@@ -38,9 +38,4 @@ pub enum EngineError {
         /// Why it was refused.
         reason: &'static str,
     },
-
-    /// The photo is not in the current list, so the operation that needs
-    /// its place in the list cannot run.
-    #[error("photo {0} is not in the current list")]
-    NotInList(photo_core::meta::PhotoId),
 }

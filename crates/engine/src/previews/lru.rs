@@ -86,6 +86,7 @@ impl<K: Hash + Eq + Clone, V> Lru<K, V> {
     }
 
     /// Bytes held.
+    #[cfg(test)]
     pub(crate) fn used(&self) -> usize {
         self.used
     }

@@ -25,14 +25,16 @@ mod disk;
 mod job;
 mod lru;
 mod render;
+mod types;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use photo_core::image::Rgba8Image;
 use photo_core::meta::{FileKind, PhotoId};
 use photo_imaging::Histogram;
+
+pub use types::{LoadState, Preview, PreviewOrigin, PreviewSize, PreviewState};
 
 use crate::engine::{Engine, JobFailure};
 use crate::jobs::{JobKey, Lane};
@@ -45,183 +47,6 @@ const THUMBNAIL_MEMORY: usize = 192 << 20;
 const STANDARD_MEMORY: usize = 256 << 20;
 /// Bytes of import-candidate thumbnails kept in memory.
 const CANDIDATE_MEMORY: usize = 64 << 20;
-
-/// The two preview sizes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum PreviewSize {
-    /// For grid cells and the filmstrip: longer edge at most 384 pixels.
-    Thumbnail,
-    /// For the loupe and the histogram: longer edge at most 2048 pixels.
-    Standard,
-}
-
-impl PreviewSize {
-    /// Both sizes, smaller first.
-    pub const ALL: [Self; 2] = [Self::Thumbnail, Self::Standard];
-
-    /// The most pixels along the longer edge.
-    pub const fn long_edge(self) -> u32 {
-        match self {
-            Self::Thumbnail => 384,
-            Self::Standard => 2048,
-        }
-    }
-
-    pub(crate) const fn file_tag(self) -> &'static str {
-        match self {
-            Self::Thumbnail => "thumb",
-            Self::Standard => "standard",
-        }
-    }
-
-    pub(crate) const fn jpeg_quality(self) -> u8 {
-        match self {
-            Self::Thumbnail => 85,
-            Self::Standard => 90,
-        }
-    }
-
-    pub(crate) const fn code(self) -> u8 {
-        match self {
-            Self::Thumbnail => 0,
-            Self::Standard => 1,
-        }
-    }
-
-    pub(crate) const fn from_code(code: u8) -> Option<Self> {
-        match code {
-            0 => Some(Self::Thumbnail),
-            1 => Some(Self::Standard),
-            _ => None,
-        }
-    }
-}
-
-/// Where a preview's pixels came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PreviewOrigin {
-    /// The decoder's fast preview: a RAW file's embedded camera JPEG, or a
-    /// raster file scaled down. Only the photo's orientation is applied.
-    EmbeddedPreview,
-    /// A render of the photo's develop settings.
-    Rendered,
-}
-
-impl PreviewOrigin {
-    pub(crate) const fn code(self) -> u8 {
-        match self {
-            Self::EmbeddedPreview => 1,
-            Self::Rendered => 2,
-        }
-    }
-
-    pub(crate) const fn from_code(code: u8) -> Option<Self> {
-        match code {
-            1 => Some(Self::EmbeddedPreview),
-            2 => Some(Self::Rendered),
-            _ => None,
-        }
-    }
-}
-
-/// Ready preview pixels. Cloning is cheap: the pixels are shared.
-#[derive(Clone, Debug)]
-pub struct Preview {
-    image: Arc<Rgba8Image>,
-    version: u64,
-    size: PreviewSize,
-    origin: PreviewOrigin,
-    histogram: Option<Arc<Histogram>>,
-}
-
-impl Preview {
-    fn new(
-        image: Rgba8Image,
-        version: u64,
-        size: PreviewSize,
-        origin: PreviewOrigin,
-        histogram: Option<Histogram>,
-    ) -> Self {
-        Self {
-            image: Arc::new(image),
-            version,
-            size,
-            origin,
-            histogram: histogram.map(Arc::new),
-        }
-    }
-
-    /// The pixels: opaque sRGB RGBA8, upright, longer edge at most the
-    /// size's.
-    pub fn image(&self) -> &Arc<Rgba8Image> {
-        &self.image
-    }
-
-    /// The develop version these pixels show (0 for an import candidate).
-    pub fn version(&self) -> u64 {
-        self.version
-    }
-
-    /// Which size this is.
-    pub fn size(&self) -> PreviewSize {
-        self.size
-    }
-
-    /// Where the pixels came from.
-    pub fn origin(&self) -> PreviewOrigin {
-        self.origin
-    }
-
-    /// For a standard preview, the histogram of exactly these pixels.
-    pub fn histogram(&self) -> Option<&Arc<Histogram>> {
-        self.histogram.as_ref()
-    }
-
-    fn bytes(&self) -> usize {
-        self.image.pixels.len() + self.histogram.as_ref().map_or(0, |_| 4 * 256 * 4)
-    }
-}
-
-/// The answer to a preview request.
-#[derive(Clone, Debug)]
-pub enum PreviewState {
-    /// The pixels for the photo's current develop version.
-    Ready(Preview),
-    /// A job is queued or running for it (possibly queued by this call);
-    /// poll and ask again.
-    Pending,
-    /// It cannot be made, for this reason. Not retried for the same develop
-    /// version.
-    Failed(String),
-}
-
-impl PreviewState {
-    /// The preview, when ready.
-    pub fn ready(&self) -> Option<&Preview> {
-        match self {
-            Self::Ready(preview) => Some(preview),
-            Self::Pending | Self::Failed(_) => None,
-        }
-    }
-}
-
-/// How far the pixels for one photo at one size have got, for the photo's
-/// current develop version. The UI shows what is there and never has to
-/// infer it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LoadState {
-    /// Nothing has been asked for, or what was there has been evicted.
-    Nothing,
-    /// A job is queued or running.
-    Pending,
-    /// Pixels are in memory.
-    Ready {
-        /// Where they came from: the embedded preview, or a render.
-        origin: PreviewOrigin,
-    },
-    /// Making them failed, for this reason.
-    Failed(String),
-}
 
 /// The memory side of the preview service.
 pub(crate) struct Previews {
@@ -293,7 +118,7 @@ impl Engine {
     /// ready (asking for it if it is not).
     pub fn histogram(&mut self, photo: PhotoId) -> Option<Arc<Histogram>> {
         match self.standard_preview(photo) {
-            PreviewState::Ready(preview) => preview.histogram,
+            PreviewState::Ready(preview) => preview.histogram().cloned(),
             PreviewState::Pending | PreviewState::Failed(_) => None,
         }
     }
@@ -310,7 +135,7 @@ impl Engine {
         };
         let key = (photo, size);
         if let Some(preview) = self.previews.memory(size).get(&photo)
-            && preview.version == subject.version
+            && preview.version() == subject.version
         {
             return PreviewState::Ready(preview.clone());
         }
@@ -365,16 +190,21 @@ impl Engine {
             .browser
             .summary(photo)
             .map(|summary| summary.develop_version)
-            .or_else(|| self.catalog.photo(photo).ok().map(|record| record.develop_version))
+            .or_else(|| {
+                self.catalog
+                    .photo(photo)
+                    .ok()
+                    .map(|record| record.develop_version)
+            })
         else {
             return LoadState::Nothing;
         };
         let key = (photo, size);
         if let Some(preview) = self.previews.peek(photo, size)
-            && preview.version == version
+            && preview.version() == version
         {
             return LoadState::Ready {
-                origin: preview.origin,
+                origin: preview.origin(),
             };
         }
         if self
@@ -418,7 +248,10 @@ impl Engine {
             move |engine, failure| {
                 engine.previews.candidates_in_flight.remove(&failed_path);
                 if let JobFailure::Panicked(message) = failure {
-                    engine.previews.candidates_failed.insert(failed_path, message);
+                    engine
+                        .previews
+                        .candidates_failed
+                        .insert(failed_path, message);
                 }
                 true
             },
@@ -469,7 +302,7 @@ impl Engine {
                 let newer_kept = self
                     .previews
                     .peek(photo, size)
-                    .is_some_and(|kept| kept.version > version);
+                    .is_some_and(|kept| kept.version() > version);
                 if !newer_kept {
                     let bytes = preview.bytes();
                     self.previews.memory(size).insert(photo, preview, bytes);
@@ -477,7 +310,9 @@ impl Engine {
                 self.previews.failed.remove(&(photo, size));
             }
             Err(reason) => {
-                self.previews.failed.insert((photo, size), (version, reason));
+                self.previews
+                    .failed
+                    .insert((photo, size), (version, reason));
             }
         }
         let recorded = self.browser.summary(photo).map(|summary| summary.missing);
@@ -499,7 +334,9 @@ impl Engine {
         self.finish_in_flight(photo, size, version);
         if let JobFailure::Panicked(message) = failure {
             let reason = format!("the preview could not be made: {message}");
-            self.previews.failed.insert((photo, size), (version, reason));
+            self.previews
+                .failed
+                .insert((photo, size), (version, reason));
         }
         true
     }

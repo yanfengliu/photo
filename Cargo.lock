@@ -3313,10 +3313,13 @@ dependencies = [
 name = "photo-develop"
 version = "0.3.0"
 dependencies = [
+ "image",
  "photo-color",
  "photo-core",
  "photo-imaging",
+ "photo-testkit",
  "rayon",
+ "tempfile",
 ]
 
 [[package]]
@@ -3332,8 +3335,6 @@ dependencies = [
  "photo-testkit",
  "photo-xmp",
  "rayon",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]

@@ -60,6 +60,7 @@ fn apply_sidecar(photo: &mut NewPhoto, data: XmpData) {
     photo.rating = data.rating;
     photo.flag = data.flag;
     photo.label = data.label;
+    photo.keywords = sidecar_keywords(&data);
     let texts = [
         (&mut photo.title, data.title),
         (&mut photo.caption, data.caption),
@@ -71,7 +72,6 @@ fn apply_sidecar(photo: &mut NewPhoto, data: XmpData) {
             *field = text;
         }
     }
-    photo.keywords = sidecar_keywords(&data);
     photo.develop = data.develop;
 }
 
@@ -186,9 +186,8 @@ pub(crate) fn copy_into(
         std::process::id(),
         next_temporary()
     ));
-    let copied = copy_data(source, &temporary, &should_stop).and_then(|()| {
-        claim_and_publish(&temporary, folder, Path::new(name)).map_err(failed)
-    });
+    let copied = copy_data(source, &temporary, &should_stop)
+        .and_then(|()| claim_and_publish(&temporary, folder, Path::new(name)).map_err(failed));
     if copied.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -207,7 +206,11 @@ fn next_temporary() -> u64 {
 }
 
 /// Copy the bytes, flush them to disk and carry the modification time over.
-fn copy_data(source: &Path, target: &Path, should_stop: &impl Fn() -> bool) -> Result<(), CopyError> {
+fn copy_data(
+    source: &Path,
+    target: &Path,
+    should_stop: &impl Fn() -> bool,
+) -> Result<(), CopyError> {
     let failed = |error: io::Error| CopyError::Failed(error.to_string());
     let mut input = File::open(source).map_err(failed)?;
     let modified = input.metadata().and_then(|stat| stat.modified()).ok();
@@ -230,7 +233,10 @@ fn copy_data(source: &Path, target: &Path, should_stop: &impl Fn() -> bool) -> R
     if let Some(modified) = modified
         && let Err(error) = output.set_modified(modified)
     {
-        log::warn!("cannot keep the modification time of {}: {error}", source.display());
+        log::warn!(
+            "cannot keep the modification time of {}: {error}",
+            source.display()
+        );
     }
     output.sync_all().map_err(failed)
 }
@@ -240,7 +246,11 @@ fn copy_data(source: &Path, target: &Path, should_stop: &impl Fn() -> bool) -> R
 fn claim_and_publish(temporary: &Path, folder: &Path, name: &Path) -> io::Result<PathBuf> {
     for attempt in 0..NAME_ATTEMPTS {
         let target = folder.join(numbered(name, attempt));
-        match OpenOptions::new().write(true).create_new(true).open(&target) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
             Ok(claim) => drop(claim),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
@@ -264,9 +274,14 @@ fn numbered(name: &Path, attempt: u32) -> PathBuf {
     if attempt == 0 {
         return name.to_path_buf();
     }
-    let stem = name.file_stem().map(|stem| stem.to_string_lossy()).unwrap_or_default();
+    let stem = name
+        .file_stem()
+        .map(|stem| stem.to_string_lossy())
+        .unwrap_or_default();
     match name.extension() {
-        Some(extension) => PathBuf::from(format!("{stem}-{attempt}.{}", extension.to_string_lossy())),
+        Some(extension) => {
+            PathBuf::from(format!("{stem}-{attempt}.{}", extension.to_string_lossy()))
+        }
         None => PathBuf::from(format!("{stem}-{attempt}")),
     }
 }
@@ -279,15 +294,23 @@ mod tests {
     fn date_patterns_expand_their_tokens_and_keep_everything_else() {
         let date = DateTime::new(2024, 3, 5, 7, 8, 9).unwrap();
         let pattern = DatePattern::new("YYYY/YYYY-MM-DD").unwrap();
-        assert_eq!(pattern.folder_for(date), Path::new("2024").join("2024-03-05"));
+        assert_eq!(
+            pattern.folder_for(date),
+            Path::new("2024").join("2024-03-05")
+        );
         let pattern = DatePattern::new("Shoots YY/MM_DD").unwrap();
-        assert_eq!(pattern.folder_for(date), Path::new("Shoots 24").join("03_05"));
+        assert_eq!(
+            pattern.folder_for(date),
+            Path::new("Shoots 24").join("03_05")
+        );
         assert_eq!(pattern.as_str(), "Shoots YY/MM_DD");
     }
 
     #[test]
     fn unsafe_date_patterns_are_refused() {
-        for pattern in ["", "/YYYY", "YYYY//MM", "YYYY/", "../YYYY", "C:YYYY", "a\\b", "."] {
+        for pattern in [
+            "", "/YYYY", "YYYY//MM", "YYYY/", "../YYYY", "C:YYYY", "a\\b", ".",
+        ] {
             assert!(DatePattern::new(pattern).is_err(), "{pattern:?}");
         }
     }
@@ -300,11 +323,18 @@ mod tests {
         fs::write(&source, b"new picture").unwrap();
         fs::write(target_dir.path().join("IMG_1.jpg"), b"existing").unwrap();
 
-        let first = copy_into(&source, target_dir.path(), || false).ok().unwrap();
+        let first = copy_into(&source, target_dir.path(), || false)
+            .ok()
+            .unwrap();
         assert_eq!(first.path, target_dir.path().join("IMG_1-1.jpg"));
-        let second = copy_into(&source, target_dir.path(), || false).ok().unwrap();
+        let second = copy_into(&source, target_dir.path(), || false)
+            .ok()
+            .unwrap();
         assert_eq!(second.path, target_dir.path().join("IMG_1-2.jpg"));
-        assert_eq!(fs::read(target_dir.path().join("IMG_1.jpg")).unwrap(), b"existing");
+        assert_eq!(
+            fs::read(target_dir.path().join("IMG_1.jpg")).unwrap(),
+            b"existing"
+        );
         assert_eq!(fs::read(&first.path).unwrap(), b"new picture");
         assert_eq!(first.bytes, 11);
         let names = fs::read_dir(target_dir.path()).unwrap().count();

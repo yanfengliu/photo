@@ -128,6 +128,11 @@ impl Tasks {
         }
     }
 
+    /// The cancel token of a running task.
+    pub(crate) fn token(&self, id: TaskId) -> Option<CancelToken> {
+        self.tokens.get(&id).cloned()
+    }
+
     /// True when the task was asked to stop.
     pub(crate) fn is_cancelled(&self, id: TaskId) -> bool {
         self.tokens.get(&id).is_some_and(CancelToken::is_cancelled)
@@ -153,7 +158,10 @@ impl Tasks {
 
     /// How many tasks are still running.
     pub(crate) fn running(&self) -> usize {
-        self.list.iter().filter(|task| !task.state.is_over()).count()
+        self.list
+            .iter()
+            .filter(|task| !task.state.is_over())
+            .count()
     }
 }
 
@@ -170,7 +178,10 @@ mod tests {
         assert!(token.is_cancelled() && tasks.is_cancelled(id));
         tasks.finish(id, TaskState::Cancelled);
         assert!(!tasks.cancel(id));
-        assert_eq!(tasks.get(id).map(|task| &task.state), Some(&TaskState::Cancelled));
+        assert_eq!(
+            tasks.get(id).map(|task| &task.state),
+            Some(&TaskState::Cancelled)
+        );
         assert_eq!(tasks.running(), 0);
     }
 

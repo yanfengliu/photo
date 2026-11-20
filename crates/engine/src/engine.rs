@@ -22,8 +22,8 @@ use crate::jobs::{self, CancelToken, Job, JobContext, JobId, JobKey, Lane, Outco
 use crate::previews::Previews;
 use crate::selection::Selection;
 use crate::sidecars::Sidecars;
-use crate::tasks::Tasks;
-use crate::toasts::Toasts;
+use crate::tasks::{TaskId, TaskInfo, Tasks};
+use crate::toasts::{Toast, Toasts};
 use crate::undo::History;
 
 /// What a finished job hands back: run on the engine's thread by
@@ -37,6 +37,9 @@ type OnFailure = Box<dyn FnOnce(&mut Engine, JobFailure) -> bool>;
 pub(crate) type Context<'a> = JobContext<'a, Apply, Apply>;
 
 type EngineEvent = jobs::Event<Apply, Apply>;
+
+/// The most worker results one [`Engine::poll`] brings in.
+pub const POLL_LIMIT: usize = 256;
 
 /// Why a job produced no result.
 #[derive(Clone, Debug)]
@@ -129,14 +132,22 @@ impl Engine {
         Ok(engine)
     }
 
-    /// Bring in everything the workers have finished. Returns whether
-    /// anything the UI shows may have changed. Never blocks.
+    /// Bring in what the workers have finished: at most [`POLL_LIMIT`]
+    /// results per call, so that one call never holds a frame up for long;
+    /// the rest come in on the next call. Returns whether anything the UI
+    /// shows may have changed, or more results are waiting; either way the
+    /// UI should poll again on its next frame. Never blocks.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(event) = self.events.try_recv() {
+        let mut brought = 0;
+        while brought < POLL_LIMIT {
+            let Ok(event) = self.events.try_recv() else {
+                break;
+            };
             changed |= self.handle(event);
+            brought += 1;
         }
-        changed | self.settle()
+        changed | (brought == POLL_LIMIT) | self.settle()
     }
 
     /// True when no job is queued or running and every result has been
@@ -189,6 +200,37 @@ impl Engine {
         }
     }
 
+    /// Running background tasks and the most recently finished ones, in
+    /// the order they started.
+    pub fn tasks(&self) -> &[TaskInfo] {
+        self.tasks.list()
+    }
+
+    /// One task, while it is listed.
+    pub fn task(&self, id: TaskId) -> Option<&TaskInfo> {
+        self.tasks.get(id)
+    }
+
+    /// Ask a running task to stop. Queued work is dropped and running work
+    /// stops at its next step; the task ends as [`TaskState::Cancelled`]
+    /// once its work has stopped. Returns false for a task that is not
+    /// running.
+    ///
+    /// [`TaskState::Cancelled`]: crate::TaskState::Cancelled
+    pub fn cancel_task(&mut self, id: TaskId) -> bool {
+        self.tasks.cancel(id)
+    }
+
+    /// Take the toasts that have not been shown yet, oldest first.
+    pub fn take_toasts(&mut self) -> Vec<Toast> {
+        self.toasts.drain()
+    }
+
+    /// The toasts that have not been taken yet, oldest first.
+    pub fn pending_toasts(&self) -> impl Iterator<Item = &Toast> + '_ {
+        self.toasts.pending()
+    }
+
     /// The value the UI stored under `key`, if any. Kept in the catalog, in
     /// a namespace of its own.
     pub fn ui_setting(&self, key: &str) -> Result<Option<String>, EngineError> {
@@ -232,7 +274,7 @@ impl Engine {
 
     fn handle(&mut self, event: EngineEvent) -> bool {
         match event {
-            jobs::Event::Progress { progress, .. } => progress(self),
+            jobs::Event::Progress(progress) => progress(self),
             jobs::Event::Done { job, outcome } => {
                 let on_failure = self.jobs.remove(&job);
                 let failure = match outcome {
@@ -266,7 +308,9 @@ impl Engine {
             }
             match self.catalog.set_missing(&batch, state) {
                 Ok(()) => photos.extend(batch),
-                Err(error) => self.toasts.error(format!("Could not record missing files: {error}")),
+                Err(error) => self
+                    .toasts
+                    .error(format!("Could not record missing files: {error}")),
             }
         }
         self.refresh_after(&[Change::Attribute(Attribute::Missing, photos)]);
@@ -289,7 +333,8 @@ impl Engine {
             self.browser.plan(change, &mut plan);
         }
         if let Err(error) = self.refresh(&plan) {
-            self.toasts.error(format!("Could not refresh the photo list: {error}"));
+            self.toasts
+                .error(format!("Could not refresh the photo list: {error}"));
         }
     }
 }

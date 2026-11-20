@@ -74,12 +74,7 @@ pub(crate) type Wake = Arc<dyn Fn() + Send + Sync>;
 /// What a worker posts to the engine.
 pub(crate) enum Event<O, P> {
     /// Something a job found on its way; always before its `Done`.
-    Progress {
-        /// The job that posted it.
-        job: JobId,
-        /// What it found.
-        progress: P,
-    },
+    Progress(P),
     /// A job has ended.
     Done {
         /// The job.
@@ -127,7 +122,6 @@ pub(crate) struct Submitted {
 
 /// What a running job can do besides compute.
 pub(crate) struct JobContext<'a, O, P> {
-    job: JobId,
     events: &'a Sender<Event<O, P>>,
     shared: &'a Shared<O, P>,
     cancel: Option<&'a CancelToken>,
@@ -136,11 +130,7 @@ pub(crate) struct JobContext<'a, O, P> {
 impl<O, P> JobContext<'_, O, P> {
     /// Post progress. It reaches the engine before the job's outcome.
     pub(crate) fn progress(&self, progress: P) {
-        let event = Event::Progress {
-            job: self.job,
-            progress,
-        };
-        if self.events.send(event).is_ok() {
+        if self.events.send(Event::Progress(progress)).is_ok() {
             self.shared.wake();
         }
     }
@@ -199,13 +189,12 @@ impl<O, P> Shared<O, P> {
     }
 
     fn run(&self, job: Queued<O, P>, events: &Sender<Event<O, P>>) -> Outcome<O> {
-        let Queued { id, cancel, work } = job;
+        let Queued { cancel, work, .. } = job;
         let cancelled = cancel.as_ref().is_some_and(CancelToken::is_cancelled);
         if cancelled || self.stopping.load(Ordering::SeqCst) {
             return Outcome::Skipped;
         }
         let context = JobContext {
-            job: id,
             events,
             shared: self,
             cancel: cancel.as_ref(),

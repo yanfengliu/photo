@@ -140,7 +140,8 @@ impl Browser {
     }
 
     pub(crate) fn summary(&self, photo: PhotoId) -> Option<&PhotoSummary> {
-        self.index_of(photo).and_then(|index| self.photos.get(index))
+        self.index_of(photo)
+            .and_then(|index| self.photos.get(index))
     }
 
     pub(crate) fn folders(&self) -> &[FolderInfo] {
@@ -307,7 +308,11 @@ impl Browser {
 
     /// Replace the summaries of `photos` with fresh ones, keeping the list's
     /// membership and order.
-    fn update_in_place(&mut self, catalog: &Catalog, photos: &[PhotoId]) -> Result<(), CatalogError> {
+    fn update_in_place(
+        &mut self,
+        catalog: &Catalog,
+        photos: &[PhotoId],
+    ) -> Result<(), CatalogError> {
         let listed: Vec<PhotoId> = photos
             .iter()
             .copied()

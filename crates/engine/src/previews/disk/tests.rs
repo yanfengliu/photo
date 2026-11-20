@@ -83,12 +83,29 @@ fn writing_a_version_can_delete_the_older_ones_of_the_same_size() {
             size,
             ..header(version, None)
         };
-        write(&file_path(dir.path(), photo, size, version), &header, &image).unwrap();
+        write(
+            &file_path(dir.path(), photo, size, version),
+            &header,
+            &image,
+        )
+        .unwrap();
     }
+    assert!(newer_exists(dir.path(), photo, PreviewSize::Thumbnail, 2));
+    assert!(!newer_exists(dir.path(), photo, PreviewSize::Thumbnail, 4));
+    assert!(!newer_exists(dir.path(), photo, PreviewSize::Standard, 1));
+    assert!(!newer_exists(
+        dir.path(),
+        PhotoId(6),
+        PreviewSize::Standard,
+        1
+    ));
     remove_older(dir.path(), photo, PreviewSize::Thumbnail, 4);
     let exists = |size, version| file_path(dir.path(), photo, size, version).exists();
     assert!(!exists(PreviewSize::Thumbnail, 1));
     assert!(!exists(PreviewSize::Thumbnail, 2));
     assert!(exists(PreviewSize::Thumbnail, 4));
-    assert!(exists(PreviewSize::Standard, 1), "other sizes are left alone");
+    assert!(
+        exists(PreviewSize::Standard, 1),
+        "other sizes are left alone"
+    );
 }

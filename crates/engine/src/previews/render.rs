@@ -52,12 +52,11 @@ pub(crate) enum RenderError {
 ///
 /// This is the seam the develop pipeline plugs into; see the module docs.
 pub(crate) fn render(source: &RenderSource<'_>, long_edge: u32) -> Result<Rendered, RenderError> {
-    let embedded = photo_decode::embedded_preview(source.path, long_edge).map_err(|error| {
-        match error {
+    let embedded =
+        photo_decode::embedded_preview(source.path, long_edge).map_err(|error| match error {
             DecodeError::Io(io) if io.kind() == io::ErrorKind::NotFound => RenderError::Missing,
             other => RenderError::Failed(other.to_string()),
-        }
-    })?;
+        })?;
     let image = embedded.ok_or_else(|| {
         let reason = match source.kind {
             FileKind::Raw => "the file has no embedded preview",
@@ -131,7 +130,8 @@ mod tests {
                 assert_eq!((turned.width, turned.height), (w, h), "{orientation:?}");
                 for y in 0..2u8 {
                     for x in 0..3u8 {
-                        let centre = Point::new((f32::from(x) + 0.5) / 3.0, (f32::from(y) + 0.5) / 2.0);
+                        let centre =
+                            Point::new((f32::from(x) + 0.5) / 3.0, (f32::from(y) + 0.5) / 2.0);
                         let moved = orientation.forward(centre);
                         let out_x = (moved.x * w as f32 - 0.5).round() as u32;
                         let out_y = (moved.y * h as f32 - 0.5).round() as u32;

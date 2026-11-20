@@ -14,11 +14,10 @@ photo-core = { workspace = true }
 photo-decode = { workspace = true }
 photo-imaging = { workspace = true }
 photo-xmp = { workspace = true }
+# Only for encoding and decoding the engine's own JPEG preview files.
 image = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

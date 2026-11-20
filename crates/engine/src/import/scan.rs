@@ -8,8 +8,8 @@ use photo_core::meta::FileKind;
 use photo_core::time::DateTime;
 use rayon::prelude::*;
 
-use super::files::unix_seconds;
 use super::FileIssue;
+use super::files::unix_seconds;
 use crate::engine::{Context, Engine};
 use crate::jobs::Lane;
 use crate::tasks::{TaskId, TaskKind, TaskState};
@@ -103,10 +103,8 @@ impl Engine {
     }
 
     fn scan_found(&mut self, task: TaskId, found: Vec<Found>) -> bool {
-        let candidates: Vec<ImportCandidate> = found
-            .into_iter()
-            .map(|file| self.candidate(file))
-            .collect();
+        let candidates: Vec<ImportCandidate> =
+            found.into_iter().map(|file| self.candidate(file)).collect();
         let Some(scan) = self.imports.scan.as_mut().filter(|scan| scan.task == task) else {
             return false;
         };
@@ -226,7 +224,9 @@ fn post(context: &Context<'_>, task: TaskId, files: Vec<(PathBuf, FileKind, fs::
             kind,
         })
         .collect();
-    context.progress(Box::new(move |engine: &mut Engine| engine.scan_found(task, found)));
+    context.progress(Box::new(move |engine: &mut Engine| {
+        engine.scan_found(task, found)
+    }));
 }
 
 /// Dot files everywhere, and files marked hidden on Windows.
