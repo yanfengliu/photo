@@ -151,19 +151,29 @@ pub fn fast_guided_subsample(radius: f32) -> usize {
     }
 }
 
+/// The radius, in cells `step` pixels wide, of the box on the reduced grid.
+/// Chosen so that a window of whole cells weighs `2 * radius + 1` pixels
+/// per axis, as the exact filter's window does: `(2 * reduced + 1) * step`
+/// is exactly that.
+fn reduced_radius(radius: f32, step: usize) -> f32 {
+    let step = step as f32;
+    (radius - (step - 1.0) / 2.0) / step
+}
+
 /// How far to pad a region for [`fast_guided_filter`] and
 /// [`fast_self_guided_filter`]: no pixel farther away than this can
-/// influence an output pixel. With subsampling factor `s` it is
-/// `(2 * ceil(radius / s) + 2) * s`: the two box blurs on the reduced grid,
-/// one cell for the interpolation and one for the cell the pixel sits in.
-/// That is a bound, up to one cell more than the true reach. Equals
+/// influence an output pixel. With subsampling factor `s` and the reduced
+/// grid's radius `r' = (radius - (s - 1) / 2) / s`, it is
+/// `(2 * ceil(r') + 2) * s`: the two box blurs on the reduced grid, one cell
+/// for the interpolation and one for the cell the pixel sits in. That is a
+/// bound, up to one cell more than the true reach. Equals
 /// [`guided_support`] when `s` is 1.
 pub fn fast_guided_support(radius: f32) -> usize {
     let step = fast_guided_subsample(radius);
     if step == 1 {
         guided_support(radius)
     } else {
-        (2 * box_support(radius / step as f32) + 2) * step
+        (2 * box_support(reduced_radius(radius, step)) + 2) * step
     }
 }
 
@@ -269,7 +279,7 @@ impl CellGrid {
 
 fn fast(guide: &Plane, input: Option<&Plane>, radius: f32, eps: f32, origin: (i64, i64)) -> Plane {
     let step = fast_guided_subsample(radius);
-    let reduced_kernel = BoxKernel::from_radius(radius / step as f32);
+    let reduced_kernel = BoxKernel::from_radius(reduced_radius(radius, step));
     let (Some(kernel), false, false) = (reduced_kernel, step == 1, guide.is_empty()) else {
         return exact(guide, input, radius, eps);
     };
@@ -288,19 +298,21 @@ fn fast(guide: &Plane, input: Option<&Plane>, radius: f32, eps: f32, origin: (i6
 ///
 /// The plane is divided into cells [`fast_guided_subsample`] pixels wide.
 /// The filter's coefficients are computed per cell, from the statistics of
-/// all the pixels in a window of whole cells (so `eps` means what it means
-/// for the exact filter), then interpolated back and applied to the
-/// full-size plane. Edges stay as sharp as the plane's own; only the
-/// decision of how much to smooth is made at lower resolution. For radii
-/// under 8 pixels nothing is reduced and the result is exactly
-/// [`self_guided_filter`]'s.
+/// all the pixels in a window of whole cells as wide as the exact filter's
+/// (so `eps` means what it means for the exact filter), then interpolated
+/// back and applied to the full-size plane. Edges stay as sharp as the
+/// plane's own; only the decision of how much to smooth is made at lower
+/// resolution. For radii under 8 pixels nothing is reduced and the result
+/// is exactly [`self_guided_filter`]'s.
 ///
 /// `origin` is the position of this plane's top-left sample in the pixel
-/// grid of the whole view it was cut from: `(0, 0)` for a whole view, and
-/// for a tile [`View::grid_position`](crate::View::grid_position) minus the
-/// plane's padding (negative values are fine). The cells are anchored to
-/// that grid, which is what makes a padded tile come out the same as the
-/// whole (contract R1).
+/// grid of the view it belongs to: the view's
+/// [`View::grid_position`](crate::View::grid_position) minus the plane's
+/// padding, for a whole view and a tile alike. A whole view's plane padded
+/// by `p` therefore has origin `(-p, -p)`, and `(0, 0)` only when it is not
+/// padded. The cells are anchored to that grid, which is what makes a
+/// padded tile come out the same as the whole (contract R1); every plane of
+/// one render must be given its origin by the same rule.
 ///
 /// A radius of 0 or less, or NaN, returns the input unchanged. Edges are
 /// replicated. Support: [`fast_guided_support`].

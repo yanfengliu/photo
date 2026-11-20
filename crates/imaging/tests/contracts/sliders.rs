@@ -320,6 +320,11 @@ fn the_largest_valid_crop_of_an_untouched_frame_is_the_whole_frame() {
         (tilted.width - inscribed.width).abs() < 1e-4,
         "{tilted:?} vs {inscribed:?}"
     );
+    // A shape so narrow that its full-height rectangle is thinner than a
+    // crop may be: the crop is widened to the minimum, as the geometry
+    // itself would widen it, and that still fits the untouched frame.
+    let sliver = geometry.largest_valid_crop(0.0, 0.01).unwrap();
+    assert_eq!((sliver.width, sliver.height), (CropRect::MIN_SIDE, 1.0));
 }
 
 #[test]

@@ -220,6 +220,33 @@ fn a_brush_follows_every_segment_and_handles_dots_and_empty_strokes() {
 }
 
 #[test]
+fn a_radial_smaller_than_a_pixel_has_no_spike_at_its_centre() {
+    // A disc a tenth of a pixel across, centred exactly on pixel (100, 50)
+    // of a 201 x 101 source, and then 1/500 of a pixel beside it.
+    // Antialiasing spreads it over a pixel either way; the pixel it sits on
+    // must not jump to full coverage just because its centre is exact. (A
+    // one-pixel ramp moves coverage by at most 1.5 per pixel of shift, so
+    // the two may differ by 0.003.)
+    let geometry = Geometry::identity(201, 101);
+    let alpha = |shift: f32| {
+        let disc = MaskShape::Radial {
+            center: Point::new((100.5 + shift) / 201.0, 50.5 / 101.0),
+            radius_x: 0.0005,
+            radius_y: 0.0005,
+            angle: 0.0,
+            feather: 0.0,
+            invert: false,
+        };
+        rasterize_mask(&mask(vec![add(disc)]), &geometry, &View::full(&geometry), 0).get(100, 50)
+    };
+    let (on, beside) = (alpha(0.0), alpha(0.002));
+    assert!(
+        (on - beside).abs() < 0.01,
+        "{on} on the centre, {beside} beside it"
+    );
+}
+
+#[test]
 fn a_stroke_that_doubles_back_covers_its_far_end() {
     // Out 2.4 px to the right and straight back, with a 10 px hard brush.
     // The turning point is the farthest the brush reached, and whatever the

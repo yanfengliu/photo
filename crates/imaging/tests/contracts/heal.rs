@@ -5,9 +5,9 @@ use std::sync::Arc;
 use photo_core::develop::{Spot, SpotMode};
 use photo_core::geom::Point;
 use photo_core::image::SourceImage;
-use photo_imaging::{SourcePyramid, heal_image, heal_level, suggest_heal_source};
+use photo_imaging::{SourcePyramid, heal_image, heal_level};
 
-use crate::util::{Rng, mean, noise_source, source_from_fn, std_dev, unit};
+use crate::util::{mean, noise_source, source_from_fn, std_dev, unit};
 
 fn spot(mode: SpotMode, target: (f32, f32), source: (f32, f32), radius: f32) -> Spot {
     Spot {
@@ -293,6 +293,54 @@ fn healing_brings_the_texture_of_the_source_at_the_tone_of_the_target() {
 }
 
 #[test]
+fn fine_texture_does_not_tint_the_repair_of_a_large_spot() {
+    // The texture test above at real spot sizes: 120 px, where the windows
+    // around the rim are still read in full, and 480 px, where they are too
+    // large for that. A one-pixel checker must reach the flat target at the
+    // target's own tone everywhere, not in blotches where a sparse reading
+    // of the source's windows happened to land on light or dark pixels.
+    for (width, height, radius) in [(2000u32, 1000u32, 0.06f32), (4000, 2000, 0.12)] {
+        let half = width / 2;
+        let image = source_from_fn(width, height, |x, y| {
+            if x < half {
+                [0.24, 0.2, 0.16]
+            } else {
+                [if (x + y) % 2 == 0 { 0.66 } else { 0.54 }; 3]
+            }
+        });
+        let heal = spot(SpotMode::Heal, (0.25, 0.5), (0.75, 0.5), radius);
+        let healed = heal_image(&image, &[heal]);
+        let (centre, reach) = (
+            (width as f32 / 4.0, height as f32 / 2.0),
+            0.8 * radius * width as f32,
+        );
+        let flat = image.pixel(0, 0).map(f32::from);
+        // Each 2 x 2 block holds both checker phases, so its mean is the
+        // texture's own mean, brought to the target's tone.
+        let mut worst = 0.0f32;
+        for by in 0..height / 2 {
+            for bx in 0..half / 2 {
+                let (x, y) = (2 * bx, 2 * by);
+                if distance(x + 1, y + 1, centre) > reach {
+                    continue;
+                }
+                for (channel, &level) in flat.iter().enumerate() {
+                    let block: f32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                        .iter()
+                        .map(|(dx, dy)| f32::from(healed.pixel(x + dx, y + dy)[channel]))
+                        .sum();
+                    worst = worst.max((block / 4.0 / level - 1.0).abs());
+                }
+            }
+        }
+        assert!(
+            worst < 0.015,
+            "{width} x {height}, radius {radius}: off by {worst}"
+        );
+    }
+}
+
+#[test]
 fn spots_apply_in_order_each_seeing_the_one_before() {
     let image = noise_source(160, 60, 3);
     // First copy the patch at x = 120 to x = 80, then the patch at x = 80
@@ -369,92 +417,4 @@ fn a_pyramid_level_heals_like_the_full_resolution_image() {
     // The healed level drops back into the pyramid for resampling.
     let swapped = pyramid.with_level(1, Arc::new(half)).unwrap();
     assert_eq!(swapped.level(1).width, 100);
-}
-
-fn half_textured(width: u32, height: u32) -> SourceImage {
-    let mut rng = Rng::new(6);
-    let noise: Vec<f32> = (0..width * height).map(|_| rng.unit()).collect();
-    source_from_fn(width, height, |x, y| {
-        if x < width / 2 {
-            [0.4; 3]
-        } else {
-            [0.25 + 0.4 * noise[(y * width + x) as usize]; 3]
-        }
-    })
-}
-
-#[test]
-fn the_suggested_source_is_nearby_inside_the_image_and_clear_of_the_target() {
-    let pyramid = SourcePyramid::new(noise_source(400, 300, 7));
-    let radius = 0.03;
-    let radius_px = radius * 400.0;
-    for target in [
-        (0.5, 0.5),
-        (0.04, 0.05),
-        (0.97, 0.5),
-        (0.5, 0.96),
-        (0.98, 0.98),
-    ] {
-        let target = Point::new(target.0, target.1);
-        let source = suggest_heal_source(&pyramid, target, radius);
-        let (sx, sy) = (source.x * 400.0, source.y * 300.0);
-        assert!(
-            sx >= radius_px && sx <= 400.0 - radius_px,
-            "{target:?} -> {source:?}"
-        );
-        assert!(
-            sy >= radius_px && sy <= 300.0 - radius_px,
-            "{target:?} -> {source:?}"
-        );
-        let apart = (sx - target.x * 400.0).hypot(sy - target.y * 300.0);
-        assert!(
-            apart >= 2.0 * radius_px && apart <= 5.0 * radius_px,
-            "{target:?}: {apart}"
-        );
-        assert_eq!(
-            source,
-            suggest_heal_source(&pyramid, target, radius),
-            "deterministic"
-        );
-    }
-}
-
-#[test]
-fn the_suggested_source_has_surroundings_like_the_target() {
-    let pyramid = SourcePyramid::new(half_textured(400, 300));
-    let radius = 0.03;
-    // Just inside the flat half, 8% of the width from the textured half.
-    let flat = suggest_heal_source(&pyramid, Point::new(0.42, 0.5), radius);
-    assert!(
-        flat.x < 0.5 - radius,
-        "a flat target wants a flat source, got {flat:?}"
-    );
-    // Just inside the textured half.
-    let textured = suggest_heal_source(&pyramid, Point::new(0.58, 0.5), radius);
-    assert!(
-        textured.x > 0.5 + radius,
-        "a textured target wants texture, got {textured:?}"
-    );
-}
-
-#[test]
-fn a_suggestion_is_always_usable_even_when_nothing_fits() {
-    let pyramid = SourcePyramid::new(noise_source(40, 30, 8));
-    // A spot bigger than the image: no candidate fits anywhere.
-    let source = suggest_heal_source(&pyramid, Point::new(0.5, 0.5), 0.8);
-    assert!((0.0..=1.0).contains(&source.x) && (0.0..=1.0).contains(&source.y));
-    assert_ne!(source, Point::new(0.5, 0.5));
-    let source = suggest_heal_source(&pyramid, Point::new(f32::NAN, 0.5), -1.0);
-    assert!(source.x.is_finite() && source.y.is_finite());
-    // Absurd but finite inputs still give a point inside the image.
-    let in_image = |p: Point| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y);
-    for (target, radius) in [
-        (Point::new(0.5, 0.5), 1.0e36),
-        (Point::new(0.5, 0.5), f32::INFINITY),
-        (Point::new(3.0e38, -3.0e38), 0.05),
-        (Point::new(f32::INFINITY, 0.2), 0.05),
-    ] {
-        let source = suggest_heal_source(&pyramid, target, radius);
-        assert!(in_image(source), "{target:?}, {radius}: {source:?}");
-    }
 }

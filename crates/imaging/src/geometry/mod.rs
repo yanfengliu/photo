@@ -177,10 +177,12 @@ impl Geometry {
 
     /// The source position shown at output position `p`.
     ///
-    /// Total: every finite input gives a finite result. Positions the
-    /// settings push outside the source map to coordinates outside
-    /// `0..width, 0..height`; positions beyond the horizon of an extreme
-    /// perspective map far outside it, in no particular direction.
+    /// Total: every finite input gives a result, computed in `f64`, which is
+    /// finite (its conversion to `f32` can overflow only for positions far
+    /// beyond any picture, such as `1e37`). Positions the settings push
+    /// outside the source map to coordinates outside `0..width, 0..height`;
+    /// positions beyond the horizon of an extreme perspective map far
+    /// outside it, in no particular direction.
     pub fn out_to_src(&self, p: Point) -> Point {
         let (x, y) = self.map_out_to_src(f64::from(p.x), f64::from(p.y));
         Point::new(x as f32, y as f32)
@@ -207,9 +209,10 @@ impl Geometry {
     /// Source pixels per output pixel (the square root of the area ratio) at
     /// the centre of the output. 1 for orientation and crop alone; lens
     /// distortion and the transform's scale change it, and so does
-    /// perspective when the crop is not centred on the frame (the transform
-    /// keeps the magnification at 1 only at the frame centre). `aspect`
-    /// preserves area and does not.
+    /// perspective whenever the output centre is not the point the
+    /// transform recentred on: an off-centre crop, or non-zero offsets (the
+    /// transform keeps the magnification at 1 only at the frame centre,
+    /// before offsets). `aspect` preserves area and does not.
     ///
     /// [`resample`](crate::resample()) multiplies this by the view's own
     /// reduction to pick a pyramid level and a kernel. It is a property of
@@ -226,11 +229,12 @@ impl Geometry {
     /// and with its whole boundary inside the source image.
     ///
     /// Uses this geometry's lens, orientation and transform; its own crop is
-    /// ignored. `None` when the centre of the frame shows no image (the
-    /// transform has pushed the picture away from it), or so little that
-    /// the rectangle would have a side under [`CropRect::MIN_SIDE`]. A
-    /// non-positive or non-finite `crop_aspect` means the frame's own
-    /// aspect ratio.
+    /// ignored. Sides are at least [`CropRect::MIN_SIDE`], as for any crop:
+    /// an aspect ratio so extreme that its rectangle would be thinner is
+    /// widened to that. `None` when even the smallest crop at the frame
+    /// centre would show empty area (the transform has pushed the picture
+    /// away from the centre). A non-positive or non-finite `crop_aspect`
+    /// means the frame's own aspect ratio.
     ///
     /// The result is the true maximum for perspective alone and for
     /// distortion alone. When both are combined with offsets it is still

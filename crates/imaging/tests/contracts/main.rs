@@ -15,5 +15,6 @@ mod misc;
 mod pyramid;
 mod resample;
 mod sliders;
+mod suggest;
 mod timing;
 mod util;

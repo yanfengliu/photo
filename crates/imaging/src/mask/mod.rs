@@ -169,7 +169,10 @@ impl Shape {
                     let (gu, gv) = (u * inverse_radii.0, v * inverse_radii.1);
                     footprint * (gu * gu + gv * gv).sqrt() / distance
                 } else {
-                    0.0
+                    // The centre itself: the limit along the ellipse's
+                    // shorter axis, so a disc smaller than a pixel has no
+                    // spike there.
+                    footprint * inverse_radii.0.max(inverse_radii.1)
                 };
                 let (low, high) = at_least(*inner, *outer, pixel);
                 let inside = 1.0 - smoothstep(low, high, distance);
@@ -258,11 +261,18 @@ fn source_extent(geometry: &Geometry, grid: &PixelGrid, source: (f64, f64)) -> [
 ///   Strokes are stamped into square cells in source space, a power-of-two
 ///   number of source pixels wide: as fine as the view can show (never
 ///   finer than a source pixel), on one lattice for every view at that
-///   scale. Only the cells this view reads are stamped, so the work and
-///   memory follow the view (fewer than four cells per view pixel where the
-///   geometry keeps its scale), and a stroke renders the same however many
-///   others there are. A stroke's path is drawn simplified, but never more
-///   than a quarter of a cell from where it was painted.
+///   scale. Only the cells inside the bounding box of what this view reads
+///   are stamped, so the work and memory follow the view rather than the
+///   strokes, and a stroke renders the same however many others there are.
+///   A view that reads the source upright (quarter turns included) needs
+///   fewer than four cells per view pixel; a straightened or keystoned view
+///   reads a slanted region whose bounding box is larger, about twice for a
+///   whole frame at 45 degrees and many times for a thin strip of one.
+///
+///   A stroke's path is drawn simplified, never more than a quarter of a
+///   cell from where it was painted or, under a soft edge, 2% of the edge's
+///   width: either way coverage moves by at most 3% of the stroke's
+///   strength.
 ///
 /// Edges are antialiased over one view pixel (one cell for brushes): a
 /// feather or gradient narrower than that is widened to it, centred on the
