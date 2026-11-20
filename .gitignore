@@ -1,0 +1,6 @@
+/target
+/tmp/
+/.claude/*
+!/.claude/skills/
+.DS_Store
+*.stackdump

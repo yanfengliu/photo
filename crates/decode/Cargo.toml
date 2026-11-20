@@ -1,0 +1,22 @@
+[package]
+name = "photo-decode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+photo-core = { workspace = true }
+image = { workspace = true }
+kamadak-exif = { workspace = true }
+log = { workspace = true }
+rawler = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+photo-testkit = { workspace = true }
+tempfile = { workspace = true }

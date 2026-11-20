@@ -1,0 +1,86 @@
+[workspace]
+members = ["crates/*"]
+default-members = [".", "crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+photo-catalog = { path = "crates/catalog" }
+photo-color = { path = "crates/color" }
+photo-core = { path = "crates/core" }
+photo-decode = { path = "crates/decode" }
+photo-develop = { path = "crates/develop" }
+photo-engine = { path = "crates/engine" }
+photo-export = { path = "crates/export" }
+photo-imaging = { path = "crates/imaging" }
+photo-testkit = { path = "crates/testkit" }
+photo-ui = { path = "crates/ui" }
+photo-xmp = { path = "crates/xmp" }
+
+directories = "6.0.0"
+eframe = "0.37.0"
+egui = "0.37.0"
+egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot", "eframe"] }
+env_logger = "0.11.11"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp", "bmp", "gif"] }
+kamadak-exif = "0.6.2"
+log = "0.4.35"
+quick-xml = "0.41.0"
+rawler = "0.8.0"
+rayon = "1.12.0"
+rfd = "0.18.0"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+
+[package]
+name = "photo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+photo-ui = { workspace = true }
+directories = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+
+# Third-party crates (rawler and the image codecs especially) are pathologically
+# slow unoptimized, so dependencies are always optimized.
+[profile.dev.package."*"]
+opt-level = 2
+
+# The pixel-math crates are optimized in dev builds too: their tests and the
+# debug app would otherwise be orders of magnitude slower than real use.
+[profile.dev.package.photo-color]
+opt-level = 3
+
+[profile.dev.package.photo-imaging]
+opt-level = 3
+
+[profile.dev.package.photo-develop]
+opt-level = 3
+
+[profile.dev.package.photo-decode]
+opt-level = 3
+
+[profile.dev.package.photo-export]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -1,0 +1,22 @@
+[package]
+name = "photo-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+photo-core = { workspace = true }
+photo-engine = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+log = { workspace = true }
+rfd = { workspace = true }
+
+[dev-dependencies]
+photo-testkit = { workspace = true }
+egui_kittest = { workspace = true }
+tempfile = { workspace = true }

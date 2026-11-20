@@ -1,0 +1,15 @@
+[package]
+name = "photo-develop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+photo-color = { workspace = true }
+photo-core = { workspace = true }
+photo-imaging = { workspace = true }
+rayon = { workspace = true }

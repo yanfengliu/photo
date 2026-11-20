@@ -1,0 +1,12 @@
+[package]
+name = "photo-color"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+photo-core = { workspace = true }
