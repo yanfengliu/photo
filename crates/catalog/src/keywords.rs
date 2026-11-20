@@ -1,7 +1,7 @@
 //! Keywords: a hierarchy of tags and their assignment to photos.
 
 use photo_core::meta::{KeywordId, PhotoId};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, Row, params};
 
 use crate::catalog::Catalog;
 use crate::codec::to_u64;
@@ -108,11 +108,13 @@ impl Catalog {
         })
     }
 
-    /// The keyword called `name`, wherever it sits in the hierarchy (the
-    /// oldest one if several share the name, ignoring ASCII case); if there
-    /// is none, a new top-level keyword is created.
+    /// The keyword a bare name stands for, ignoring ASCII case: the only
+    /// keyword of that name, wherever it sits; or else, when there are none
+    /// or several, the top-level keyword of that name, created if there is
+    /// none. A name shared by several nested keywords never picks one of
+    /// them.
     pub fn ensure_keyword(&mut self, name: &str) -> Result<KeywordId> {
-        self.write(|tx, _| ensure_keyword(tx, name).map(KeywordId))
+        self.write(|tx, _| resolve_keyword(tx, name).map(|(id, _)| KeywordId(id)))
     }
 
     /// Rename a keyword, keeping its assignments.
@@ -228,54 +230,160 @@ impl Catalog {
         })
     }
 
-    /// Make a photo's keywords exactly the named ones and return their ids
-    /// in the order given. Each name resolves as in
-    /// [`Catalog::ensure_keyword`], creating keywords that do not exist yet;
-    /// blank names are skipped and repeated names count once.
+    /// Make a photo's keywords exactly the named ones. Blank names are
+    /// skipped and names count once, ignoring ASCII case.
+    ///
+    /// A name the photo already carries keeps the keyword (or keywords) it
+    /// has, wherever they sit. Any other name resolves as in
+    /// [`Catalog::ensure_keyword`]: to the only keyword of that name, or
+    /// else to the top-level keyword of that name, created if needed. So a
+    /// bare name never lands on one of several nested keywords that share
+    /// it; [`Catalog::set_photo_keyword_ids`] picks one exactly.
     pub fn set_photo_keywords<S: AsRef<str>>(
         &mut self,
         photo: PhotoId,
         names: &[S],
-    ) -> Result<Vec<KeywordId>> {
+    ) -> Result<KeywordsChange> {
         self.write(|tx, _| {
             require_photo(tx, photo)?;
-            let mut keywords: Vec<i64> = Vec::new();
+            let current = keywords_of(tx, photo)?;
+            let (mut wanted, mut created, mut seen) = (Vec::new(), Vec::new(), Vec::new());
             for name in names
                 .iter()
                 .map(|name| name.as_ref().trim())
                 .filter(|name| !name.is_empty())
             {
-                let keyword = ensure_keyword(tx, name)?;
-                if !keywords.contains(&keyword) {
-                    keywords.push(keyword);
+                let folded = name.to_ascii_lowercase();
+                if seen.contains(&folded) {
+                    continue;
+                }
+                let carried: Vec<i64> = current
+                    .iter()
+                    .filter(|(_, carried)| carried.to_ascii_lowercase() == folded)
+                    .map(|(id, _)| *id)
+                    .collect();
+                seen.push(folded);
+                if carried.is_empty() {
+                    let (id, new) = resolve_keyword(tx, name)?;
+                    if new {
+                        created.push(KeywordId(id));
+                    }
+                    wanted.push(id);
+                } else {
+                    wanted.extend(carried);
                 }
             }
-            tx.execute("DELETE FROM photo_keywords WHERE photo_id = ?1", [photo.0])?;
-            let mut insert = tx.prepare_cached(
-                "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?1, ?2)",
-            )?;
-            for keyword in &keywords {
-                insert.execute([photo.0, *keyword])?;
+            let current: Vec<i64> = current.into_iter().map(|(id, _)| id).collect();
+            let (removed, added) = replace_keywords(tx, photo, &current, &wanted)?;
+            Ok(KeywordsChange {
+                removed,
+                added,
+                created,
+            })
+        })
+    }
+
+    /// Make a photo's keywords exactly these, by id; an id given twice
+    /// counts once. All or nothing: an unknown keyword or photo fails the
+    /// whole call.
+    pub fn set_photo_keyword_ids(
+        &mut self,
+        photo: PhotoId,
+        keywords: &[KeywordId],
+    ) -> Result<KeywordsChange> {
+        self.write(|tx, _| {
+            require_photo(tx, photo)?;
+            let mut wanted = Vec::new();
+            for keyword in keywords {
+                KEYWORDS.require(tx, keyword.0)?;
+                if !wanted.contains(&keyword.0) {
+                    wanted.push(keyword.0);
+                }
             }
-            Ok(keywords.into_iter().map(KeywordId).collect())
+            let current: Vec<i64> = keywords_of(tx, photo)?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            let (removed, added) = replace_keywords(tx, photo, &current, &wanted)?;
+            Ok(KeywordsChange {
+                removed,
+                added,
+                created: Vec::new(),
+            })
         })
     }
 }
 
-/// Find a keyword by name anywhere in the hierarchy, or create it at the top
-/// level.
-pub(crate) fn ensure_keyword(conn: &Connection, name: &str) -> Result<i64> {
+/// What setting a photo's keywords changed, which is exactly what undoing it
+/// needs: take `added` off the photo and put `removed` back (with
+/// [`Catalog::unassign_keyword`] and [`Catalog::assign_keyword`]), then
+/// delete the keywords in `created`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeywordsChange {
+    /// Keywords the photo carried before and no longer does, in id order.
+    pub removed: Vec<KeywordId>,
+    /// Keywords the photo carries now and did not before, in the order they
+    /// were named.
+    pub added: Vec<KeywordId>,
+    /// Keywords that did not exist and were created for a name; each is
+    /// also in `added`.
+    pub created: Vec<KeywordId>,
+}
+
+/// The keywords a photo carries, with their names, in id order.
+fn keywords_of(conn: &Connection, photo: PhotoId) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT k.id, k.name FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
+         WHERE pk.photo_id = ?1 ORDER BY k.id",
+    )?;
+    let keywords = stmt
+        .query_map([photo.0], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(keywords)
+}
+
+/// Take the photo from the keywords in `current` to those in `wanted`,
+/// touching only the links that differ, and say which went and which came.
+fn replace_keywords(
+    conn: &Connection,
+    photo: PhotoId,
+    current: &[i64],
+    wanted: &[i64],
+) -> Result<(Vec<KeywordId>, Vec<KeywordId>)> {
+    let mut delete =
+        conn.prepare_cached("DELETE FROM photo_keywords WHERE photo_id = ?1 AND keyword_id = ?2")?;
+    let mut removed = Vec::new();
+    for keyword in current.iter().filter(|keyword| !wanted.contains(keyword)) {
+        delete.execute([photo.0, *keyword])?;
+        removed.push(KeywordId(*keyword));
+    }
+    let mut insert =
+        conn.prepare_cached("INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?1, ?2)")?;
+    let mut added = Vec::new();
+    for keyword in wanted.iter().filter(|keyword| !current.contains(keyword)) {
+        insert.execute([photo.0, *keyword])?;
+        added.push(KeywordId(*keyword));
+    }
+    Ok((removed, added))
+}
+
+/// The keyword a bare name stands for: the only keyword of that name
+/// (ignoring ASCII case), or else the top-level keyword of that name,
+/// created if there is none. The flag says whether it was created.
+pub(crate) fn resolve_keyword(conn: &Connection, name: &str) -> Result<(i64, bool)> {
     let name = clean_name(name)?;
-    let existing = conn
-        .prepare_cached(
-            "SELECT id FROM keywords WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
-        )?
-        .query_row([name], |row| row.get(0))
-        .optional()?;
-    if let Some(id) = existing {
-        return Ok(id);
+    let mut stmt =
+        conn.prepare_cached("SELECT id, parent_id FROM keywords WHERE name = ?1 COLLATE NOCASE")?;
+    let named: Vec<(i64, Option<i64>)> = stmt
+        .query_map([name], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if let [(only, _)] = named.as_slice() {
+        return Ok((*only, false));
+    }
+    if let Some((top, _)) = named.iter().find(|(_, parent)| parent.is_none()) {
+        return Ok((*top, false));
     }
     conn.prepare_cached("INSERT INTO keywords (parent_id, name) VALUES (NULL, ?1)")?
         .execute([name])?;
-    Ok(conn.last_insert_rowid())
+    Ok((conn.last_insert_rowid(), true))
 }

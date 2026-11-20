@@ -96,6 +96,18 @@ fn sharp_s_matches_double_s_and_dotted_capital_i_matches_i() {
 }
 
 #[test]
+fn ligatures_the_micro_sign_and_long_s_match_the_letters_they_stand_for() {
+    let mut catalog = titled(&["ﬁeld trip", "10 µm grain", "Meſſe", "plain"]);
+    assert_eq!(found(&catalog, "FIELD"), ["0.jpg"]);
+    assert_eq!(found(&catalog, "fi"), ["0.jpg"]);
+    assert_eq!(found(&catalog, "μm"), ["1.jpg"]);
+    assert_eq!(found(&catalog, "ΜM"), ["1.jpg"]);
+    assert_eq!(found(&catalog, "messe"), ["2.jpg"]);
+    assert_eq!(smart(&mut catalog, SmartOp::StartsWith, "FIE"), ["0.jpg"]);
+    assert_eq!(smart(&mut catalog, SmartOp::Is, "MESSE"), ["2.jpg"]);
+}
+
+#[test]
 fn repeated_words_count_once_and_only_the_first_distinct_words_are_used() {
     let words: Vec<String> = (0..Filter::MAX_WORDS)
         .map(|index| format!("w{index}x"))

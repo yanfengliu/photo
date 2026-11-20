@@ -2,6 +2,8 @@
 //! stored as JSON and compiled to parameterised SQL (see `compile`).
 
 mod compile;
+#[cfg(test)]
+mod format_tests;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +32,13 @@ impl Default for SmartRules {
 }
 
 impl SmartRules {
+    /// Version of the JSON shape rules are stored in: field names, nesting
+    /// and the names of fields and operators. Stored beside every rule set;
+    /// a build reads only rules of a format it knows, and never replaces
+    /// rules of a newer one. Bump it whenever the shape changes; the test
+    /// `the_rules_json_shape_is_pinned_to_its_format` fails until it is.
+    pub const FORMAT: u32 = 1;
+
     /// The most rules one smart collection may combine. Each rule is one
     /// more nested condition and SQLite limits how deep conditions may nest.
     pub const MAX_RULES: usize = 100;
@@ -97,7 +106,9 @@ pub enum SmartField {
     Edited,
     /// The file's name, without its directory.
     FileName,
-    /// The path of the folder that holds the file.
+    /// The path of the folder that holds the file. `/` and `\` count as the
+    /// same character, so a rule matches a Windows folder whichever slash
+    /// it was typed with.
     FolderPath,
 }
 

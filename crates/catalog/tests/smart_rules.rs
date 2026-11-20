@@ -91,8 +91,12 @@ fn text_that_is_only_blanks_counts_as_empty() {
 #[test]
 fn any_is_not_confused_by_the_filter_it_is_combined_with() {
     // "rating >= 5 OR label is green" must stay one bracketed condition when
-    // the query adds its own conditions next to it.
-    let (mut catalog, _) = library();
+    // the query adds its own conditions next to it. b is raw and green: it
+    // only gets in if "raster AND rating >= 5 OR green" loses its brackets.
+    let (mut catalog, ids) = library();
+    catalog
+        .set_labels(&[(ids[1], photo_core::meta::ColorLabel::Green)])
+        .unwrap();
     let rules = SmartRules {
         match_all: false,
         rules: vec![
@@ -176,6 +180,11 @@ fn hostile_values_are_compared_as_text_and_cannot_change_the_statement() {
                 // the library contains any of these strings.
                 let expected = match (field, op, value) {
                     (SmartField::Title, SmartOp::Contains, "_") => "c",
+                    // In a folder rule a backslash is a path separator, the
+                    // same as `/`, and every folder here starts with one.
+                    (SmartField::FolderPath, SmartOp::Contains | SmartOp::StartsWith, "\\") => {
+                        "abcde"
+                    }
                     _ => "",
                 };
                 let found = one(&mut catalog, field, op, value);

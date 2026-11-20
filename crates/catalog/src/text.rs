@@ -17,10 +17,12 @@ pub(crate) const FOLD_FUNCTION: &str = "photo_fold";
 /// The fold works one character at a time, so folding commutes with taking
 /// a substring: if a needle occurs in a text, the folded needle occurs in the
 /// folded text. (`str::to_lowercase` does not have that property: it spells
-/// a Greek sigma differently at the end of a word.) Each character is
-/// lower-cased, with three additions so that every spelling of a letter
-/// meets: final sigma becomes sigma, sharp s becomes `ss`, and dotted
-/// capital I becomes `i`. Combining sequences are not normalised.
+/// a Greek sigma differently at the end of a word.) Each character gets
+/// Unicode's full case folding: lower-casing, except for the characters in
+/// [`full_folding`], so that `ß` meets `ss`, `ﬁ` meets `fi`, `µ` meets `μ`
+/// and `ſ` meets `s`. Text is not normalised first, so a letter written as
+/// one character and the same letter written with a combining accent stay
+/// different.
 ///
 /// `photos.file_name_key` is computed with this function, so changing what
 /// it returns needs a migration that recomputes that column.
@@ -30,14 +32,69 @@ pub(crate) fn fold(text: &str) -> String {
     }
     let mut folded = String::with_capacity(text.len());
     for character in text.chars() {
-        match character {
-            'ς' => folded.push('σ'),
-            'ß' | 'ẞ' => folded.push_str("ss"),
-            'İ' => folded.push('i'),
-            other => folded.extend(other.to_lowercase()),
+        match full_folding(character) {
+            Some(letters) => folded.push_str(letters),
+            None => folded.extend(character.to_lowercase()),
         }
     }
     folded
+}
+
+/// Unicode's full case folding of `character`, where that is not what
+/// lower-casing gives: letters that fold onto another letter (final sigma,
+/// the micro sign, long s, Greek symbol forms, old Cyrillic forms) and
+/// letters and ligatures that fold to several. These are the entries of
+/// status C and F in Unicode's `CaseFolding.txt` that differ from
+/// lower-casing, except two kinds: dotted capital I folds to a plain `i`
+/// (as it does in most languages, rather than to `i` and a combining dot),
+/// and the Greek letters with accents or iota subscript that only meet
+/// their partners once text is normalised are left to lower-casing.
+fn full_folding(character: char) -> Option<&'static str> {
+    Some(match character {
+        'ς' => "σ",
+        'ß' | 'ẞ' => "ss",
+        'İ' => "i",
+        '\u{B5}' => "\u{3BC}",    // micro sign: mu
+        '\u{17F}' => "s",         // long s
+        '\u{345}' => "\u{3B9}",   // combining ypogegrammeni: iota
+        '\u{1FBE}' => "\u{3B9}",  // prosgegrammeni: iota
+        '\u{3D0}' => "\u{3B2}",   // beta symbol
+        '\u{3D1}' => "\u{3B8}",   // theta symbol
+        '\u{3D5}' => "\u{3C6}",   // phi symbol
+        '\u{3D6}' => "\u{3C0}",   // pi symbol
+        '\u{3F0}' => "\u{3BA}",   // kappa symbol
+        '\u{3F1}' => "\u{3C1}",   // rho symbol
+        '\u{3F5}' => "\u{3B5}",   // lunate epsilon
+        '\u{1E9B}' => "\u{1E61}", // long s with dot above
+        '\u{1C80}' => "\u{432}",  // old Cyrillic forms
+        '\u{1C81}' => "\u{434}",
+        '\u{1C82}' => "\u{43E}",
+        '\u{1C83}' => "\u{441}",
+        '\u{1C84}' | '\u{1C85}' => "\u{442}",
+        '\u{1C86}' => "\u{44A}",
+        '\u{1C87}' => "\u{463}",
+        '\u{1C88}' => "\u{A64B}",
+        '\u{149}' => "\u{2BC}n",  // n preceded by apostrophe
+        '\u{1F0}' => "j\u{30C}",  // j with caron
+        '\u{1E96}' => "h\u{331}", // letters with a mark below or above
+        '\u{1E97}' => "t\u{308}",
+        '\u{1E98}' => "w\u{30A}",
+        '\u{1E99}' => "y\u{30A}",
+        '\u{1E9A}' => "a\u{2BE}",
+        '\u{FB00}' => "ff", // Latin ligatures
+        '\u{FB01}' => "fi",
+        '\u{FB02}' => "fl",
+        '\u{FB03}' => "ffi",
+        '\u{FB04}' => "ffl",
+        '\u{FB05}' | '\u{FB06}' => "st",
+        '\u{587}' => "\u{565}\u{582}", // Armenian ligatures
+        '\u{FB13}' => "\u{574}\u{576}",
+        '\u{FB14}' => "\u{574}\u{565}",
+        '\u{FB15}' => "\u{574}\u{56B}",
+        '\u{FB16}' => "\u{57E}\u{576}",
+        '\u{FB17}' => "\u{574}\u{56D}",
+        _ => return None,
+    })
 }
 
 /// Make [`fold`] callable from SQL as `photo_fold(text)`; `NULL` stays `NULL`.
@@ -162,6 +219,28 @@ mod tests {
     }
 
     #[test]
+    fn letters_that_unicode_folds_differently_from_lower_casing_meet_their_partners() {
+        // Full case folding, where it is not plain lower-casing.
+        for (one, other) in [
+            ("µm", "ΜM"),           // micro sign and Greek capital mu
+            ("µ", "μ"),             // micro sign and Greek small mu
+            ("ſtraſſe", "STRASSE"), // long s
+            ("ﬁeld", "FIELD"),      // ligatures fold to their letters
+            ("ﬂow", "FLOW"),
+            ("oﬀ", "OFF"),
+            ("ﬃ ﬄ", "FFI FFL"),
+            ("ﬅ ﬆ", "ST ST"),
+            ("ϐϑϕϖϰϱϵ", "ΒΘΦΠΚΡΕ"), // Greek symbol variants
+            ("ẛ", "Ṡ"),
+            ("ŉ", "ʼN"),
+            ("ǰ", "J\u{30C}"),
+            ("և", "ԵՒ"),
+        ] {
+            assert_eq!(fold(one), fold(other), "{one} and {other}");
+        }
+    }
+
+    #[test]
     fn folding_a_part_gives_a_part_of_the_folded_whole() {
         // The property text matching relies on: a needle cut out of a text
         // is found in it after folding, wherever the cut falls.
@@ -171,6 +250,7 @@ mod tests {
             "Été À L'ÉCOLE",
             "plain ASCII 123",
             "日本 Ǆ ǅ ǆ",
+            "ﬁeld µm ſ ﬃ ǰ",
         ] {
             let whole = fold(text);
             for (start, _) in text.char_indices() {

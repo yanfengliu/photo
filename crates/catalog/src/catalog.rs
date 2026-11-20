@@ -27,6 +27,7 @@ pub struct Catalog {
     pub(crate) conn: Connection,
     pub(crate) quick_collection: CollectionId,
     clock: Clock,
+    read_only: bool,
 }
 
 impl Catalog {
@@ -44,6 +45,10 @@ impl Catalog {
     /// A catalog that was being written when the application or the machine
     /// went down is recovered here, to the state of its last completed
     /// change.
+    ///
+    /// A write-protected file opens for reading only (see
+    /// [`Catalog::is_read_only`]), unless it would first have to be set up
+    /// or upgraded, which fails with [`CatalogError::ReadOnly`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = plain_path(path.as_ref());
         let has_content = std::fs::metadata(&path).is_ok_and(|file| file.len() > 0);
@@ -59,6 +64,13 @@ impl Catalog {
     /// Open a private catalog that lives in memory and vanishes when dropped.
     pub fn open_in_memory() -> Result<Self> {
         Self::initialise(Connection::open_in_memory()?)
+    }
+
+    /// True if the catalog's file is write-protected, so that every change
+    /// fails with [`CatalogError::ReadOnly`] (and changes nothing); reading
+    /// works as usual.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// The schema version stored in the file (`PRAGMA user_version`). After a
@@ -98,11 +110,19 @@ impl Catalog {
         // Checked again on the connection that will write, before the first
         // statement that could change anything (switching the journal mode
         // rewrites the file header).
-        migrate::probe(&conn, Self::SCHEMA_VERSION).map_err(not_a_catalog)?;
-        let mode: String =
-            conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
-        if !matches!(mode.as_str(), "wal" | "memory") {
-            log::warn!("catalog could not switch to a write-ahead log; journal mode is {mode}");
+        let found = migrate::probe(&conn, Self::SCHEMA_VERSION).map_err(not_a_catalog)?;
+        // SQLite opens a write-protected file for reading only. Such a file
+        // can be read as it is, but not set up or upgraded.
+        let read_only = conn.is_readonly(rusqlite::MAIN_DB)?;
+        if read_only && found != migrate::Probe::Catalog(Self::SCHEMA_VERSION) {
+            return Err(CatalogError::ReadOnly);
+        }
+        if !read_only {
+            let mode: String =
+                conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+            if !matches!(mode.as_str(), "wal" | "memory") {
+                log::warn!("catalog could not switch to a write-ahead log; journal mode is {mode}");
+            }
         }
         // A commit is on disk before the call that made it returns. On macOS
         // an ordinary fsync only reaches the drive's cache, so ask for the
@@ -140,17 +160,23 @@ impl Catalog {
             conn,
             quick_collection: CollectionId(quick),
             clock: Clock { last: newest },
+            read_only,
         })
     }
 
     /// Run `work` inside one immediate transaction, committing if it returns
     /// `Ok` and rolling back otherwise. `work` also receives the time stamp
     /// of this write in microseconds; stamps strictly increase from one write
-    /// to the next, whatever the system clock does.
+    /// to the next, whatever the system clock does. Fails with
+    /// [`CatalogError::ReadOnly`], before anything runs, on a write-protected
+    /// catalog.
     pub(crate) fn write<T>(
         &mut self,
         work: impl FnOnce(&Transaction<'_>, i64) -> Result<T>,
     ) -> Result<T> {
+        if self.read_only {
+            return Err(CatalogError::ReadOnly);
+        }
         let now = self.clock.tick();
         let tx = self
             .conn
@@ -304,7 +330,8 @@ mod tests {
         catalog
             .conn
             .execute(
-                "INSERT INTO history (photo_id, label, settings, created_at) VALUES (9999, 'x', '{}', 0)",
+                "INSERT INTO history (photo_id, label, settings, settings_format, created_at)
+                 VALUES (9999, 'x', '{}', 1, 0)",
                 [],
             )
             .unwrap();

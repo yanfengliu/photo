@@ -6,9 +6,9 @@ use rusqlite::params;
 
 use crate::catalog::Catalog;
 use crate::codec::unix_seconds;
-use crate::develop::{decode_settings, encode_settings};
 use crate::error::{CatalogError, Entity, Result};
 use crate::photos::require_photo;
+use crate::stored::{SETTINGS_WRITTEN, decode_settings, encode_settings};
 use crate::tree::clean_name;
 
 /// A named copy of a photo's develop settings.
@@ -40,8 +40,9 @@ impl Catalog {
         self.write(|tx, now| {
             require_photo(tx, photo)?;
             tx.execute(
-                "INSERT INTO snapshots (photo_id, name, settings, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![photo.0, name, json, now],
+                "INSERT INTO snapshots (photo_id, name, settings, settings_format, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![photo.0, name, json, SETTINGS_WRITTEN, now],
             )?;
             Ok(SnapshotId(tx.last_insert_rowid()))
         })
@@ -77,13 +78,14 @@ impl Catalog {
     pub fn snapshots(&self, photo: PhotoId) -> Result<Vec<Snapshot>> {
         require_photo(&self.conn, photo)?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name, created_at, settings FROM snapshots WHERE photo_id = ?1 ORDER BY id",
+            "SELECT id, name, created_at, settings, settings_format FROM snapshots
+             WHERE photo_id = ?1 ORDER BY id",
         )?;
         let mut rows = stmt.query([photo.0])?;
         let mut snapshots = Vec::new();
         while let Some(row) = rows.next()? {
             let id = SnapshotId(row.get(0)?);
-            match decode_settings(&row.get::<_, String>(3)?) {
+            match decode_settings(&row.get::<_, String>(3)?, row.get(4)?) {
                 Ok(settings) => snapshots.push(Snapshot {
                     id,
                     photo,
@@ -91,9 +93,7 @@ impl Catalog {
                     created_at: unix_seconds(row.get(2)?),
                     settings,
                 }),
-                Err(_) => {
-                    log::warn!("snapshot {id} cannot be read by this version and is not listed")
-                }
+                Err(error) => log::warn!("snapshot {id} is not listed: {error}"),
             }
         }
         Ok(snapshots)

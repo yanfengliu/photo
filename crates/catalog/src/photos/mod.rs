@@ -64,9 +64,11 @@ pub struct NewPhoto {
     /// Initial copyright notice; empty for none. Not taken from
     /// `metadata.copyright` unless the caller copies it here.
     pub copyright: String,
-    /// Keyword names. A name matches an existing keyword of that name
-    /// (ignoring ASCII case) anywhere in the hierarchy; otherwise a new
-    /// top-level keyword is created. Blank names are skipped.
+    /// Keyword names, each resolved as
+    /// [`Catalog::ensure_keyword`](crate::Catalog::ensure_keyword) does: the
+    /// only keyword of that name (ignoring ASCII case), wherever it sits, or
+    /// else the top-level keyword of that name, created if needed. Blank
+    /// names are skipped.
     pub keywords: Vec<String>,
     /// Settings to start from, or `None` for the default of the kind.
     pub develop: Option<DevelopSettings>,

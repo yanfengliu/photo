@@ -21,7 +21,11 @@
 //! - **User text is never SQL.** Statements are assembled from compile-time
 //!   fragments chosen by enums; every caller-supplied value is a bound
 //!   parameter. Text matching is literal (no wildcards) and ignores letter
-//!   case, for non-ASCII letters too.
+//!   case by Unicode's full case folding, one character at a time: `ß`
+//!   matches `ss`, `ﬁ` matches `fi` and `µ` matches `μ`. Text is not
+//!   normalised, so a letter with a combining accent does not match the
+//!   same letter written as one character, and Greek letters with accents
+//!   or iota subscript match only their own lower and upper case.
 //! - **Mutations can be undone.** Setters take one value per photo, develop
 //!   writes return a [`DevelopChange`], membership changes report exactly
 //!   what they added or removed, and removing photos or deleting keywords
@@ -31,10 +35,15 @@
 //!   exactly. Undone in reverse order, every restore is exact; one that
 //!   could only be partial (a photo's keyword is still deleted, say) is
 //!   refused rather than dropping anything.
-//! - **Unreadable data is never papered over.** Stored JSON this build
-//!   cannot read (damaged, or from a newer version) is reported or passed
-//!   over, and always left in the file as it is; it is never replaced by
-//!   defaults.
+//! - **What a newer version wrote is never lost.** Every stored copy of
+//!   develop settings and smart rules carries the number of the format it
+//!   is written in. Settings or rules this build cannot read, because they
+//!   are damaged ([`CatalogError::Corrupt`]) or in a newer format
+//!   ([`CatalogError::NewerFormat`]), are reported, or passed over in
+//!   listings, and left in the file as they are: never read with the parts
+//!   this build does not know dropped, never replaced by defaults, and
+//!   never overwritten, because a change that would replace them fails and
+//!   changes nothing.
 //! - **No real data is touched by accident.** Nothing here computes a
 //!   default location; every catalog is opened at a path the caller chose,
 //!   or in memory.
@@ -71,7 +80,10 @@ mod settings;
 mod smart;
 mod snapshots;
 mod sql;
+#[cfg(test)]
+mod statement_counts;
 mod stats;
+mod stored;
 mod text;
 mod tree;
 
@@ -81,7 +93,7 @@ pub use develop::{DevelopChange, DevelopEdit, HistoryStep};
 pub use error::{CatalogError, Entity, Result};
 pub use folders::FolderInfo;
 pub use imports::ImportRun;
-pub use keywords::{DeletedKeywords, KeywordInfo};
+pub use keywords::{DeletedKeywords, KeywordInfo, KeywordsChange};
 pub use membership::CollectionEntry;
 pub use photos::{NewPhoto, PhotoRecord, TextField};
 pub use presets::Preset;

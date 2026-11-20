@@ -8,12 +8,12 @@ use rusqlite::{Transaction, named_params};
 use super::{NewPhoto, master_at_path};
 use crate::catalog::Catalog;
 use crate::codec::{flag_to_sql, kind_to_sql, label_to_sql, rating_to_sql, to_i64};
-use crate::develop::encode_settings;
 use crate::error::{CatalogError, Result};
 use crate::folders::ensure_folder;
 use crate::imports::require_import;
-use crate::keywords::ensure_keyword;
+use crate::keywords::resolve_keyword;
 use crate::paths;
+use crate::stored::{SETTINGS_WRITTEN, encode_settings};
 use crate::text::natural_key;
 
 const INSERT: &str = "INSERT INTO photos (
@@ -21,13 +21,14 @@ const INSERT: &str = "INSERT INTO photos (
         width, height, capture_time, camera_make, camera_model, camera, lens,
         focal_length, focal_length_35, aperture, shutter, iso, exposure_bias, flash,
         gps_latitude, gps_longitude, gps_altitude, artist, file_copyright,
-        rating, flag, label, title, caption, creator, copyright, develop, has_edits
+        rating, flag, label, title, caption, creator, copyright, develop, develop_format, has_edits
     ) VALUES (
         :folder_id, :import_id, :path, :file_name, :file_name_key, :kind, :format, :file_size, :file_mtime, :added_at,
         :width, :height, :capture_time, :camera_make, :camera_model, :camera, :lens,
         :focal_length, :focal_length_35, :aperture, :shutter, :iso, :exposure_bias, :flash,
         :gps_latitude, :gps_longitude, :gps_altitude, :artist, :file_copyright,
-        :rating, :flag, :label, :title, :caption, :creator, :copyright, :develop, :has_edits
+        :rating, :flag, :label, :title, :caption, :creator, :copyright, :develop, :develop_format,
+        :has_edits
     )";
 
 impl Catalog {
@@ -153,19 +154,22 @@ fn insert_row(
         ":caption": photo.caption,
         ":creator": photo.creator,
         ":copyright": photo.copyright,
+        ":develop_format": develop.as_ref().map(|_| SETTINGS_WRITTEN),
         ":develop": develop,
         ":has_edits": has_edits,
     })?;
     Ok(tx.last_insert_rowid())
 }
 
+/// Give the photo the named keywords, each resolved as
+/// [`Catalog::ensure_keyword`](crate::Catalog::ensure_keyword) does.
 fn link_keywords(tx: &Transaction<'_>, photo: i64, names: &[String]) -> Result<()> {
     for name in names
         .iter()
         .map(|name| name.trim())
         .filter(|name| !name.is_empty())
     {
-        let keyword = ensure_keyword(tx, name)?;
+        let (keyword, _) = resolve_keyword(tx, name)?;
         tx.prepare_cached(
             "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?1, ?2)",
         )?

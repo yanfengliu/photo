@@ -5,7 +5,9 @@
 //! restored under its old id); every relation is a foreign key with an
 //! explicit delete rule; every foreign-key column is indexed so a cascade
 //! never scans a table. Catalog-generated time stamps are microseconds since
-//! the Unix epoch.
+//! the Unix epoch. Every stored copy of develop settings or smart rules has
+//! its format number in the column beside it (`*_format`), so that a build
+//! can tell settings it would only partly understand from ones it knows.
 
 /// Schema version 1.
 pub(crate) const V1: &str = "
@@ -64,10 +66,12 @@ CREATE TABLE photos (
     creator          TEXT NOT NULL DEFAULT '',
     copyright        TEXT NOT NULL DEFAULT '',
     develop          TEXT,
+    develop_format   INTEGER,
     develop_version  INTEGER NOT NULL DEFAULT 0,
     has_edits        INTEGER NOT NULL DEFAULT 0 CHECK (has_edits IN (0, 1)),
     edited_at        INTEGER,
-    CHECK ((master_id IS NULL) = (copy_name IS NULL))
+    CHECK ((master_id IS NULL) = (copy_name IS NULL)),
+    CHECK ((develop IS NULL) = (develop_format IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX photos_master_path ON photos(path) WHERE master_id IS NULL;
 CREATE INDEX photos_master ON photos(master_id);
@@ -80,10 +84,11 @@ CREATE INDEX photos_capture ON photos(capture_time);
 CREATE TABLE history (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-    label       TEXT NOT NULL,
-    settings    TEXT NOT NULL,
-    created_at  INTEGER NOT NULL,
-    is_current  INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1))
+    label            TEXT NOT NULL,
+    settings         TEXT NOT NULL,
+    settings_format  INTEGER NOT NULL,
+    created_at       INTEGER NOT NULL,
+    is_current       INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1))
 ) STRICT;
 CREATE INDEX history_photo ON history(photo_id, id);
 CREATE UNIQUE INDEX history_one_current ON history(photo_id) WHERE is_current = 1;
@@ -91,19 +96,21 @@ CREATE UNIQUE INDEX history_one_current ON history(photo_id) WHERE is_current = 
 CREATE TABLE snapshots (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    settings    TEXT NOT NULL,
-    created_at  INTEGER NOT NULL
+    name             TEXT NOT NULL,
+    settings         TEXT NOT NULL,
+    settings_format  INTEGER NOT NULL,
+    created_at       INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX snapshots_photo ON snapshots(photo_id, id);
 
 CREATE TABLE presets (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_name  TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    settings    TEXT NOT NULL,
-    groups      TEXT NOT NULL,
-    created_at  INTEGER NOT NULL
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_name       TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    settings         TEXT NOT NULL,
+    settings_format  INTEGER NOT NULL,
+    groups           TEXT NOT NULL,
+    created_at       INTEGER NOT NULL
 ) STRICT;
 CREATE UNIQUE INDEX presets_name ON presets(group_name COLLATE NOCASE, name COLLATE NOCASE);
 
@@ -113,10 +120,12 @@ CREATE TABLE collections (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id   INTEGER REFERENCES collections(id) ON DELETE CASCADE,
     kind        INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),
-    name        TEXT NOT NULL,
-    rules       TEXT,
-    created_at  INTEGER NOT NULL,
-    CHECK ((kind = 2) = (rules IS NOT NULL))
+    name          TEXT NOT NULL,
+    rules         TEXT,
+    rules_format  INTEGER,
+    created_at    INTEGER NOT NULL,
+    CHECK ((kind = 2) = (rules IS NOT NULL)),
+    CHECK ((rules IS NULL) = (rules_format IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX collections_sibling_name
     ON collections(COALESCE(parent_id, 0), name COLLATE NOCASE);

@@ -208,12 +208,18 @@ fn setting_keywords_by_name_reuses_existing_keywords_and_creates_the_rest() {
     let set = catalog
         .set_photo_keywords(photos[0], &["paris", "Night", " night ", ""])
         .unwrap();
-    assert_eq!(set.len(), 2, "blank names are skipped and repeats collapse");
     assert_eq!(
-        set[0], paris,
+        set.added.len(),
+        2,
+        "blank names are skipped and repeats collapse"
+    );
+    assert_eq!(
+        set.added[0], paris,
         "an existing keyword is matched ignoring case, wherever it sits"
     );
-    let night = set[1];
+    let night = set.added[1];
+    assert_eq!(set.created, [night]);
+    assert!(set.removed.is_empty());
     assert_eq!(
         keyword_names(&catalog.photo_keywords(photos[0]).unwrap()),
         ["Night", "Paris"]
