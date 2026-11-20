@@ -8,7 +8,7 @@
 
 use photo_core::develop::DevelopSettings;
 use photo_core::meta::{HistoryId, PhotoId};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::catalog::Catalog;
 use crate::codec::{kind_from_sql, unix_seconds};
@@ -374,14 +374,32 @@ fn current_point(tx: &Transaction<'_>, photo: PhotoId) -> Result<Point> {
     })
 }
 
+/// A develop version no photo has had before: the next value of the
+/// catalog's own counter, which never goes back.
+pub(crate) fn next_develop_version(conn: &Connection) -> Result<i64> {
+    let version = conn
+        .prepare_cached(
+            "UPDATE counters SET value = value + 1 WHERE name = 'develop_version' RETURNING value",
+        )?
+        .query_row([], |row| row.get(0))?;
+    Ok(version)
+}
+
 /// Make `point` the photo's develop state, under a new `develop_version`.
 fn apply_point(tx: &Transaction<'_>, photo: PhotoId, point: &Point) -> Result<()> {
+    let version = next_develop_version(tx)?;
     let changed = tx
         .prepare_cached(
-            "UPDATE photos SET develop = ?2, has_edits = ?3, edited_at = ?4, develop_version = develop_version + 1
+            "UPDATE photos SET develop = ?2, has_edits = ?3, edited_at = ?4, develop_version = ?5
              WHERE id = ?1",
         )?
-        .execute(params![photo.0, point.settings, point.has_edits, point.edited_at])?;
+        .execute(params![
+            photo.0,
+            point.settings,
+            point.has_edits,
+            point.edited_at,
+            version
+        ])?;
     if changed == 0 {
         return Err(CatalogError::not_found(Entity::Photo, photo.0));
     }

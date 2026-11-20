@@ -8,7 +8,7 @@ use crate::codec::to_u64;
 use crate::error::Result;
 use crate::photos::{require_photo, require_photos};
 use crate::text::natural_key;
-use crate::tree::{KEYWORDS, clean_name};
+use crate::tree::{DeletedTree, KEYWORDS, clean_name};
 
 /// A keyword and how many photos carry it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +36,27 @@ fn keyword_from_row(row: &Row<'_>) -> rusqlite::Result<KeywordInfo> {
         name: row.get(2)?,
         photo_count: to_u64(row.get(3)?),
     })
+}
+
+/// Keywords that were deleted together: the one asked for and every keyword
+/// beneath it, with the photos each was assigned to.
+///
+/// Returned by [`Catalog::delete_keyword`]; hand it to
+/// [`Catalog::restore_keywords`] to put everything back under the same ids.
+/// It only lives in memory, and only makes sense for the catalog it came
+/// from.
+#[derive(Clone, Debug)]
+pub struct DeletedKeywords {
+    ids: Vec<KeywordId>,
+    deleted: DeletedTree,
+}
+
+impl DeletedKeywords {
+    /// Every keyword that was deleted: the one asked for first, then each
+    /// keyword after the keyword it sat under.
+    pub fn keyword_ids(&self) -> &[KeywordId] {
+        &self.ids
+    }
 }
 
 fn in_name_order(mut keywords: Vec<KeywordInfo>) -> Vec<KeywordInfo> {
@@ -132,13 +153,33 @@ impl Catalog {
     }
 
     /// Delete a keyword, every keyword beneath it, and all their
-    /// assignments. Photos are not affected otherwise.
-    pub fn delete_keyword(&mut self, id: KeywordId) -> Result<()> {
+    /// assignments. Photos are not affected otherwise. Everything deleted is
+    /// returned, so that [`Catalog::restore_keywords`] can undo it.
+    pub fn delete_keyword(&mut self, id: KeywordId) -> Result<DeletedKeywords> {
         self.write(|tx, _| {
-            KEYWORDS.require(tx, id.0)?;
-            tx.execute("DELETE FROM keywords WHERE id = ?1", [id.0])?;
-            Ok(())
+            let deleted = KEYWORDS.delete_branch(tx, id.0)?;
+            Ok(DeletedKeywords {
+                ids: deleted.ids.iter().copied().map(KeywordId).collect(),
+                deleted,
+            })
         })
+    }
+
+    /// Put deleted keywords back exactly as they were: the same ids, names
+    /// and places in the hierarchy, assigned to the same photos.
+    ///
+    /// Refused, changing nothing, unless that can be done exactly:
+    /// [`CatalogError::AlreadyExists`] if they are back already;
+    /// [`CatalogError::NotFound`] if the keyword they sat under, or a photo
+    /// that carried one of them, is gone (put that back first, as an undo
+    /// stack does); and [`CatalogError::NameTaken`] if another keyword
+    /// there has taken the name.
+    ///
+    /// [`CatalogError::AlreadyExists`]: crate::CatalogError::AlreadyExists
+    /// [`CatalogError::NotFound`]: crate::CatalogError::NotFound
+    /// [`CatalogError::NameTaken`]: crate::CatalogError::NameTaken
+    pub fn restore_keywords(&mut self, deleted: &DeletedKeywords) -> Result<()> {
+        self.write(|tx, _| KEYWORDS.restore_branch(tx, &deleted.deleted))
     }
 
     /// Assign a keyword to photos. Returns the photos that did not have it

@@ -380,7 +380,7 @@ fn the_quick_collection_is_built_in_and_cannot_be_changed_itself() {
     for refused in [
         catalog.rename_collection(quick, "Mine"),
         catalog.move_collection(quick, None),
-        catalog.delete_collection(quick),
+        catalog.delete_collection(quick).map(drop),
     ] {
         assert!(matches!(
             refused,

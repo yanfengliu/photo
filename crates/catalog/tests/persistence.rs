@@ -292,11 +292,15 @@ fn edits_made_after_reopening_continue_where_the_last_session_stopped() {
         "history ids keep counting up across sessions"
     );
 
+    // Develop versions come from one counter for the whole catalog, and it
+    // carried over from the last session too.
+    let latest = catalog.photo(other).unwrap().develop_version;
+    assert!(latest > version);
     catalog
         .set_develop_settings(photo, &exposure(0.9), None)
         .unwrap();
     assert_eq!(catalog.query_ids(&by_edit_time).unwrap(), [other, photo]);
-    assert_eq!(catalog.photo(photo).unwrap().develop_version, version + 1);
+    assert_eq!(catalog.photo(photo).unwrap().develop_version, latest + 1);
     assert!(catalog.photo(photo).unwrap().edited_at.unwrap() >= edited_at);
     assert!(catalog.begin_import().unwrap().0 > 1);
 }
