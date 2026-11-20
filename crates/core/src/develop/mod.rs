@@ -14,6 +14,7 @@ mod detail;
 mod geometry;
 mod groups;
 mod local;
+mod local_adjust;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,7 @@ pub use detail::{Detail, Effects, Grain, NoiseReduction, Sharpening, Vignette};
 pub use geometry::{Crop, CropConstraint, CropRect, LensCorrections, Orientation, Transform};
 pub use groups::{GroupSet, SettingsGroup};
 pub use local::{BrushStroke, LocalAdjustments, Mask, MaskComponent, MaskShape, Spot, SpotMode};
+pub use local_adjust::LocalAdj;
 
 /// Version of the rendering math. Stored with every photo so that a future
 /// change to the pipeline can keep old edits looking the way they did.
@@ -148,14 +150,33 @@ impl DevelopSettings {
         *self == Self::default_for(kind)
     }
 
-    /// Force every scalar adjustment into its valid range for `kind`.
+    /// Force every scalar adjustment into its valid range for `kind`,
+    /// including each mask's local adjustments and each healing spot.
     /// Settings arriving from outside (XMP, presets, a paste from a photo of
     /// another kind) pass through this before they are stored.
     ///
     /// A custom white balance cannot be carried between RAW and raster
     /// sources because the units differ, so out-of-range temperature falls
-    /// back to as-shot rather than being clamped to a meaningless value.
+    /// back to as-shot rather than being clamped to a meaningless value. A
+    /// spot whose position is not finite is dropped.
     pub fn sanitize_for(&mut self, kind: FileKind) {
+        for mask in &mut self.masks {
+            if !(0.0..=100.0).contains(&mask.amount) {
+                mask.amount = if mask.amount < 0.0 { 0.0 } else { 100.0 };
+            }
+            for adj in LocalAdj::ALL {
+                let value = adj.get(&mask.adjust);
+                let clamped = adj.spec().clamp(value);
+                if clamped != value {
+                    adj.set(&mut mask.adjust, clamped);
+                }
+            }
+        }
+        self.spots = self
+            .spots
+            .iter()
+            .filter_map(|spot| spot.sanitized())
+            .collect();
         if self.white_balance.preset != WbPreset::AsShot {
             let spec = Adj::Temperature.spec_for(kind);
             let temp = self.white_balance.temp;
@@ -294,5 +315,47 @@ mod tests {
         let mut as_shot = DevelopSettings::default();
         as_shot.sanitize_for(FileKind::Raw);
         assert_eq!(as_shot, DevelopSettings::default());
+    }
+
+    #[test]
+    fn sanitize_reaches_into_masks_and_spots() {
+        let point = crate::geom::Point::new;
+        let spot = Spot {
+            mode: SpotMode::Clone,
+            target: point(0.5, 0.5),
+            source: point(0.6, 0.5),
+            radius: 9.0,
+            feather: -3.0,
+            opacity: f32::NAN,
+        };
+        let unplaceable = Spot {
+            target: point(f32::NAN, 0.5),
+            ..spot
+        };
+        let mut mask = Mask::from_shape(
+            MaskShape::Linear {
+                start: point(0.5, 0.0),
+                end: point(0.5, 0.5),
+            },
+            1,
+        );
+        mask.amount = 250.0;
+        mask.adjust.exposure = -40.0;
+        mask.adjust.clarity = f32::INFINITY;
+        let mut settings = DevelopSettings {
+            spots: vec![spot, unplaceable],
+            masks: vec![mask],
+            ..Default::default()
+        };
+
+        settings.sanitize_for(FileKind::Raster);
+
+        assert_eq!(settings.spots.len(), 1);
+        assert_eq!(settings.spots[0].radius, Spot::MAX_RADIUS);
+        assert_eq!(settings.spots[0].feather, 0.0);
+        assert_eq!(settings.spots[0].opacity, 100.0);
+        assert_eq!(settings.masks[0].amount, 100.0);
+        assert_eq!(settings.masks[0].adjust.exposure, -4.0);
+        assert_eq!(settings.masks[0].adjust.clarity, 0.0);
     }
 }

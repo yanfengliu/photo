@@ -38,6 +38,34 @@ pub struct Spot {
     pub opacity: f32,
 }
 
+impl Spot {
+    /// Smallest and largest allowed `radius`.
+    pub const MIN_RADIUS: f32 = 0.001;
+    pub const MAX_RADIUS: f32 = 0.25;
+
+    /// This spot with every number forced into range, or `None` when a
+    /// position is not finite and the spot cannot be placed at all.
+    pub fn sanitized(mut self) -> Option<Self> {
+        let placed = [self.target, self.source]
+            .iter()
+            .all(|p| p.x.is_finite() && p.y.is_finite());
+        if !placed {
+            return None;
+        }
+        let in_range = |value: f32, min: f32, max: f32, fallback: f32| {
+            if value.is_finite() {
+                value.clamp(min, max)
+            } else {
+                fallback
+            }
+        };
+        self.radius = in_range(self.radius, Self::MIN_RADIUS, Self::MAX_RADIUS, 0.02);
+        self.feather = in_range(self.feather, 0.0, 100.0, 50.0);
+        self.opacity = in_range(self.opacity, 0.0, 100.0, 100.0);
+        Some(self)
+    }
+}
+
 /// Adjustments a mask applies on top of the global ones. `exposure` is in
 /// stops (-4 to 4); everything else runs from -100 to 100. `temp` and `tint`
 /// are always relative offsets, whatever the source kind.
