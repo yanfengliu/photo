@@ -7,6 +7,11 @@
 //! changes after that, the recorded stamp is the older one and the next
 //! request renders again; the pixels can never claim a newer file than they
 //! came from.
+//!
+//! A cache file counts only if its pixels came from where they should:
+//! a render, or the embedded preview for settings this build cannot read.
+//! A RAW photo that has to be rendered shows its embedded preview first,
+//! handed over through `interim` while the render runs.
 
 use std::fs;
 use std::io;
@@ -14,10 +19,13 @@ use std::path::{Path, PathBuf};
 
 use photo_core::develop::DevelopSettings;
 use photo_core::meta::{FileKind, PhotoId};
+use photo_develop::CancelToken;
 
-use super::disk::{self, Header, Stamp};
+use super::disk::{self, Header};
 use super::render::{self, RenderError, RenderSource};
 use super::{Preview, PreviewOrigin, PreviewSize};
+use crate::sources::Sources;
+use crate::stamp::Stamp;
 
 /// What a worker learned about the source file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,11 +53,14 @@ pub(crate) struct PreviewJob {
     pub(crate) version: u64,
     pub(crate) path: PathBuf,
     pub(crate) kind: FileKind,
-    pub(crate) settings: DevelopSettings,
+    /// `None` when the settings were saved by a newer build.
+    pub(crate) settings: Option<DevelopSettings>,
+    pub(crate) sources: Sources,
+    pub(crate) cancel: CancelToken,
 }
 
 impl PreviewJob {
-    pub(crate) fn run(self) -> JobResult {
+    pub(crate) fn run(self, interim: &dyn Fn(Preview)) -> JobResult {
         let file = disk::file_path(&self.root, self.photo, self.size, self.version);
         let stamp = match fs::metadata(&self.path) {
             Ok(metadata) => Stamp::of(&metadata),
@@ -61,10 +72,16 @@ impl PreviewJob {
                 };
             }
         };
+        let wanted = if self.settings.is_some() {
+            PreviewOrigin::Rendered
+        } else {
+            PreviewOrigin::EmbeddedPreview
+        };
         if let Some((header, image)) = disk::read(&file)
             && header.version == self.version
             && header.size == self.size
             && header.source == stamp
+            && header.origin == wanted
         {
             return JobResult {
                 preview: Ok(Preview::new(
@@ -77,10 +94,29 @@ impl PreviewJob {
                 source: SourceSeen::Present,
             };
         }
+        if let (FileKind::Raw, Some(settings)) = (self.kind, &self.settings)
+            && let Ok(first) = render::embedded(
+                &self.path,
+                self.kind,
+                settings.orientation,
+                self.size.long_edge(),
+            )
+        {
+            interim(Preview::new(
+                first.image,
+                self.version,
+                self.size,
+                first.origin,
+                None,
+            ));
+        }
         let source = RenderSource {
             path: &self.path,
             kind: self.kind,
-            settings: &self.settings,
+            stamp,
+            settings: self.settings.as_ref(),
+            sources: &self.sources,
+            cancel: &self.cancel,
         };
         match render::render(&source, self.size.long_edge()) {
             Ok(rendered) => {

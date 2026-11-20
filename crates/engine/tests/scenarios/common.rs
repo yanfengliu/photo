@@ -4,9 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use photo_core::image::Rgba8Image;
 use photo_core::meta::PhotoId;
 use photo_engine::{
-    Engine, EngineConfig, ImportMode, ImportRequest, ImportSummary, Sort, SortDirection, SortKey,
+    CanvasView, DevelopLoad, Engine, EngineConfig, ImportMode, ImportRequest, ImportSummary, Sort,
+    SortDirection, SortKey,
 };
 use photo_testkit::TempLibrary;
 use tempfile::TempDir;
@@ -15,12 +17,17 @@ use tempfile::TempDir;
 /// it is broken.
 pub const PATIENCE: Duration = Duration::from_secs(60);
 
-/// The engine's files in a temporary directory.
+/// The engine's files in a temporary directory, laid out as the app lays
+/// them out: the catalog and its previews in a folder of their own, the
+/// exports beside it. Creates the catalog's folder.
 pub fn config(dir: &Path, worker_threads: usize) -> EngineConfig {
+    let catalog = dir.join("catalog");
+    std::fs::create_dir_all(&catalog).unwrap();
     EngineConfig {
-        catalog_path: dir.join("library.photocat"),
-        previews_dir: dir.join("library.previews"),
+        catalog_path: catalog.join("library.photocat"),
+        previews_dir: catalog.join("library.previews"),
         worker_threads,
+        export_dir: dir.join("exports"),
     }
 }
 
@@ -135,6 +142,38 @@ pub fn own_order() -> Sort {
         key: SortKey::Custom,
         direction: SortDirection::Ascending,
     }
+}
+
+/// Open `photo` in Develop on `canvas` and wait for its first frame.
+pub fn open_rendered(studio: &mut Studio, photo: PhotoId, canvas: CanvasView) {
+    studio.engine.open_develop(photo).unwrap();
+    studio.engine.set_canvas_view(canvas);
+    studio.settle();
+    let session = studio.engine.develop().unwrap();
+    assert_eq!(session.load_state(), &DevelopLoad::Rendered);
+}
+
+/// The mean of the red, green and blue code values of an image.
+pub fn mean_luma(image: &Rgba8Image) -> f64 {
+    mean_rgb(image, 0, 0, image.width, image.height)
+        .iter()
+        .sum::<f64>()
+        / 3.0
+}
+
+/// The mean red, green and blue code values of a rectangle of an image.
+pub fn mean_rgb(image: &Rgba8Image, x: u32, y: u32, width: u32, height: u32) -> [f64; 3] {
+    let mut sum = [0.0; 3];
+    for row in y..y + height {
+        for column in x..x + width {
+            let pixel = image.pixel(column, row);
+            for (total, value) in sum.iter_mut().zip(pixel) {
+                *total += f64::from(value);
+            }
+        }
+    }
+    let count = f64::from(width * height);
+    sum.map(|total| total / count)
 }
 
 /// `count` small JPEG files in a new temporary directory.

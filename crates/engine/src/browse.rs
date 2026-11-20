@@ -93,6 +93,8 @@ pub(crate) struct Browser {
     query: PhotoQuery,
     photos: Vec<PhotoSummary>,
     index: HashMap<PhotoId, usize>,
+    /// How many photos the source holds before the filter.
+    source_total: u64,
     folders: Vec<FolderInfo>,
     collections: Vec<CollectionInfo>,
     keywords: Vec<KeywordInfo>,
@@ -123,6 +125,7 @@ impl Browser {
             query: PhotoQuery::default(),
             photos: Vec::new(),
             index: HashMap::new(),
+            source_total: 0,
             folders: Vec::new(),
             collections: Vec::new(),
             keywords: Vec::new(),
@@ -158,6 +161,10 @@ impl Browser {
 
     pub(crate) fn counts(&self) -> SourceCounts {
         self.counts
+    }
+
+    pub(crate) fn source_total(&self) -> u64 {
+        self.source_total
     }
 
     pub(crate) fn set_source(&mut self, source: Source) {
@@ -279,8 +286,9 @@ impl Browser {
         Ok(None)
     }
 
-    /// Run the query again. A source that no longer exists (or a smart
-    /// collection whose rules cannot be read) falls back to all photos.
+    /// Run the query again, and count the source without the filter. A
+    /// source that no longer exists (or a smart collection whose rules
+    /// cannot be read) falls back to all photos.
     fn requery(&mut self, catalog: &Catalog) -> Result<Vec<PhotoId>, CatalogError> {
         let photos = match catalog.query(&self.query) {
             Ok(photos) => photos,
@@ -294,6 +302,11 @@ impl Browser {
                 catalog.query(&self.query)?
             }
             Err(error) => return Err(error),
+        };
+        self.source_total = if self.query.filter == Filter::default() {
+            photos.len() as u64
+        } else {
+            catalog.count(&self.query.source)?
         };
         let previous = self.photos.iter().map(|photo| photo.id).collect();
         self.index = photos

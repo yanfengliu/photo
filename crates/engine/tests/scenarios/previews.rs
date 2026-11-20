@@ -55,7 +55,12 @@ fn visible_thumbnails_are_ready_and_on_disk_after_wait_idle() {
         let summary = studio.engine.summary(photo).unwrap().clone();
         assert_eq!(version, summary.develop_version);
         let preview = studio.engine.thumbnail(photo).ready().cloned().unwrap();
-        assert_eq!(preview.origin(), PreviewOrigin::EmbeddedPreview);
+        assert_eq!(
+            preview.origin(),
+            PreviewOrigin::Rendered,
+            "{}",
+            summary.file_name
+        );
         assert_eq!(preview.size(), PreviewSize::Thumbnail);
         let image = preview.image();
         assert!(image.width.max(image.height) <= 384);
@@ -68,7 +73,7 @@ fn visible_thumbnails_are_ready_and_on_disk_after_wait_idle() {
         assert_eq!(
             studio.engine.load_state(photo, PreviewSize::Thumbnail),
             LoadState::Ready {
-                origin: PreviewOrigin::EmbeddedPreview
+                origin: PreviewOrigin::Rendered
             }
         );
         let file = preview_file(&root, photo, "thumb", version);
@@ -250,4 +255,53 @@ fn import_candidates_get_thumbnails_from_the_embedded_preview() {
             .unwrap();
         assert!(preview.image().width.max(preview.image().height) <= 384);
     }
+}
+
+#[test]
+fn a_cell_knows_the_shape_of_its_thumbnail_before_it_arrives() {
+    let library = TempLibrary::new();
+    let mut studio = Studio::new();
+    studio.import_library(&library);
+    let (dawn, ridge) = (studio.id("dawn.jpg"), studio.id("ridge.jpg"));
+    assert_eq!(studio.engine.displayed_size(dawn), Some((96, 64)));
+    assert_eq!(
+        studio.engine.displayed_size(ridge),
+        Some((64, 96)),
+        "upright"
+    );
+    studio
+        .engine
+        .rotate_right(Target::Photos(vec![dawn]))
+        .unwrap();
+    assert_eq!(
+        studio.engine.displayed_size(dawn),
+        Some((64, 96)),
+        "follows the edit"
+    );
+    let mut settings = studio.engine.develop_settings(dawn).unwrap();
+    settings.crop.rect = Some(photo_core::develop::CropRect {
+        cx: 0.5,
+        cy: 0.5,
+        width: 0.5,
+        height: 1.0,
+    });
+    studio.engine.open_develop(dawn).unwrap();
+    studio.engine.apply_settings(settings).unwrap();
+    let shape = studio.engine.displayed_size(dawn).unwrap();
+    studio.engine.thumbnail(dawn);
+    studio.settle();
+    let thumbnail = studio.engine.thumbnail(dawn).ready().cloned().unwrap();
+    let image = thumbnail.image();
+    assert_eq!(shape, (32, 96), "a half-width crop of the turned frame");
+    assert_eq!(
+        (image.width, image.height),
+        shape,
+        "the thumbnail has that shape"
+    );
+    assert_eq!(
+        studio
+            .engine
+            .displayed_size(photo_core::meta::PhotoId(9999)),
+        None
+    );
 }

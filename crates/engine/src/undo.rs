@@ -57,6 +57,15 @@ pub(crate) struct KeywordLink {
     pub(crate) linked: bool,
 }
 
+/// One photo's keywords, exactly, before and after a change of its whole
+/// list.
+#[derive(Clone, Debug)]
+pub(crate) struct KeywordList {
+    pub(crate) photo: PhotoId,
+    pub(crate) before: Vec<KeywordId>,
+    pub(crate) after: Vec<KeywordId>,
+}
+
 /// Collection memberships that are either in place or not.
 #[derive(Clone, Debug)]
 pub(crate) struct Membership {
@@ -83,6 +92,7 @@ pub(crate) enum Command {
     Labels(Values<ColorLabel>),
     Text(TextField, Values<String>),
     Keyword(KeywordLink),
+    KeywordList(KeywordList),
     Develop(Vec<DevelopChange>),
     /// Virtual copies: present after the command, removed when undone.
     Copies(Presence),
@@ -105,6 +115,9 @@ impl Command {
             Self::Labels(values) => catalog.set_labels(&values.before),
             Self::Text(field, values) => catalog.set_text(*field, &values.before),
             Self::Keyword(link) => toggle_keyword(catalog, link),
+            Self::KeywordList(list) => catalog
+                .set_photo_keyword_ids(list.photo, &list.before)
+                .map(drop),
             Self::Develop(changes) => catalog.undo_develop(changes),
             Self::Copies(presence) => remove(catalog, presence),
             Self::Removal(presence) => restore(catalog, presence),
@@ -127,6 +140,9 @@ impl Command {
             Self::Labels(values) => catalog.set_labels(&values.after),
             Self::Text(field, values) => catalog.set_text(*field, &values.after),
             Self::Keyword(link) => toggle_keyword(catalog, link),
+            Self::KeywordList(list) => catalog
+                .set_photo_keyword_ids(list.photo, &list.after)
+                .map(drop),
             Self::Develop(changes) => catalog.redo_develop(changes),
             Self::Copies(presence) => restore(catalog, presence),
             Self::Removal(presence) => remove(catalog, presence),
@@ -151,6 +167,7 @@ impl Command {
                 out.push(attribute(Attribute::Text(*field), values.photos()));
             }
             Self::Keyword(link) => out.push(attribute(Attribute::Keywords, link.photos.clone())),
+            Self::KeywordList(list) => out.push(attribute(Attribute::Keywords, vec![list.photo])),
             Self::Develop(changes) => {
                 let photos = changes.iter().map(DevelopChange::photo).collect();
                 out.push(attribute(Attribute::Develop, photos));

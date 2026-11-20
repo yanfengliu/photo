@@ -17,7 +17,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::UNIX_EPOCH;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType, ImageFormat};
@@ -27,6 +26,7 @@ use photo_core::meta::PhotoId;
 use photo_imaging::Histogram;
 
 use super::{PreviewOrigin, PreviewSize};
+use crate::stamp::Stamp;
 
 const MAGIC: &[u8; 8] = b"PHOTOPRV";
 const FORMAT: u8 = 1;
@@ -34,38 +34,6 @@ const START_OF_IMAGE: [u8; 2] = [0xff, 0xd8];
 const APP0: u8 = 0xe0;
 const COMMENT: u8 = 0xfe;
 const START_OF_SCAN: u8 = 0xda;
-
-/// The source file as a cache entry saw it: if either number differs now,
-/// the file changed and the entry no longer describes it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Stamp {
-    pub(crate) bytes: u64,
-    pub(crate) modified_secs: i64,
-    pub(crate) modified_nanos: u32,
-}
-
-impl Stamp {
-    pub(crate) fn of(metadata: &fs::Metadata) -> Self {
-        let (modified_secs, modified_nanos) = match metadata.modified() {
-            Ok(time) => match time.duration_since(UNIX_EPOCH) {
-                Ok(after) => (
-                    i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
-                    after.subsec_nanos(),
-                ),
-                Err(before) => (
-                    -i64::try_from(before.duration().as_secs()).unwrap_or(i64::MAX),
-                    before.duration().subsec_nanos(),
-                ),
-            },
-            Err(_) => (0, 0),
-        };
-        Self {
-            bytes: metadata.len(),
-            modified_secs,
-            modified_nanos,
-        }
-    }
-}
 
 /// What a preview file holds besides its pixels.
 #[derive(Clone, Debug, PartialEq)]

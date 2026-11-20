@@ -182,6 +182,15 @@ fn keywords_are_added_removed_and_set_by_name_and_undone_exactly() {
         .unwrap();
     assert_eq!(keyword_names(&studio, a), ["one", "sea", "two"]);
     assert_eq!(keyword_names(&studio, b), ["coast", "sea"]);
+    let id_of = |studio: &Studio, name: &str| {
+        studio
+            .engine
+            .keywords()
+            .iter()
+            .find(|keyword| keyword.name == name)
+            .map(|keyword| keyword.id)
+    };
+    let one = id_of(&studio, "one").unwrap();
     studio.engine.undo().unwrap();
     assert_eq!(keyword_names(&studio, a), ["coast", "sea"]);
     let counts: Vec<(String, u64)> = studio
@@ -190,7 +199,14 @@ fn keywords_are_added_removed_and_set_by_name_and_undone_exactly() {
         .iter()
         .map(|keyword| (keyword.name.clone(), keyword.photo_count))
         .collect();
-    assert!(counts.contains(&("coast".to_string(), 2)) && counts.contains(&("one".to_string(), 0)));
+    assert_eq!(
+        counts,
+        [("coast".to_string(), 2), ("sea".to_string(), 2)],
+        "the keywords the change created are gone again"
+    );
+    studio.engine.redo().unwrap();
+    assert_eq!(keyword_names(&studio, a), ["one", "sea", "two"]);
+    assert_eq!(id_of(&studio, "one"), Some(one), "back under its own id");
 }
 
 #[test]
@@ -333,4 +349,85 @@ fn removing_then_undoing_restores_ids_attributes_keywords_and_collections() {
     assert!(studio.engine.photo(photo).is_err());
     studio.engine.undo().unwrap();
     assert_eq!(studio.engine.photo(photo).unwrap().rating, Rating::new(4));
+}
+
+#[test]
+fn a_mixed_selection_gets_one_label_and_each_photo_gets_its_own_back() {
+    let (_library, mut studio, p) = studio();
+    let engine = &mut studio.engine;
+    engine
+        .set_label(Target::Photos(vec![p[0]]), ColorLabel::Red)
+        .unwrap();
+    engine
+        .set_label(Target::Photos(vec![p[1]]), ColorLabel::Blue)
+        .unwrap();
+    engine
+        .set_label(Target::Photos(p[..3].to_vec()), ColorLabel::Red)
+        .unwrap();
+    let labels = |engine: &photo_engine::Engine| -> Vec<ColorLabel> {
+        p[..3]
+            .iter()
+            .map(|photo| engine.summary(*photo).unwrap().label)
+            .collect()
+    };
+    assert_eq!(labels(engine), [ColorLabel::Red; 3], "set, not toggled");
+    assert_eq!(engine.undo_label(), Some("Set Color Label to Red"));
+    engine.undo().unwrap();
+    assert_eq!(
+        labels(engine),
+        [ColorLabel::Red, ColorLabel::Blue, ColorLabel::None]
+    );
+    engine
+        .set_label(Target::Photos(p[..3].to_vec()), ColorLabel::None)
+        .unwrap();
+    assert_eq!(labels(engine), [ColorLabel::None; 3]);
+    assert_eq!(engine.undo_label(), Some("Clear Color Label"));
+}
+
+#[test]
+fn keywords_chosen_by_id_are_exact_where_names_are_shared() {
+    let (_library, mut studio, p) = studio();
+    let engine = &mut studio.engine;
+    let places = engine.create_keyword("Places", None).unwrap();
+    let people = engine.create_keyword("People", None).unwrap();
+    let city = engine.create_keyword("Paris", Some(places)).unwrap();
+    let person = engine.create_keyword("Paris", Some(people)).unwrap();
+    let both = Target::Photos(vec![p[0], p[1]]);
+    engine.add_keyword_ids(both.clone(), &[person]).unwrap();
+    engine
+        .add_keyword_ids(Target::Photos(vec![p[1]]), &[city, places])
+        .unwrap();
+    assert_eq!(engine.undo_label(), Some("Add 2 Keywords"));
+    let ids = |engine: &photo_engine::Engine, photo: PhotoId| -> Vec<_> {
+        engine
+            .photo_keywords(photo)
+            .unwrap()
+            .iter()
+            .map(|keyword| keyword.id)
+            .collect()
+    };
+    assert_eq!(ids(engine, p[0]), [person]);
+
+    let uses = engine
+        .keywords_of(Target::Photos(vec![p[0], p[1], p[2]]))
+        .unwrap();
+    let counted: Vec<(_, usize)> = uses
+        .iter()
+        .map(|used| (used.keyword.id, used.photos))
+        .collect();
+    assert_eq!(counted.len(), 3);
+    assert!(counted.contains(&(person, 2)) && counted.contains(&(city, 1)));
+    let names: Vec<&str> = uses.iter().map(|used| used.keyword.name.as_str()).collect();
+    assert_eq!(names, ["Paris", "Paris", "Places"], "in name order");
+
+    engine.remove_keyword_ids(both.clone(), &[person]).unwrap();
+    assert_eq!(engine.undo_label(), Some("Remove Keyword \"Paris\""));
+    assert!(ids(engine, p[0]).is_empty());
+    assert_eq!(ids(engine, p[1]).len(), 2, "the city keyword stays");
+    engine.undo().unwrap();
+    assert_eq!(ids(engine, p[0]), [person]);
+
+    let unknown = photo_core::meta::KeywordId(9999);
+    assert!(engine.add_keyword_ids(both, &[city, unknown]).is_err());
+    assert_eq!(ids(engine, p[0]), [person], "nothing changed");
 }

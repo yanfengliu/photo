@@ -5,22 +5,27 @@
 //! file, writing the cache, the histogram, the memory cache, scheduling) is
 //! independent of how the pixels are made.
 //!
-//! In this part of the engine the pixels come from the decoder's fast
-//! preview: the camera's embedded JPEG for a RAW file, the image itself
-//! scaled down for a raster file, turned to the user's orientation. The
-//! develop pipeline replaces the body of [`render`] with a render of the
-//! photo's [`DevelopSettings`] and reports [`PreviewOrigin::Rendered`];
-//! nothing else has to change.
+//! The pixels are a render of the photo's [`DevelopSettings`] through the
+//! develop pipeline, at full quality, fitted to the size asked for, from a
+//! decoded source shared with every other render of the same file
+//! ([`Sources`]). A photo whose settings were saved by a newer build cannot
+//! be rendered with them, so it gets its embedded preview instead
+//! ([`embedded`], which is also what a RAW photo shows before its first
+//! render).
 
 use std::io;
 use std::path::Path;
 
+use photo_core::colorimetry::RgbSpace;
 use photo_core::develop::{DevelopSettings, Orientation};
 use photo_core::image::Rgba8Image;
 use photo_core::meta::FileKind;
 use photo_decode::DecodeError;
+use photo_develop::{CancelToken, Quality, RenderRequest, Renderer};
 
 use super::PreviewOrigin;
+use crate::sources::Sources;
+use crate::stamp::Stamp;
 
 /// What a render needs to know about the photo.
 pub(crate) struct RenderSource<'a> {
@@ -28,8 +33,15 @@ pub(crate) struct RenderSource<'a> {
     pub(crate) path: &'a Path,
     /// Whether it is a raster or a RAW file.
     pub(crate) kind: FileKind,
-    /// The photo's develop settings, as stored when the job was queued.
-    pub(crate) settings: &'a DevelopSettings,
+    /// The file as the job found it, just before reading any pixels.
+    pub(crate) stamp: Stamp,
+    /// The photo's develop settings as stored when the job was queued;
+    /// `None` when they were saved by a newer build.
+    pub(crate) settings: Option<&'a DevelopSettings>,
+    /// Decoded files, shared with every other render.
+    pub(crate) sources: &'a Sources,
+    /// Set when the engine shuts down.
+    pub(crate) cancel: &'a CancelToken,
 }
 
 /// Pixels for one photo, with where they came from.
@@ -48,24 +60,57 @@ pub(crate) enum RenderError {
     Failed(String),
 }
 
+impl From<DecodeError> for RenderError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::Io(io) if io.kind() == io::ErrorKind::NotFound => Self::Missing,
+            other => Self::Failed(other.to_string()),
+        }
+    }
+}
+
 /// Pixels for `source` with the longer edge at most `long_edge`.
 ///
-/// This is the seam the develop pipeline plugs into; see the module docs.
+/// This is the seam; see the module docs.
 pub(crate) fn render(source: &RenderSource<'_>, long_edge: u32) -> Result<Rendered, RenderError> {
-    let embedded =
-        photo_decode::embedded_preview(source.path, long_edge).map_err(|error| match error {
-            DecodeError::Io(io) if io.kind() == io::ErrorKind::NotFound => RenderError::Missing,
-            other => RenderError::Failed(other.to_string()),
-        })?;
-    let image = embedded.ok_or_else(|| {
-        let reason = match source.kind {
+    let Some(settings) = source.settings else {
+        return embedded(source.path, source.kind, Orientation::IDENTITY, long_edge);
+    };
+    let decoded = source.sources.decode(source.path, source.stamp)?;
+    let request = RenderRequest {
+        source: &decoded,
+        settings,
+        view: photo_develop::fit_view(&decoded, settings, long_edge, long_edge),
+        quality: Quality::Full,
+        space: RgbSpace::Srgb,
+    };
+    let image = Renderer::new()
+        .render_rgba8(&request, source.cancel)
+        .ok_or_else(|| RenderError::Failed("the render was stopped".to_string()))?;
+    Ok(Rendered {
+        image,
+        origin: PreviewOrigin::Rendered,
+    })
+}
+
+/// The decoder's fast picture of a file, turned to `orientation`: a RAW
+/// file's embedded camera JPEG, or a raster file scaled down, with the
+/// longer edge at most `long_edge`.
+pub(crate) fn embedded(
+    path: &Path,
+    kind: FileKind,
+    orientation: Orientation,
+    long_edge: u32,
+) -> Result<Rendered, RenderError> {
+    let image = photo_decode::embedded_preview(path, long_edge)?.ok_or_else(|| {
+        let reason = match kind {
             FileKind::Raw => "the file has no embedded preview",
             FileKind::Raster => "the file gave no picture",
         };
         RenderError::Failed(reason.to_string())
     })?;
     Ok(Rendered {
-        image: orient(image, source.settings.orientation),
+        image: orient(image, orientation),
         origin: PreviewOrigin::EmbeddedPreview,
     })
 }

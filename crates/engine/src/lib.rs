@@ -29,9 +29,25 @@
 //! # Previews
 //!
 //! See [`Engine::preview`]. Every preview's pixels come from one function,
-//! the seam in `previews/render.rs`, which a develop-pipeline render
-//! replaces without touching the caching, validation or scheduling around
-//! it.
+//! the seam in `previews/render.rs`: a develop-pipeline render of the
+//! photo's settings. A RAW photo shows its embedded camera preview until its
+//! render arrives.
+//!
+//! # Develop
+//!
+//! [`Engine::open_develop`] opens one photo for editing as a
+//! [`DevelopSession`]: explicit load states, a dedicated render worker that
+//! always works on the newest request, draft renders while a control moves
+//! and one undoable commit when it is let go ([`Engine::adjust`],
+//! [`Engine::commit_edit`]). Presets, snapshots, history, copy and paste,
+//! sync, reset and Quick Develop write many photos as one undo entry.
+//!
+//! # Export
+//!
+//! [`Engine::start_export`] renders the target photos to files through
+//! photo-export as a cancellable task, two at a time, and refuses any file
+//! that would be the original of a photo in the catalog or would go into
+//! the catalog's own folders. Named export presets live in the catalog.
 //!
 //! # Types from the crates below
 //!
@@ -42,29 +58,44 @@
 
 mod attributes;
 mod browse;
+mod clipboard;
 mod collections;
 mod commands;
+mod develop;
 mod engine;
 mod error;
+mod export;
 mod import;
 mod jobs;
 mod keywording;
 mod library;
+mod looks;
+mod lru;
 mod previews;
+mod quick;
 mod selection;
 mod sidecars;
+mod sources;
+mod stamp;
 mod tasks;
 mod toasts;
 mod undo;
 
 pub use browse::SourceCounts;
+pub use clipboard::SettingsClipboard;
 pub use commands::Target;
+pub use develop::{
+    BeforeSettings, CanvasView, DevelopFrame, DevelopLoad, DevelopSession, RenderCounts,
+};
 pub use engine::{Engine, EngineConfig, POLL_LIMIT, PendingWork};
 pub use error::EngineError;
+pub use export::ExportedPhoto;
 pub use import::{
     CopyLayout, DatePattern, FileIssue, ImportCandidate, ImportMode, ImportRequest, ImportScan,
     ImportSummary,
 };
+pub use keywording::KeywordUse;
+pub use looks::{BUILT_IN_GROUP, BuiltInPreset, PresetInfo, PresetKey};
 pub use previews::{LoadState, Preview, PreviewOrigin, PreviewSize, PreviewState};
 pub use selection::{Movement, Selection};
 pub use tasks::{TaskId, TaskInfo, TaskKind, TaskState};
@@ -73,8 +104,13 @@ pub use toasts::{Toast, ToastKind};
 pub use photo_catalog::{
     CatalogError, CollectionInfo, CollectionKind, Comparison, CopyFilter, DateRange, Entity, Facet,
     FacetValue, Filter, FolderInfo, HistoryStep, IsoRange, KeywordInfo, PhotoRecord, PhotoSummary,
-    RatingFilter, SmartField, SmartOp, SmartRule, SmartRules, SmartValue, SmartValueKind, Sort,
-    SortDirection, SortKey, Source, TextField,
+    RatingFilter, SmartField, SmartOp, SmartRule, SmartRules, SmartValue, SmartValueKind, Snapshot,
+    Sort, SortDirection, SortKey, Source, TextField,
 };
 pub use photo_decode::{RASTER_EXTENSIONS, RAW_EXTENSIONS, file_kind, is_supported};
-pub use photo_imaging::Histogram;
+pub use photo_develop::Quality;
+pub use photo_export::{
+    Anchor, BitDepth, ExistingFile, ExportOutcome, ExportSettings, ExtensionCase, Folder, Format,
+    Location, MetadataMode, MetadataSettings, Naming, OutputSharpening, Resize, Sizing, Watermark,
+};
+pub use photo_imaging::{Geometry, Histogram, View};

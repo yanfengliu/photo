@@ -5,23 +5,33 @@
 //! an [`Apply`]: a closure that the engine's thread runs during
 //! [`Engine::poll`] to fold the result into state and into catalog writes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use photo_catalog::Catalog;
 use photo_core::meta::PhotoId;
 
 use crate::browse::{Attribute, Browser, Change, Refresh};
+use crate::clipboard::SettingsClipboard;
+use crate::develop::DevelopSession;
+use crate::develop::worker::{Delivery, RenderWorker};
 use crate::error::EngineError;
+use crate::export::Exports;
 use crate::import::Imports;
-use crate::jobs::{self, CancelToken, Job, JobContext, JobId, JobKey, Lane, Outcome, Pool};
+use crate::jobs::{
+    self, CancelToken, Job, JobContext, JobId, JobKey, Lane, Outcome, Pool, Wake, lock,
+};
+use crate::lru::Lru;
 use crate::previews::Previews;
+use crate::quick::AutoRun;
 use crate::selection::Selection;
 use crate::sidecars::Sidecars;
+use crate::sources::Sources;
 use crate::tasks::{TaskId, TaskInfo, Tasks};
 use crate::toasts::{Toast, Toasts};
 use crate::undo::History;
@@ -40,6 +50,9 @@ type EngineEvent = jobs::Event<Apply, Apply>;
 
 /// The most worker results one [`Engine::poll`] brings in.
 pub const POLL_LIMIT: usize = 256;
+
+/// Bytes of displayed photo sizes kept in memory.
+const SHAPES_MEMORY: usize = 2 << 20;
 
 /// Why a job produced no result.
 #[derive(Clone, Debug)]
@@ -60,6 +73,10 @@ pub struct EngineConfig {
     pub previews_dir: PathBuf,
     /// How many background worker threads to run (at least one is).
     pub worker_threads: usize,
+    /// Where exports go unless the user chooses another folder (see
+    /// [`Engine::default_export_settings`]); created by the first export
+    /// into it.
+    pub export_dir: PathBuf,
 }
 
 /// Work the engine has not finished, for an automation driver to report.
@@ -83,7 +100,11 @@ pub struct PendingWork {
 /// engine stops the workers and waits for them, so no thread outlives it.
 pub struct Engine {
     pub(crate) catalog: Catalog,
+    /// The folder the catalog file is in.
+    pub(crate) catalog_dir: PathBuf,
     pub(crate) previews_dir: PathBuf,
+    pub(crate) export_dir: PathBuf,
+    pub(crate) exports: Exports,
     pub(crate) browser: Browser,
     pub(crate) selection: Selection,
     pub(crate) history: History,
@@ -94,6 +115,24 @@ pub struct Engine {
     pub(crate) toasts: Toasts,
     /// Missing-file states found by workers, written in one go per poll.
     pub(crate) missing: Vec<(PhotoId, bool)>,
+    /// Decoded files, shared by every render.
+    pub(crate) sources: Sources,
+    /// Cancelled when the engine is dropped, so that renders stop.
+    pub(crate) shutdown: photo_develop::CancelToken,
+    pub(crate) develop: Option<DevelopSession>,
+    pub(crate) develop_generation: u64,
+    /// Render requests of the develop session not yet delivered.
+    pub(crate) renders: HashSet<u64>,
+    pub(crate) next_render: u64,
+    pub(crate) renderer: RenderWorker,
+    pub(crate) clipboard: Option<SettingsClipboard>,
+    /// The photo active, or open in Develop, before the current one.
+    pub(crate) previous_active: Option<PhotoId>,
+    pub(crate) autos: HashMap<u64, AutoRun>,
+    pub(crate) next_auto: u64,
+    /// Displayed sizes of photos, each with the develop version it is for.
+    pub(crate) shapes: Lru<PhotoId, (u64, (u32, u32))>,
+    wake: Arc<Mutex<Option<Wake>>>,
     jobs: HashMap<JobId, OnFailure>,
     pool: Pool<Apply, Apply>,
     events: Receiver<EngineEvent>,
@@ -111,10 +150,19 @@ impl Engine {
         })?;
         let (sender, events) = mpsc::channel();
         let pool = Pool::start(config.worker_threads, &sender).map_err(EngineError::Workers)?;
+        let wake: Arc<Mutex<Option<Wake>>> = Arc::default();
+        let renderer = start_renderer(sender, Arc::clone(&wake))?;
         let quick = catalog.quick_collection();
+        let catalog_dir = match config.catalog_path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
         let mut engine = Self {
             catalog,
+            catalog_dir,
             previews_dir: config.previews_dir,
+            export_dir: config.export_dir,
+            exports: Exports::default(),
             browser: Browser::new(quick),
             selection: Selection::default(),
             history: History::default(),
@@ -124,6 +172,19 @@ impl Engine {
             tasks: Tasks::default(),
             toasts: Toasts::default(),
             missing: Vec::new(),
+            sources: Sources::default(),
+            shutdown: photo_develop::CancelToken::new(),
+            develop: None,
+            develop_generation: 0,
+            renders: HashSet::new(),
+            next_render: 0,
+            renderer,
+            clipboard: None,
+            previous_active: None,
+            autos: HashMap::new(),
+            next_auto: 0,
+            shapes: Lru::new(SHAPES_MEMORY),
+            wake,
             jobs: HashMap::new(),
             pool,
             events,
@@ -150,10 +211,13 @@ impl Engine {
         changed | (brought == POLL_LIMIT) | self.settle()
     }
 
-    /// True when no job is queued or running and every result has been
-    /// polled in.
+    /// True when no job is queued or running, no develop render is
+    /// outstanding, and every result has been polled in.
     pub fn is_idle(&self) -> bool {
-        self.jobs.is_empty() && self.missing.is_empty() && self.tasks.running() == 0
+        self.jobs.is_empty()
+            && self.renders.is_empty()
+            && self.missing.is_empty()
+            && self.tasks.running() == 0
     }
 
     /// Poll until the engine is idle or `timeout` has passed, blocking on
@@ -187,13 +251,25 @@ impl Engine {
     /// the UI can repaint and poll without a timer. It runs on a worker
     /// thread and should only schedule a repaint.
     pub fn set_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.wake) = Some(Arc::clone(&wake));
         self.pool.set_wake(Some(wake));
     }
 
-    /// Work that is still outstanding.
+    /// True when the catalog file is write-protected: everything can be
+    /// browsed and nothing changed; every edit is refused with its reason.
+    pub fn is_read_only(&self) -> bool {
+        self.catalog.is_read_only()
+    }
+
+    /// Develop renders requested and not yet delivered.
+    pub fn pending_renders(&self) -> usize {
+        self.renders.len()
+    }
+
+    /// Work that is still outstanding. Develop renders count as jobs.
     pub fn pending_work(&self) -> PendingWork {
         PendingWork {
-            jobs: self.jobs.len(),
+            jobs: self.jobs.len() + self.renders.len(),
             queued: self.pool.queued(),
             previews: self.previews.in_flight(),
             tasks: self.tasks.running(),
@@ -218,7 +294,11 @@ impl Engine {
     ///
     /// [`TaskState::Cancelled`]: crate::TaskState::Cancelled
     pub fn cancel_task(&mut self, id: TaskId) -> bool {
-        self.tasks.cancel(id)
+        let cancelled = self.tasks.cancel(id);
+        if cancelled {
+            self.exports.cancel(id);
+        }
+        cancelled
     }
 
     /// Take the toasts that have not been shown yet, oldest first.
@@ -325,8 +405,9 @@ impl Engine {
         Ok(())
     }
 
-    /// Re-read what `changes` made stale. A failure to re-read is reported
-    /// as a toast: the change itself has already happened.
+    /// Re-read what `changes` made stale, and bring the photo open in
+    /// Develop in line with the catalog. A failure to re-read is reported as
+    /// a toast: the change itself has already happened.
     pub(crate) fn refresh_after(&mut self, changes: &[Change]) {
         let mut plan = Refresh::default();
         for change in changes {
@@ -336,7 +417,52 @@ impl Engine {
             self.toasts
                 .error(format!("Could not refresh the photo list: {error}"));
         }
+        let open = self.develop.as_ref().map(|session| session.photo);
+        let photos_changed = changes
+            .iter()
+            .any(|change| matches!(change, Change::Photos));
+        let develop_changed = changes.iter().any(|change| match change {
+            Change::Attribute(Attribute::Develop, photos) => {
+                open.is_some_and(|open| photos.contains(&open))
+            }
+            _ => false,
+        });
+        if photos_changed {
+            self.drop_removed_develop();
+        }
+        if develop_changed || photos_changed {
+            self.reload_develop();
+        }
     }
+}
+
+impl Drop for Engine {
+    /// Stop every render first (exports leave no file behind); the workers
+    /// are then joined as the engine's fields are dropped.
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.exports.cancel_all();
+    }
+}
+
+/// Start the develop render worker, delivering through the engine's event
+/// channel and waking the UI as the pool does.
+fn start_renderer(
+    sender: Sender<EngineEvent>,
+    wake: Arc<Mutex<Option<Wake>>>,
+) -> Result<RenderWorker, EngineError> {
+    RenderWorker::start(move |delivery: Delivery| {
+        let apply: Apply = Box::new(move |engine: &mut Engine| engine.render_delivered(delivery));
+        if sender.send(jobs::Event::Progress(apply)).is_ok() {
+            let wake = lock(&wake).clone();
+            if let Some(wake) = wake
+                && catch_unwind(AssertUnwindSafe(|| wake())).is_err()
+            {
+                log::error!("the engine's wake callback panicked");
+            }
+        }
+    })
+    .map_err(EngineError::Workers)
 }
 
 fn ui_key(key: &str) -> String {

@@ -5,22 +5,36 @@
 //! master speaks for it. Orientation travels only in the sidecar's private
 //! settings property, because the catalog does not know the file's own
 //! orientation (see `photo_xmp::ImageInfo::orientation`).
+//!
+//! What goes wrong goes wrong per photo and is listed per photo (see
+//! [`Engine::metadata_issues`]): a sidecar whose develop settings this build
+//! cannot read keeps them (everything else is still written, and nothing of
+//! them is read), and a sidecar another application kept changing is left
+//! as that application saved it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+mod files;
 
-use photo_catalog::{DevelopEdit, PhotoRecord};
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+
+use photo_catalog::{CatalogError, DevelopEdit, PhotoRecord};
 use photo_core::develop::DevelopSettings;
 use photo_core::meta::{FileKind, KeywordId, PhotoId};
 use photo_xmp::{ImageInfo, XmpData};
 
+use files::{Outcome, issue, read_one, write_one};
+
 use crate::commands::{Applied, Target};
 use crate::engine::{Engine, JobFailure};
 use crate::error::EngineError;
-use crate::import::sidecar_keywords;
+use crate::import::{FileIssue, sidecar_keywords};
 use crate::jobs::Lane;
-use crate::keywording::replace_each;
+use crate::keywording::set_lists;
 use crate::tasks::{TaskId, TaskKind, TaskState};
 use crate::undo::{Command, Values};
+
+/// How many finished sidecar tasks keep their list of issues.
+const REPORTS_KEPT: usize = 8;
 
 /// What the sidecar mapping is told about a photo's file. The same for
 /// writing and reading, as `photo_xmp` requires.
@@ -33,10 +47,11 @@ pub(crate) fn image_info(kind: FileKind, width: u32, height: u32) -> ImageInfo {
     }
 }
 
-/// Sidecar tasks in progress.
+/// Sidecar tasks in progress, and the issues of the ones finished lately.
 #[derive(Default)]
 pub(crate) struct Sidecars {
     runs: HashMap<TaskId, Run>,
+    reports: VecDeque<(TaskId, Vec<FileIssue>)>,
 }
 
 #[derive(Default)]
@@ -44,7 +59,7 @@ struct Run {
     waiting: usize,
     /// What the read sidecars said, by photo.
     found: Vec<(PhotoId, XmpData)>,
-    first_error: Option<String>,
+    issues: Vec<FileIssue>,
 }
 
 impl Engine {
@@ -52,27 +67,28 @@ impl Engine {
     /// develop settings to its XMP sidecar, in the background. Only what the
     /// sidecar format owns is changed in an existing sidecar.
     pub fn save_metadata_to_files(&mut self, target: Target) -> Result<TaskId, EngineError> {
+        self.commit_edit()?;
         let masters = self.masters(&target)?;
         let mut jobs = Vec::with_capacity(masters.len());
         for record in &masters {
-            jobs.push((record.path.clone(), self.xmp_data(record)?, record));
+            let sidecar = photo_xmp::sidecar_path(&record.path, record.kind);
+            let (data, note) = self.xmp_data(record, &sidecar)?;
+            jobs.push((sidecar, data, note, record));
         }
         let (task, token) = self.start_sidecar_task(
             TaskKind::SaveMetadata,
             format!("Saving metadata to {} files", jobs.len()),
             jobs.len(),
         );
-        for (path, data, record) in jobs {
-            let sidecar = photo_xmp::sidecar_path(&path, record.kind);
+        for (sidecar, data, note, record) in jobs {
             let info = image_info(record.kind, record.metadata.width, record.metadata.height);
             self.submit(
                 Lane::Background,
                 None,
                 Some(token.clone()),
                 move |_| {
-                    let written = photo_xmp::write_sidecar(&sidecar, &data, info)
-                        .map_err(|error| error.to_string());
-                    Box::new(move |engine: &mut Engine| engine.sidecar_done(task, None, written))
+                    let outcome = write_one(&sidecar, &data, info, note);
+                    Box::new(move |engine: &mut Engine| engine.sidecar_done(task, outcome))
                 },
                 move |engine, failure| engine.sidecar_failed(task, failure),
             );
@@ -101,13 +117,8 @@ impl Engine {
                 None,
                 Some(token.clone()),
                 move |_| {
-                    let read = photo_xmp::read_sidecar(&sidecar, info)
-                        .map(|data| data.map(|data| (photo, data)))
-                        .map_err(|error| error.to_string());
-                    Box::new(move |engine: &mut Engine| match read {
-                        Ok(found) => engine.sidecar_done(task, found, Ok(())),
-                        Err(error) => engine.sidecar_done(task, None, Err(error)),
-                    })
+                    let outcome = read_one(&sidecar, photo, info);
+                    Box::new(move |engine: &mut Engine| engine.sidecar_done(task, outcome))
                 },
                 move |engine, failure| engine.sidecar_failed(task, failure),
             );
@@ -146,8 +157,38 @@ impl Engine {
         started
     }
 
-    /// What a sidecar should say about a photo.
-    fn xmp_data(&self, record: &PhotoRecord) -> Result<XmpData, EngineError> {
+    /// What went wrong, per photo, in a recently finished (or running)
+    /// metadata task; empty when nothing did.
+    pub fn metadata_issues(&self, task: TaskId) -> Option<&[FileIssue]> {
+        if let Some(run) = self.sidecars.runs.get(&task) {
+            return Some(&run.issues);
+        }
+        self.sidecars
+            .reports
+            .iter()
+            .find(|(id, _)| *id == task)
+            .map(|(_, issues)| issues.as_slice())
+    }
+
+    /// What a sidecar should say about a photo, with a note when its
+    /// develop settings cannot be written (they were saved by a newer
+    /// version, so the sidecar's own are left as they are).
+    fn xmp_data(
+        &self,
+        record: &PhotoRecord,
+        sidecar: &Path,
+    ) -> Result<(XmpData, Option<FileIssue>), EngineError> {
+        let (develop, note) = match self.catalog.develop_settings(record.id) {
+            Ok(settings) => (Some(settings), None),
+            Err(CatalogError::NewerFormat { .. }) => (
+                None,
+                issue(
+                    sidecar,
+                    "the develop settings were not written: they were saved by a newer version",
+                ),
+            ),
+            Err(error) => return Err(error.into()),
+        };
         let keywords = self.catalog.photo_keywords(record.id)?;
         let tree: HashMap<KeywordId, (&str, Option<KeywordId>)> = self
             .browser
@@ -168,7 +209,7 @@ impl Engine {
             path.reverse();
             path
         };
-        Ok(XmpData {
+        let data = XmpData {
             rating: record.rating,
             flag: record.flag,
             label: record.label,
@@ -186,26 +227,22 @@ impl Engine {
                 .collect(),
             hierarchical_keywords: keywords.iter().map(|keyword| path_of(keyword.id)).collect(),
             capture_time: record.metadata.capture_time,
-            develop: Some(self.catalog.develop_settings(record.id)?),
+            develop,
             // Only reading fills this in; it plays no part in a write.
             unreadable_settings_format: None,
-        })
+        };
+        Ok((data, note))
     }
 
-    fn sidecar_done(
-        &mut self,
-        task: TaskId,
-        found: Option<(PhotoId, XmpData)>,
-        result: Result<(), String>,
-    ) -> bool {
+    fn sidecar_done(&mut self, task: TaskId, outcome: Outcome) -> bool {
         if let Some(run) = self.sidecars.runs.get_mut(&task) {
             run.waiting = run.waiting.saturating_sub(1);
-            run.found.extend(found);
-            if let Err(error) = result {
-                run.first_error.get_or_insert(error);
-                if let Some(info) = self.tasks.get_mut(task) {
-                    info.errors += 1;
-                }
+            run.found.extend(outcome.found);
+            run.issues.extend(outcome.issue);
+            if outcome.failed
+                && let Some(info) = self.tasks.get_mut(task)
+            {
+                info.errors += 1;
             }
         }
         self.sidecar_progress(task);
@@ -213,11 +250,22 @@ impl Engine {
     }
 
     fn sidecar_failed(&mut self, task: TaskId, failure: JobFailure) -> bool {
-        let result = match failure {
-            JobFailure::Skipped => Ok(()),
-            JobFailure::Panicked(message) => Err(message),
+        let outcome = match failure {
+            JobFailure::Skipped => Outcome {
+                found: None,
+                issue: None,
+                failed: false,
+            },
+            JobFailure::Panicked(message) => Outcome {
+                found: None,
+                issue: Some(FileIssue {
+                    path: PathBuf::new(),
+                    message,
+                }),
+                failed: true,
+            },
         };
-        self.sidecar_done(task, None, result)
+        self.sidecar_done(task, outcome)
     }
 
     fn sidecar_progress(&mut self, task: TaskId) {
@@ -250,12 +298,21 @@ impl Engine {
             ));
             state = TaskState::Failed(error.to_string());
         }
-        if let Some(error) = run.first_error {
-            self.toasts.error(format!("Some sidecars failed: {error}"));
+        if let Some(first) = run.issues.first() {
+            self.toasts.error(format!(
+                "{} files had problems, among them {}: {}",
+                run.issues.len(),
+                first.path.display(),
+                first.message
+            ));
         } else if kind == Some(TaskKind::SaveMetadata) && !cancelled {
             self.toasts.info("Saved Metadata to Files");
         }
         self.tasks.finish(task, state);
+        self.sidecars.reports.push_back((task, run.issues));
+        if self.sidecars.reports.len() > REPORTS_KEPT {
+            self.sidecars.reports.pop_front();
+        }
     }
 
     /// Lay what the sidecars said over the photos, as one undoable step.
@@ -343,16 +400,10 @@ impl Engine {
                 applied.apply(catalog, Command::Text(field, values))?;
             }
         }
-        let mut wanted: BTreeMap<PhotoId, BTreeSet<KeywordId>> = BTreeMap::new();
-        for (record, data) in pairs() {
-            let ids = sidecar_keywords(data)
-                .iter()
-                .filter(|name| !name.trim().is_empty())
-                .map(|name| catalog.ensure_keyword(name))
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            wanted.insert(record.id, ids);
-        }
-        replace_each(catalog, applied, wanted)?;
+        let lists = pairs()
+            .map(|(record, data)| (record.id, sidecar_keywords(data)))
+            .collect();
+        set_lists(catalog, applied, lists)?;
         if !settings.is_empty() {
             let edits: Vec<DevelopEdit<'_>> = settings
                 .iter()

@@ -12,7 +12,12 @@
 //!    the source file still has the size and modification time recorded in
 //!    it.
 //! 3. A render through the seam in `render`, written back to disk, with the
-//!    older versions' files deleted.
+//!    older versions' files deleted. The seam renders the photo's develop
+//!    settings with the develop pipeline, from the decoded source shared
+//!    with the develop session (see `sources`); while a RAW photo renders,
+//!    its embedded camera preview is shown. A photo whose settings were
+//!    saved by a newer version shows the decoder's own picture, which is
+//!    what its origin says.
 //!
 //! Requests are served newest first, and asking again for a preview that is
 //! still queued moves it to the front, so scrolling stays responsive. A
@@ -23,14 +28,14 @@
 
 mod disk;
 mod job;
-mod lru;
-mod render;
+pub(crate) mod render;
 mod types;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use photo_catalog::CatalogError;
 use photo_core::meta::{FileKind, PhotoId};
 use photo_imaging::Histogram;
 
@@ -38,8 +43,8 @@ pub use types::{LoadState, Preview, PreviewOrigin, PreviewSize, PreviewState};
 
 use crate::engine::{Engine, JobFailure};
 use crate::jobs::{JobKey, Lane};
+use crate::lru::Lru;
 use job::{PreviewJob, SourceSeen};
-use lru::Lru;
 
 /// Bytes of thumbnail pixels kept in memory.
 const THUMBNAIL_MEMORY: usize = 192 << 20;
@@ -154,7 +159,8 @@ impl Engine {
             return PreviewState::Pending;
         }
         let settings = match self.catalog.develop_settings(photo) {
-            Ok(settings) => settings,
+            Ok(settings) => Some(settings),
+            Err(CatalogError::NewerFormat { .. }) => None,
             Err(error) => return PreviewState::Failed(error.to_string()),
         };
         let job = PreviewJob {
@@ -165,14 +171,21 @@ impl Engine {
             path: subject.path,
             kind: subject.kind,
             settings,
+            sources: self.sources.clone(),
+            cancel: self.shutdown.clone(),
         };
         let version = subject.version;
         self.submit(
             Lane::Interactive,
             Some(JobKey::Preview(photo, size)),
             None,
-            move |_| {
-                let result = job.run();
+            move |context| {
+                let interim = |preview: Preview| {
+                    context.progress(Box::new(move |engine: &mut Engine| {
+                        engine.preview_interim(photo, size, version, preview)
+                    }));
+                };
+                let result = job.run(&interim);
                 Box::new(move |engine: &mut Engine| {
                     engine.preview_done(photo, size, version, result.preview, result.source)
                 })
@@ -260,7 +273,28 @@ impl Engine {
         PreviewState::Pending
     }
 
-    fn subject(&self, photo: PhotoId) -> Result<Subject, photo_catalog::CatalogError> {
+    /// A RAW photo's embedded preview, shown while its render runs; kept
+    /// unless a render of the same version is already there.
+    fn preview_interim(
+        &mut self,
+        photo: PhotoId,
+        size: PreviewSize,
+        version: u64,
+        preview: Preview,
+    ) -> bool {
+        let rendered = self.previews.peek(photo, size).is_some_and(|kept| {
+            kept.version() > version
+                || (kept.version() == version && kept.origin() == PreviewOrigin::Rendered)
+        });
+        if rendered {
+            return false;
+        }
+        let bytes = preview.bytes();
+        self.previews.memory(size).insert(photo, preview, bytes);
+        true
+    }
+
+    fn subject(&self, photo: PhotoId) -> Result<Subject, CatalogError> {
         if let Some(summary) = self.browser.summary(photo) {
             return Ok(Subject {
                 version: summary.develop_version,

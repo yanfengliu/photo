@@ -86,12 +86,18 @@ impl Engine {
         }
     }
 
-    /// Record a command that has just been applied.
+    /// Record a command that has just been applied, and confirm it.
     pub(crate) fn record(&mut self, label: String, command: Command) {
+        self.toasts.info(label.clone());
+        self.record_silently(label, command);
+    }
+
+    /// Record a command that has just been applied, without a toast: for
+    /// the commits of the develop sliders, which the canvas confirms.
+    pub(crate) fn record_silently(&mut self, label: String, command: Command) {
         let mut changes = Vec::new();
         command.changes(&mut changes);
-        self.history.record(label.clone(), command);
-        self.toasts.info(label);
+        self.history.record(label, command);
         self.refresh_after(&changes);
     }
 

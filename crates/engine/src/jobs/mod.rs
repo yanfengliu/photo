@@ -37,6 +37,8 @@ pub(crate) struct JobId(u64);
 /// Which line a job waits in; see [`queue`] for the order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lane {
+    /// The photo open in Develop: ahead of everything, in order.
+    Urgent,
     /// Pictures someone is waiting to see: newest request first.
     Interactive,
     /// Everything else: first come, first served.
@@ -255,6 +257,10 @@ impl<O: Send + 'static, P: Send + 'static> Pool<O, P> {
         let replaced = {
             let mut state = lock(&self.shared.state);
             match job.lane {
+                Lane::Urgent => {
+                    state.queue.push_urgent(queued);
+                    None
+                }
                 Lane::Interactive => state.queue.push_interactive(job.key, queued),
                 Lane::Background => {
                     state.queue.push_background(queued);
@@ -317,7 +323,7 @@ fn work_loop<O, P>(shared: &Shared<O, P>, events: &Sender<Event<O, P>>) {
 
 /// Lock a mutex, carrying on with the data if a panic poisoned it: nothing
 /// here leaves shared state half-changed across a panic.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 

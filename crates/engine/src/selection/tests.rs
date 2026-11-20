@@ -71,6 +71,21 @@ fn toggling_adds_and_removes_and_moves_the_active_photo_to_a_neighbour() {
 }
 
 #[test]
+fn a_selected_photo_can_be_made_active_without_changing_the_selection() {
+    let list = Ids::upto(10);
+    let mut selection = Selection::default();
+    selection.select_only(&list, p(2));
+    selection.extend_to(&list, p(5));
+    assert!(selection.make_active(p(3)));
+    assert_eq!(ids(&selection), [2, 3, 4, 5]);
+    assert_eq!(selection.active(), Some(p(3)));
+    assert_eq!(selection.anchor(), Some(p(3)));
+    let before = selection.clone();
+    assert!(!selection.make_active(p(7)), "not selected");
+    assert_eq!(selection, before);
+}
+
+#[test]
 fn moving_steps_along_the_list_and_stops_at_the_ends() {
     let list = Ids::upto(5);
     let mut selection = Selection::default();

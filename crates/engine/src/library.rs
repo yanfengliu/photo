@@ -9,11 +9,15 @@ use photo_catalog::{
 };
 use photo_core::develop::DevelopSettings;
 use photo_core::meta::PhotoId;
+use photo_imaging::Geometry;
 
 use crate::browse::{Browser, Refresh, SourceCounts};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::selection::{Listing, Movement, Selection};
+
+/// What keeping one displayed size costs, in bytes, key included.
+const SHAPE_COST: usize = 32;
 
 impl Engine {
     /// Where the list looks.
@@ -96,6 +100,42 @@ impl Engine {
         self.browser.summary(photo)
     }
 
+    /// The full-resolution size a photo shows at, as turned and cropped by
+    /// its develop settings: what its thumbnail's shape will be, so that a
+    /// grid cell's placeholder keeps that shape before the thumbnail
+    /// arrives. Worked out from the catalog without decoding anything, and
+    /// kept until the photo's develop version changes. A photo whose
+    /// settings cannot be read shows upright and uncropped. `None` for a
+    /// photo the catalog does not hold or whose size it does not know.
+    pub fn displayed_size(&mut self, photo: PhotoId) -> Option<(u32, u32)> {
+        let (version, width, height) = match self.browser.summary(photo) {
+            Some(summary) => (summary.develop_version, summary.width, summary.height),
+            None => {
+                let record = self.catalog.photo(photo).ok()?;
+                let metadata = &record.metadata;
+                (record.develop_version, metadata.width, metadata.height)
+            }
+        };
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if let Some((kept, size)) = self.shapes.get(&photo)
+            && *kept == version
+        {
+            return Some(*size);
+        }
+        let size = match self.catalog.develop_settings(photo) {
+            Ok(settings) => Geometry::from_settings(width, height, &settings).output_size(),
+            Err(CatalogError::NewerFormat { .. }) => (width, height),
+            Err(error) => {
+                log::warn!("cannot work out how photo {} is shown: {error}", photo.0);
+                return None;
+            }
+        };
+        self.shapes.insert(photo, (version, size), SHAPE_COST);
+        Some(size)
+    }
+
     /// Every folder with its photo count, ordered by path.
     pub fn folders(&self) -> &[FolderInfo] {
         self.browser.folders()
@@ -156,23 +196,42 @@ impl Engine {
     /// Select only `photo`. Photos not in the list cannot be selected;
     /// returns whether the selection changed.
     pub fn select_only(&mut self, photo: PhotoId) -> bool {
-        self.selection.select_only(&self.browser, photo)
+        self.keeping_previous(|engine| engine.selection.select_only(&engine.browser, photo))
     }
 
     /// Add `photo` to the selection or take it out; see
     /// [`Selection`] for how the active photo follows.
     pub fn toggle_selected(&mut self, photo: PhotoId) -> bool {
-        self.selection.toggle(&self.browser, photo)
+        self.keeping_previous(|engine| engine.selection.toggle(&engine.browser, photo))
+    }
+
+    /// Make a photo that is already selected the active one, keeping the
+    /// selection as it is; it becomes the range anchor too, as clicking it
+    /// would make it. Returns false, changing nothing, when it is not
+    /// selected.
+    pub fn make_active(&mut self, photo: PhotoId) -> bool {
+        self.keeping_previous(|engine| engine.selection.make_active(photo))
     }
 
     /// Select the range from the anchor to `photo`.
     pub fn extend_selection_to(&mut self, photo: PhotoId) -> bool {
-        self.selection.extend_to(&self.browser, photo)
+        self.keeping_previous(|engine| engine.selection.extend_to(&engine.browser, photo))
     }
 
     /// Select every photo in the list.
     pub fn select_all(&mut self) {
-        self.selection.select_all(&self.browser);
+        self.keeping_previous(|engine| engine.selection.select_all(&engine.browser));
+    }
+
+    /// Run a selection change, remembering the photo that was active before
+    /// it when the active photo changes (for "paste from previous").
+    fn keeping_previous<T>(&mut self, change: impl FnOnce(&mut Engine) -> T) -> T {
+        let before = self.selection.active();
+        let result = change(self);
+        if before.is_some() && self.selection.active() != before {
+            self.previous_active = before;
+        }
+        result
     }
 
     /// Select nothing.
@@ -184,11 +243,22 @@ impl Engine {
     /// instead of selecting the photo alone. Returns false when the list is
     /// empty.
     pub fn move_active(&mut self, movement: Movement, extend: bool) -> bool {
-        self.selection.move_active(&self.browser, movement, extend)
+        self.keeping_previous(|engine| {
+            engine
+                .selection
+                .move_active(&engine.browser, movement, extend)
+        })
     }
 
     /// How many photos the list holds.
     pub fn photo_count(&self) -> usize {
         self.browser.count()
+    }
+
+    /// How many photos the current source holds before the filter (virtual
+    /// copies included): the "of" in "12 of 340 photos". Kept up to date
+    /// with the list.
+    pub fn source_photo_count(&self) -> u64 {
+        self.browser.source_total()
     }
 }

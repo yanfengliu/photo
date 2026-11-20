@@ -29,6 +29,8 @@ pub enum TaskKind {
     SaveMetadata,
     /// Reading XMP sidecars back into the catalog.
     ReadMetadata,
+    /// Exporting photos as image files.
+    Export,
 }
 
 /// Where a task is.

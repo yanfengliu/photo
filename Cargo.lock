@@ -3260,9 +3260,15 @@ name = "photo"
 version = "0.3.0"
 dependencies = [
  "directories",
+ "eframe",
+ "egui",
  "env_logger",
+ "image",
  "log",
+ "photo-engine",
+ "photo-testkit",
  "photo-ui",
+ "serde_json",
  "tempfile",
 ]
 
@@ -3331,10 +3337,14 @@ dependencies = [
  "photo-catalog",
  "photo-core",
  "photo-decode",
+ "photo-develop",
+ "photo-export",
  "photo-imaging",
  "photo-testkit",
  "photo-xmp",
  "rayon",
+ "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -3344,11 +3354,14 @@ name = "photo-export"
 version = "0.3.0"
 dependencies = [
  "image",
+ "kamadak-exif",
  "log",
  "photo-core",
  "photo-decode",
  "photo-develop",
+ "photo-imaging",
  "photo-testkit",
+ "rayon",
  "serde",
  "tempfile",
  "thiserror 2.0.21",

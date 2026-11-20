@@ -46,6 +46,7 @@ impl AppOptions {
         Engine::open(EngineConfig {
             catalog_path: self.catalog_path.clone(),
             previews_dir: self.previews_dir.clone(),
+            export_dir: self.export_dir.clone(),
             worker_threads,
         })
     }

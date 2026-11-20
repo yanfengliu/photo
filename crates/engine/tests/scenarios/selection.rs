@@ -46,6 +46,52 @@ fn range_toggle_and_movement_with_and_without_extend() {
 }
 
 #[test]
+fn a_selected_photo_becomes_active_without_changing_the_selection() {
+    let (_library, mut studio, p) = studio();
+    let engine = &mut studio.engine;
+    engine.select_only(p[1]);
+    engine.extend_selection_to(p[4]);
+    assert!(engine.make_active(p[2]));
+    assert_eq!(engine.selection().selected(), &p[1..=4]);
+    assert_eq!(engine.active_photo(), Some(p[2]));
+    assert_eq!(
+        engine.previous_photo(),
+        Some(p[4]),
+        "the photo active before is remembered"
+    );
+    engine.extend_selection_to(p[3]);
+    assert_eq!(
+        engine.selection().selected(),
+        &p[2..=3],
+        "the range pivots on it"
+    );
+    assert!(!engine.make_active(p[5]), "only a selected photo");
+    assert_eq!(engine.active_photo(), Some(p[3]));
+}
+
+#[test]
+fn the_source_count_ignores_the_filter() {
+    let (_library, mut studio, p) = studio();
+    let engine = &mut studio.engine;
+    assert_eq!(engine.source_photo_count(), 6);
+    engine
+        .set_flag(Target::Photos(vec![p[0]]), Flag::Picked)
+        .unwrap();
+    let picked = Filter {
+        flags: vec![Flag::Picked],
+        ..Filter::default()
+    };
+    engine.set_filter(picked).unwrap();
+    assert_eq!((engine.photo_count(), engine.source_photo_count()), (1, 6));
+    engine
+        .create_virtual_copies(Target::Photos(vec![p[1]]))
+        .unwrap();
+    assert_eq!(engine.source_photo_count(), 7, "copies count");
+    engine.undo().unwrap();
+    assert_eq!(engine.source_photo_count(), 6);
+}
+
+#[test]
 fn select_all_and_select_none() {
     let (_library, mut studio, p) = studio();
     let engine = &mut studio.engine;

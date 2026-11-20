@@ -159,3 +159,64 @@ fn a_photo_without_a_sidecar_is_left_alone() {
     assert_eq!(studio.engine.photo(lake).unwrap().rating, Rating::new(2));
     assert_eq!(studio.engine.undo_label(), Some("Set Rating to 2"));
 }
+
+#[test]
+fn a_sidecar_with_settings_from_a_newer_version_keeps_them_and_says_why() {
+    let (_library, mut studio, dawn, sidecar) = marked_dawn();
+    let target = || Target::Photos(vec![dawn]);
+    studio
+        .engine
+        .quick_adjust(target(), photo_core::develop::Adj::Exposure, 1.0)
+        .unwrap();
+    studio.engine.save_metadata_to_files(target()).unwrap();
+    studio.settle();
+    let written = std::fs::read_to_string(&sidecar).unwrap();
+    let ours = format!(
+        "photo:SettingsFormat=\"{}\"",
+        photo_core::develop::SETTINGS_FORMAT
+    );
+    let newer = written.replace(&ours, "photo:SettingsFormat=\"99\"");
+    assert_ne!(newer, written, "the format is in the sidecar");
+    std::fs::write(&sidecar, &newer).unwrap();
+
+    studio.engine.reset_settings(target()).unwrap();
+    studio.engine.set_rating(target(), Rating::new(1)).unwrap();
+    let task = studio.engine.read_metadata_from_files(target()).unwrap();
+    studio.settle();
+    assert_eq!(
+        studio.engine.photo(dawn).unwrap().rating,
+        Rating::new(4),
+        "the rest is read"
+    );
+    let settings = studio.engine.develop_settings(dawn).unwrap();
+    assert_eq!(
+        settings.tone.exposure, 0.0,
+        "settings it cannot read are not applied"
+    );
+    let issues = studio.engine.metadata_issues(task).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message.contains("format 99")),
+        "{issues:?}"
+    );
+
+    studio.engine.set_rating(target(), Rating::new(2)).unwrap();
+    let task = studio.engine.save_metadata_to_files(target()).unwrap();
+    studio.settle();
+    assert_eq!(studio.engine.task(task).unwrap().errors, 0, "not a failure");
+    let issues = studio.engine.metadata_issues(task).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message.contains("were not written")),
+        "{issues:?}"
+    );
+    let kept = photo_xmp::read_sidecar(&sidecar, INFO).unwrap().unwrap();
+    assert_eq!(kept.rating, Rating::new(2), "everything else was written");
+    assert_eq!(
+        kept.unreadable_settings_format,
+        Some(99),
+        "the newer settings stay"
+    );
+}

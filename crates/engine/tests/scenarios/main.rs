@@ -3,11 +3,17 @@
 
 mod attributes;
 mod browsing;
+mod clipboard;
 mod common;
+mod develop;
+mod export;
 mod import;
 mod lifecycle;
+mod looks;
 mod organise;
 mod performance;
 mod previews;
+mod protected;
 mod selection;
 mod sidecars;
+mod tools;

@@ -1,8 +1,9 @@
 //! The order in which queued jobs are handed to workers.
 //!
-//! Two lanes. The interactive lane (pictures someone is looking at) always
-//! goes first and serves the newest request first, so the cells a user has
-//! just scrolled to are filled before the ones scrolled past. The background
+//! Three lanes. The urgent lane (the photo open in Develop) goes first, in
+//! order. The interactive lane (pictures someone is looking at) comes next
+//! and serves the newest request first, so the cells a user has just
+//! scrolled to are filled before the ones scrolled past. The background
 //! lane (imports, scans, sidecars) is first come, first served.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -12,6 +13,7 @@ use std::hash::Hash;
 /// of type `K` so that a repeated request can replace or promote them.
 #[derive(Debug)]
 pub(crate) struct Queue<T, K> {
+    urgent: VecDeque<T>,
     /// Interactive items by sequence number; the largest is the newest.
     interactive: BTreeMap<u64, (Option<K>, T)>,
     /// Where each keyed interactive item sits in `interactive`.
@@ -23,6 +25,7 @@ pub(crate) struct Queue<T, K> {
 impl<T, K: Hash + Eq + Clone> Queue<T, K> {
     pub(crate) fn new() -> Self {
         Self {
+            urgent: VecDeque::new(),
             interactive: BTreeMap::new(),
             keyed: HashMap::new(),
             background: VecDeque::new(),
@@ -53,6 +56,12 @@ impl<T, K: Hash + Eq + Clone> Queue<T, K> {
         self.background.push_back(item);
     }
 
+    /// Queue an urgent item behind every other urgent item, ahead of
+    /// everything else.
+    pub(crate) fn push_urgent(&mut self, item: T) {
+        self.urgent.push_back(item);
+    }
+
     /// Make the interactive item queued under `key` the newest. Returns
     /// whether such an item was queued.
     pub(crate) fn promote(&mut self, key: &K) -> bool {
@@ -68,9 +77,12 @@ impl<T, K: Hash + Eq + Clone> Queue<T, K> {
         true
     }
 
-    /// The next item to run: the newest interactive item, else the oldest
-    /// background item.
+    /// The next item to run: the oldest urgent item, else the newest
+    /// interactive item, else the oldest background item.
     pub(crate) fn pop(&mut self) -> Option<T> {
+        if let Some(item) = self.urgent.pop_front() {
+            return Some(item);
+        }
         if let Some((_, (key, item))) = self.interactive.pop_last() {
             if let Some(key) = key {
                 self.keyed.remove(&key);
@@ -84,16 +96,16 @@ impl<T, K: Hash + Eq + Clone> Queue<T, K> {
     pub(crate) fn drain(&mut self) -> Vec<T> {
         self.keyed.clear();
         let interactive = std::mem::take(&mut self.interactive);
-        interactive
-            .into_values()
-            .map(|(_, item)| item)
+        self.urgent
+            .drain(..)
+            .chain(interactive.into_values().map(|(_, item)| item))
             .chain(self.background.drain(..))
             .collect()
     }
 
     /// How many items are queued.
     pub(crate) fn len(&self) -> usize {
-        self.interactive.len() + self.background.len()
+        self.urgent.len() + self.interactive.len() + self.background.len()
     }
 }
 
@@ -106,16 +118,20 @@ mod tests {
     }
 
     #[test]
-    fn interactive_items_go_first_and_newest_first() {
+    fn urgent_items_go_first_then_interactive_ones_newest_first() {
         let mut queue = Queue::new();
         queue.push_background("import a");
         queue.push_interactive(None, "thumb 1");
+        queue.push_urgent("decode 1");
         queue.push_background("import b");
         queue.push_interactive(None, "thumb 2");
-        assert_eq!(queue.len(), 4);
+        queue.push_urgent("decode 2");
+        assert_eq!(queue.len(), 6);
         assert_eq!(
             drain_order(&mut queue),
-            ["thumb 2", "thumb 1", "import a", "import b"]
+            [
+                "decode 1", "decode 2", "thumb 2", "thumb 1", "import a", "import b"
+            ]
         );
     }
 

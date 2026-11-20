@@ -135,3 +135,69 @@ fn requery_at_twenty_thousand_photos() {
     );
     assert_eq!(engine.photos().len(), PHOTOS);
 }
+
+/// The develop session's interactive loop: one slider update to its draft
+/// frame, for a 2.5-megapixel view of a 24-megapixel photo.
+#[test]
+#[ignore = "timing report"]
+fn settings_update_to_draft_frame_at_two_and_a_half_megapixels() {
+    use photo_core::develop::Adj;
+    use photo_engine::{CanvasView, DevelopLoad, Quality};
+
+    let (_files, files) = crate::common::many_jpegs(1, 6000, 4000);
+    let mut studio = crate::common::Studio::with_workers(4);
+    studio.import(files);
+    let photo = studio.ids()[0];
+    studio.engine.open_develop(photo).unwrap();
+    studio.engine.set_canvas_view(CanvasView::Fit {
+        width: 1936,
+        height: 1291,
+    });
+    studio.settle();
+    let session = studio.engine.develop().unwrap();
+    assert_eq!(session.load_state(), &DevelopLoad::Rendered);
+    let view = session.frame().unwrap().view();
+    let megapixels = f64::from(view.width() * view.height()) / 1e6;
+    println!(
+        "\nview {}x{} ({megapixels:.2} MP) of a 6000x4000 photo",
+        view.width(),
+        view.height()
+    );
+    assert!((2.4..2.6).contains(&megapixels));
+
+    let draft = median("settings update to its draft frame", 15, |run| {
+        let value = if run % 2 == 0 { 0.5 } else { -0.5 };
+        studio
+            .engine
+            .adjust(Adj::Exposure, value + run as f32 / 100.0)
+            .unwrap();
+        crate::common::settle(&mut studio.engine);
+        let session = studio.engine.develop().unwrap();
+        let frame = session.frame().unwrap();
+        assert_eq!(
+            (frame.version(), frame.quality()),
+            (session.version(), Quality::Draft)
+        );
+    });
+    let stages = studio
+        .engine
+        .develop()
+        .unwrap()
+        .frame()
+        .unwrap()
+        .stage_times()
+        .to_vec();
+    for (stage, time) in stages {
+        println!("  {stage:<62} {:>8.2} ms", time.as_secs_f64() * 1000.0);
+    }
+    studio.engine.commit_edit().unwrap();
+    median("release: commit to its full-quality frame", 5, |run| {
+        studio
+            .engine
+            .adjust(Adj::Contrast, run as f32 + 1.0)
+            .unwrap();
+        studio.engine.commit_edit().unwrap();
+        crate::common::settle(&mut studio.engine);
+    });
+    assert!(draft < Duration::from_secs(1), "{draft:?}");
+}

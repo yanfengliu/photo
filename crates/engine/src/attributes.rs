@@ -3,8 +3,8 @@
 //! write for the whole target, is undoable per photo, and confirms itself
 //! with a toast.
 
-use photo_catalog::{DevelopEdit, PhotoRecord, TextField};
-use photo_core::develop::{DevelopSettings, Orientation};
+use photo_catalog::{PhotoRecord, TextField};
+use photo_core::develop::Orientation;
 use photo_core::meta::{ColorLabel, Flag, PhotoId, Rating};
 
 use crate::commands::Target;
@@ -105,6 +105,22 @@ impl Engine {
         self.apply_and_record(message, values.map(Command::Labels))
     }
 
+    /// Give every target photo this colour label, whatever label each had;
+    /// [`ColorLabel::None`] clears them.
+    pub fn set_label(&mut self, target: Target, label: ColorLabel) -> Result<(), EngineError> {
+        let records = self.records(&target)?;
+        if records.is_empty() {
+            return Ok(());
+        }
+        let values = Values::changes(records.iter().map(|r| (r.id, r.label, label)));
+        let message = if label == ColorLabel::None {
+            "Clear Color Label".to_string()
+        } else {
+            format!("Set Color Label to {}", label.name())
+        };
+        self.apply_and_record(message, values.map(Command::Labels))
+    }
+
     /// Set one text field of every target photo.
     pub fn set_text(
         &mut self,
@@ -157,6 +173,7 @@ impl Engine {
 
     /// Change the orientation in each photo's develop settings, as one
     /// develop edit per photo with a history step, in one catalog write.
+    /// Photos whose settings were saved by a newer version are left alone.
     fn reorient(
         &mut self,
         target: &Target,
@@ -167,23 +184,12 @@ impl Engine {
         if photos.is_empty() {
             return Ok(());
         }
-        let mut turned: Vec<(PhotoId, DevelopSettings)> = Vec::with_capacity(photos.len());
-        for photo in photos {
-            let mut settings = self.catalog.develop_settings(photo)?;
-            settings.orientation = turn(settings.orientation);
-            turned.push((photo, settings));
-        }
-        let edits: Vec<DevelopEdit<'_>> = turned
-            .iter()
-            .map(|(photo, settings)| DevelopEdit {
-                photo: *photo,
-                settings,
-                history_label: Some(label),
-            })
-            .collect();
-        let changes = self.catalog.apply_develop_edits(&edits)?;
-        self.record(label.to_string(), Command::Develop(changes));
-        Ok(())
+        let editable = self.editable_settings(&photos)?;
+        self.write_develop(label, editable, |_, current, _| {
+            let mut turned = current.clone();
+            turned.orientation = turn(current.orientation);
+            turned
+        })
     }
 
     /// Make a virtual copy of every target photo and select the copies.

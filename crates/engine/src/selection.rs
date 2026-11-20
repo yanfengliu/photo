@@ -112,6 +112,18 @@ impl Selection {
         true
     }
 
+    /// Make `photo`, which must already be selected, the active photo and
+    /// the anchor, keeping the selection as it is. Returns false, changing
+    /// nothing, when it is not selected.
+    pub(crate) fn make_active(&mut self, photo: PhotoId) -> bool {
+        if !self.is_selected(photo) {
+            return false;
+        }
+        self.active = Some(photo);
+        self.anchor = Some(photo);
+        true
+    }
+
     /// Select the range from the anchor (or the active photo) to `photo`,
     /// replacing the selection, and make `photo` active. The anchor stays.
     pub(crate) fn extend_to(&mut self, list: &impl Listing, photo: PhotoId) -> bool {

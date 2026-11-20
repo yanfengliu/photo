@@ -1,9 +1,14 @@
-//! Keywords: assigning them to photos by name (one catalog write per
-//! keyword rather than per photo), and editing the keyword tree itself.
-//! All of it is undoable; a deleted keyword comes back with its
-//! assignments.
+//! Keywords: assigning them to photos by name, and editing the keyword tree
+//! itself. All of it is undoable exactly: a keyword an action created is
+//! deleted again by its undo (and restored under its id by the redo), and a
+//! deleted keyword comes back with its assignments.
+//!
+//! Adding and removing a keyword, by name or by id, is one catalog write per
+//! keyword, whatever the number of photos. Setting a photo's whole list
+//! goes through `Catalog::set_photo_keywords`, which resolves each name
+//! against the keywords the photo already carries, one write per photo.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use photo_catalog::{Catalog, CatalogError, Entity, KeywordInfo};
 use photo_core::meta::{KeywordId, PhotoId};
@@ -11,7 +16,16 @@ use photo_core::meta::{KeywordId, PhotoId};
 use crate::commands::{Applied, Target};
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::undo::{Branch, Command, KeywordLink, TreeEdit};
+use crate::undo::{Branch, Command, KeywordLink, KeywordList, TreeEdit};
+
+/// A keyword some of a set of photos carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeywordUse {
+    /// The keyword, with its count over the whole catalog.
+    pub keyword: KeywordInfo,
+    /// How many of the photos carry it directly.
+    pub photos: usize,
+}
 
 /// Names trimmed, blanks dropped, and each name once (ignoring ASCII case,
 /// as the catalog compares them).
@@ -108,8 +122,9 @@ impl Engine {
             return Ok(());
         }
         let names = clean(names);
+        let lists = photos.iter().map(|photo| (*photo, names.clone())).collect();
         let mut applied = Applied::default();
-        if let Err(error) = replace_all(&mut self.catalog, &mut applied, &names, &photos) {
+        if let Err(error) = set_lists(&mut self.catalog, &mut applied, lists) {
             applied.roll_back(&mut self.catalog);
             return Err(error.into());
         }
@@ -120,6 +135,103 @@ impl Engine {
     /// The keywords assigned to a photo, in name order.
     pub fn photo_keywords(&self, photo: PhotoId) -> Result<Vec<KeywordInfo>, EngineError> {
         Ok(self.catalog.photo_keywords(photo)?)
+    }
+
+    /// The keywords the target photos carry directly, each with how many
+    /// of them carry it, in name order: what the Keywording panel lists for
+    /// a selection, where a keyword that only some carry shows as partial.
+    /// One catalog read per photo.
+    pub fn keywords_of(&self, target: Target) -> Result<Vec<KeywordUse>, EngineError> {
+        let mut uses: HashMap<KeywordId, KeywordUse> = HashMap::new();
+        for photo in self.resolve(&target) {
+            for keyword in self.catalog.photo_keywords(photo)? {
+                uses.entry(keyword.id)
+                    .or_insert(KeywordUse { keyword, photos: 0 })
+                    .photos += 1;
+            }
+        }
+        let order: HashMap<KeywordId, usize> = self
+            .browser
+            .keywords()
+            .iter()
+            .enumerate()
+            .map(|(place, keyword)| (keyword.id, place))
+            .collect();
+        let mut listed: Vec<KeywordUse> = uses.into_values().collect();
+        listed.sort_by_key(|used| (order.get(&used.keyword.id).copied(), used.keyword.id));
+        Ok(listed)
+    }
+
+    /// Give every target photo these keywords, chosen by id: exact where
+    /// a name is shared by keywords in different places. An unknown keyword
+    /// is refused, changing nothing.
+    pub fn add_keyword_ids(
+        &mut self,
+        target: Target,
+        keywords: &[KeywordId],
+    ) -> Result<(), EngineError> {
+        self.link_keywords(&target, keywords, true)
+    }
+
+    /// Take these keywords, chosen by id, off every target photo. An
+    /// unknown keyword is refused, changing nothing.
+    pub fn remove_keyword_ids(
+        &mut self,
+        target: Target,
+        keywords: &[KeywordId],
+    ) -> Result<(), EngineError> {
+        self.link_keywords(&target, keywords, false)
+    }
+
+    /// Assign (`link`) or unassign each keyword over the target, one
+    /// catalog write per keyword, recording only the photos that changed.
+    fn link_keywords(
+        &mut self,
+        target: &Target,
+        keywords: &[KeywordId],
+        link: bool,
+    ) -> Result<(), EngineError> {
+        let photos = self.resolve(target);
+        let mut seen = HashSet::new();
+        let keywords: Vec<KeywordId> = keywords
+            .iter()
+            .copied()
+            .filter(|keyword| seen.insert(*keyword))
+            .collect();
+        if photos.is_empty() || keywords.is_empty() {
+            return Ok(());
+        }
+        let names = keywords
+            .iter()
+            .map(|keyword| self.known_keyword(*keyword).map(|known| known.name.clone()))
+            .collect::<Result<Vec<String>, EngineError>>()?;
+        let mut applied = Applied::default();
+        for keyword in &keywords {
+            let changed = if link {
+                self.catalog.assign_keyword(*keyword, &photos)
+            } else {
+                self.catalog.unassign_keyword(*keyword, &photos)
+            };
+            match changed {
+                Ok(changed) if changed.is_empty() => {}
+                Ok(changed) => applied.push(Command::Keyword(KeywordLink {
+                    keyword: *keyword,
+                    photos: changed,
+                    linked: link,
+                })),
+                Err(error) => {
+                    applied.roll_back(&mut self.catalog);
+                    return Err(error.into());
+                }
+            }
+        }
+        let verb = if link { "Add" } else { "Remove" };
+        let label = match names.as_slice() {
+            [name] => format!("{verb} Keyword \"{name}\""),
+            many => format!("{verb} {} Keywords", many.len()),
+        };
+        self.record_applied(label, applied);
+        Ok(())
     }
 
     /// Create a keyword under `parent` (or at the top level).
@@ -197,90 +309,70 @@ impl Engine {
 }
 
 /// Resolve each name to a keyword (creating it if needed) and assign it to
-/// `photos`, recording only the photos that did not have it.
+/// `photos`, recording only the photos that did not have it, and recording
+/// each keyword that had to be created before its assignment.
 fn assign_all(
     catalog: &mut Catalog,
     applied: &mut Applied,
     names: &[String],
     photos: &[PhotoId],
 ) -> Result<(), CatalogError> {
+    let mut known: HashSet<KeywordId> = catalog.keywords()?.into_iter().map(|k| k.id).collect();
     for name in names {
         let keyword = catalog.ensure_keyword(name)?;
-        assign(catalog, applied, keyword, photos)?;
-    }
-    Ok(())
-}
-
-fn assign(
-    catalog: &mut Catalog,
-    applied: &mut Applied,
-    keyword: KeywordId,
-    photos: &[PhotoId],
-) -> Result<(), CatalogError> {
-    let added = catalog.assign_keyword(keyword, photos)?;
-    if !added.is_empty() {
-        applied.push(Command::Keyword(KeywordLink {
-            keyword,
-            photos: added,
-            linked: true,
-        }));
-    }
-    Ok(())
-}
-
-/// Give each photo exactly the named keywords: for every keyword involved,
-/// one write that takes it off the photos that should not have it and one
-/// that gives it to the photos that should.
-pub(crate) fn replace_all(
-    catalog: &mut Catalog,
-    applied: &mut Applied,
-    names: &[String],
-    photos: &[PhotoId],
-) -> Result<(), CatalogError> {
-    let wanted = names
-        .iter()
-        .map(|name| catalog.ensure_keyword(name))
-        .collect::<Result<BTreeSet<KeywordId>, _>>()?;
-    let wanted_by_photo = photos
-        .iter()
-        .map(|photo| (*photo, wanted.clone()))
-        .collect();
-    replace_each(catalog, applied, wanted_by_photo)
-}
-
-/// Give each photo exactly its own set of keywords.
-pub(crate) fn replace_each(
-    catalog: &mut Catalog,
-    applied: &mut Applied,
-    wanted: BTreeMap<PhotoId, BTreeSet<KeywordId>>,
-) -> Result<(), CatalogError> {
-    let mut gain: BTreeMap<KeywordId, Vec<PhotoId>> = BTreeMap::new();
-    let mut lose: BTreeMap<KeywordId, Vec<PhotoId>> = BTreeMap::new();
-    for (photo, keywords) in &wanted {
-        let current: BTreeSet<KeywordId> = catalog
-            .photo_keywords(*photo)?
-            .into_iter()
-            .map(|keyword| keyword.id)
-            .collect();
-        for keyword in keywords.difference(&current) {
-            gain.entry(*keyword).or_default().push(*photo);
+        if known.insert(keyword) {
+            applied.push(Command::Keywords(TreeEdit::Created(Branch::Present(
+                keyword,
+            ))));
         }
-        for keyword in current.difference(keywords) {
-            lose.entry(*keyword).or_default().push(*photo);
-        }
-    }
-    for (keyword, photos) in lose {
-        let removed = catalog.unassign_keyword(keyword, &photos)?;
-        if !removed.is_empty() {
+        let added = catalog.assign_keyword(keyword, photos)?;
+        if !added.is_empty() {
             applied.push(Command::Keyword(KeywordLink {
                 keyword,
-                photos: removed,
-                linked: false,
+                photos: added,
+                linked: true,
             }));
         }
     }
-    for (keyword, photos) in gain {
-        assign(catalog, applied, keyword, &photos)?;
+    Ok(())
+}
+
+/// Give each photo exactly its list of keyword names, through
+/// `Catalog::set_photo_keywords`: a name the photo already carries keeps
+/// that keyword, any other resolves to the only keyword of the name or a
+/// new top-level one. Each keyword created is recorded before the list
+/// that uses it, so undoing deletes it after the list is put back.
+pub(crate) fn set_lists(
+    catalog: &mut Catalog,
+    applied: &mut Applied,
+    lists: Vec<(PhotoId, Vec<String>)>,
+) -> Result<(), CatalogError> {
+    for (photo, names) in lists {
+        let before: Vec<KeywordId> = catalog
+            .photo_keywords(photo)?
+            .into_iter()
+            .map(|keyword| keyword.id)
+            .collect();
+        let change = catalog.set_photo_keywords(photo, &names)?;
+        for created in &change.created {
+            applied.push(Command::Keywords(TreeEdit::Created(Branch::Present(
+                *created,
+            ))));
+        }
+        if change.added.is_empty() && change.removed.is_empty() {
+            continue;
+        }
+        let after = before
+            .iter()
+            .filter(|keyword| !change.removed.contains(keyword))
+            .chain(&change.added)
+            .copied()
+            .collect();
+        applied.push(Command::KeywordList(KeywordList {
+            photo,
+            before,
+            after,
+        }));
     }
     Ok(())
 }

@@ -12,14 +12,21 @@ workspace = true
 photo-catalog = { workspace = true }
 photo-core = { workspace = true }
 photo-decode = { workspace = true }
+photo-develop = { workspace = true }
+photo-export = { workspace = true }
 photo-imaging = { workspace = true }
 photo-xmp = { workspace = true }
 # Only for encoding and decoding the engine's own JPEG preview files.
 image = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
+# Export presets are stored in the catalog as JSON.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 photo-testkit = { workspace = true }
+# Only so a test can plant develop settings written by a newer build, which
+# no catalog API writes. Already in the workspace through photo-catalog.
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
