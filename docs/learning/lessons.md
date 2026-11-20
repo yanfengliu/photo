@@ -16,4 +16,14 @@ Code lessons require a real test id. One concise entry per lesson.
 
 ## Active lessons
 
-None yet.
+### Run `cargo fmt --check` from the workspace root, never with `--manifest-path`
+
+| Field | Value |
+| --- | --- |
+| Surfaced by | GitHub Actions run 44680100632 on commit `c59c2bf`: the Format step failed on macOS and Windows 30 seconds after a push whose message said the format gate passed |
+| Reviewer findings | None; CI caught it. No reviewer had looked at the commit |
+| Fix commit | `5a64b64` |
+| Test added | n/a — process lesson. The gate is CI's `cargo fmt --check`, which runs from the workspace root |
+| Behavior delta | Before: `cargo fmt --check --manifest-path <root>/Cargo.toml` exited 0 while eleven files in `crates/core` were unformatted, so v0.3.0 was committed and pushed with a red format gate reported as green. After: the gate is run as plain `cargo fmt --check` with the workspace root as the working directory (or `cargo fmt -p <crate> -- --check` for one crate), which checks every member |
+
+`cargo fmt` decides whether to format every workspace member by comparing the workspace root directory with the current directory. When `--manifest-path` is given it compares the root directory with the manifest *file* path instead, the comparison is always false, and it silently formats only the package that manifest belongs to. Passing `--manifest-path` to `cargo test`, `cargo clippy` and `cargo build` is harmless; passing it to `cargo fmt` turns the gate into a no-op for every crate under `crates/`.

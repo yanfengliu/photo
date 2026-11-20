@@ -14,6 +14,7 @@
 - Verification approach: contract tests per crate; UI driven and rendered headlessly through `egui_kittest` (accessibility-tree queries plus real frames written to `target/ui-snapshots/`).
 - Tests cannot touch real data by construction: only `src/main.rs` resolves a default catalog location; all library code takes explicit paths.
 - Dev builds optimize dependencies (opt-level 2) and the pixel-math crates (opt-level 3).
+- Run the format gate as plain `cargo fmt --check` from the workspace root. With `--manifest-path` it silently checks only the root package (this let v0.3.0 ship with a red format gate; see `docs/learning/lessons.md`).
 - `cargo audit`: 0 vulnerabilities; 5 unmaintained-crate warnings, all transitive (chrono via rawler; ttf-parser, zbus_names, zvariant, zvariant_derive only on Linux dependency paths). Re-check by 2027-02-19.
 - Carried-over standing rules live in `docs/policies/local-rules.md` (no unfalsifiable "Lightroom-style" claims; tone controls in perceptual space; zone tests sample inside the peak; clamp at regime cliffs).
 

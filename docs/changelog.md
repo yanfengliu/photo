@@ -17,4 +17,4 @@ What this version contains:
 
 Not yet usable as an application: running it opens a placeholder window.
 
-Validation: `cargo test` (67 tests), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and `cargo build` pass. `cargo audit`: 0 vulnerabilities, 5 unmaintained-crate warnings in transitive dependencies (tracked in the devlog).
+Validation: `cargo test` (67 tests), `cargo clippy --all-targets -- -D warnings` and `cargo build` pass. `cargo fmt --check` was reported as passing when 0.3.0 was committed but had only checked the root package; `photo-core` was formatted in a follow-up commit and the UI spike is replaced in the next version. `cargo audit`: 0 vulnerabilities, 5 unmaintained-crate warnings in transitive dependencies (tracked in the devlog).
