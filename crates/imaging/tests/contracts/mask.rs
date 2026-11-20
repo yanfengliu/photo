@@ -220,6 +220,22 @@ fn a_brush_follows_every_segment_and_handles_dots_and_empty_strokes() {
 }
 
 #[test]
+fn a_stroke_that_doubles_back_covers_its_far_end() {
+    // Out 2.4 px to the right and straight back, with a 10 px hard brush.
+    // The turning point is the farthest the brush reached, and whatever the
+    // stroke's path is reduced to for drawing must still reach it.
+    let there_and_back = [(0.5, 0.5), (0.512, 0.5), (0.5, 0.5)];
+    let alpha = render_shape(brush(vec![stroke(&there_and_back, 0.0, 100.0, false)]));
+    // Pixel 111 is 9.1 px right of the turning point (102.4, 50) and 11.5 px
+    // from the start: inside the stroke only because of the turning point.
+    assert_eq!(alpha.get(111, 50), 1.0);
+    assert_eq!(alpha.get(114, 50), 0.0);
+    // While the stroke is being drawn, before it turns, it reaches as far.
+    let outward = render_shape(brush(vec![stroke(&there_and_back[..2], 0.0, 100.0, false)]));
+    assert_eq!(outward.get(111, 50), alpha.get(111, 50));
+}
+
+#[test]
 fn brush_feather_softens_from_the_centre_line() {
     let soft = render_shape(brush(vec![stroke(
         &[(0.2, 0.5), (0.8, 0.5)],

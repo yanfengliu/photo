@@ -5,7 +5,8 @@
 //! and a cancel button in the platform's order (confirm on the right, except
 //! on Windows). Enter confirms and Escape cancels: the topmost dialog only,
 //! and never with the key press that opened it. The rest of the window is
-//! dimmed and takes no pointer input, Enter or Escape while the dialog is up.
+//! dimmed and takes no pointer input while the dialog is up, and a key the
+//! dialog answers is taken out of the input for whatever is shown after it.
 
 use egui::os::OperatingSystem;
 use egui::{
@@ -138,8 +139,10 @@ impl<'a> Dialog<'a> {
         // The keys are this dialog's only if it is the one on top with no
         // menu open over it, and only if it was already up last frame: the
         // Enter that opened it (by confirming another dialog, say) is not an
-        // answer to it. They are taken out of the input either way, so the
-        // window behind never acts on them.
+        // answer to it. (egui itself reports a new modal as on top only from
+        // its second frame; this does not rely on that.) Keys that are this
+        // dialog's are taken out of the input whether or not they act, so
+        // nothing shown after the dialog acts on them too.
         let frame = ctx.cumulative_frame_nr();
         let opened: u64 = recall(ctx, id).unwrap_or(frame);
         remember(ctx, id, Some(opened));

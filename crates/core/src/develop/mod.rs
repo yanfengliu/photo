@@ -150,17 +150,30 @@ impl DevelopSettings {
         *self == Self::default_for(kind)
     }
 
-    /// Force every scalar adjustment into its valid range for `kind`,
-    /// including each mask's local adjustments and each healing spot.
-    /// Settings arriving from outside (XMP, presets, a paste from a photo of
-    /// another kind) pass through this before they are stored.
+    /// Force every number into its valid range for `kind`: each scalar
+    /// adjustment, each mask's local adjustments and shapes, each healing
+    /// spot, and the crop. Settings arriving from outside (XMP, presets, a
+    /// paste from a photo of another kind) pass through this before they are
+    /// stored, and nothing comes out of it infinite or NaN.
     ///
     /// A custom white balance cannot be carried between RAW and raster
     /// sources because the units differ, so out-of-range temperature falls
     /// back to as-shot rather than being clamped to a meaningless value. A
-    /// spot whose position is not finite is dropped.
+    /// spot, gradient or crop rectangle whose position is not finite is
+    /// dropped, as is a brush stroke with no finite point.
     pub fn sanitize_for(&mut self, kind: FileKind) {
+        self.crop.rect = self.crop.rect.and_then(CropRect::sanitized);
+        self.crop.constraint = self.crop.constraint.sanitized();
         for mask in &mut self.masks {
+            mask.components = std::mem::take(&mut mask.components)
+                .into_iter()
+                .filter_map(|component| {
+                    component.shape.sanitized().map(|shape| MaskComponent {
+                        shape,
+                        subtract: component.subtract,
+                    })
+                })
+                .collect();
             if !(0.0..=100.0).contains(&mask.amount) {
                 mask.amount = if mask.amount < 0.0 { 0.0 } else { 100.0 };
             }
@@ -357,5 +370,117 @@ mod tests {
         assert_eq!(settings.masks[0].amount, 100.0);
         assert_eq!(settings.masks[0].adjust.exposure, -4.0);
         assert_eq!(settings.masks[0].adjust.clarity, 0.0);
+    }
+
+    #[test]
+    fn sanitize_brings_a_crop_inside_the_frame_and_keeps_one_that_is() {
+        let crop = |rect, constraint| Crop {
+            rect: Some(rect),
+            angle: 0.0,
+            constraint,
+        };
+        let mut outside = DevelopSettings {
+            crop: crop(
+                CropRect {
+                    cx: 0.95,
+                    cy: -0.2,
+                    width: 0.5,
+                    height: 3.0,
+                },
+                CropConstraint::Ratio {
+                    width: 0.0,
+                    height: 1.0,
+                },
+            ),
+            ..Default::default()
+        };
+        outside.sanitize_for(FileKind::Raster);
+        let inside = CropRect {
+            cx: 0.75,
+            cy: 0.5,
+            width: 0.5,
+            height: 1.0,
+        };
+        assert_eq!(outside.crop, crop(inside, CropConstraint::Original));
+
+        let legal = crop(
+            CropRect {
+                cx: 0.4,
+                cy: 0.6,
+                width: 0.5,
+                height: 0.5,
+            },
+            CropConstraint::Ratio {
+                width: 16.0,
+                height: 9.0,
+            },
+        );
+        let mut kept = DevelopSettings {
+            crop: legal,
+            ..Default::default()
+        };
+        kept.sanitize_for(FileKind::Raster);
+        assert_eq!(kept.crop, legal);
+    }
+
+    /// JSON has no infinity, but a number too large for `f32`, such as
+    /// `1e40`, deserialises into one. Settings read from a sidecar's private
+    /// JSON or a preset must come out of sanitising with every number finite.
+    #[test]
+    fn sanitize_leaves_nothing_infinite_when_json_overflows_f32() {
+        let json = r#"{
+            "crop": {
+                "rect": {"cx": 0.5, "cy": 0.5, "width": 1e40, "height": 1e40},
+                "constraint": {"ratio": {"width": 1e40, "height": 2.0}}
+            },
+            "masks": [{"adjust": {"exposure": 1.0}, "components": [
+                {"shape": {"kind": "linear", "start": {"x": 1e40, "y": 0.0}, "end": {"x": 0.5, "y": 0.5}}},
+                {"shape": {"kind": "radial", "center": {"x": 0.5, "y": 0.5}, "radius_x": 1e40,
+                           "radius_y": 0.2, "angle": 1e40, "feather": 1e40, "invert": false}},
+                {"shape": {"kind": "brush", "strokes": [
+                    {"points": [{"x": 0.1, "y": 0.1}, {"x": 1e40, "y": 0.2}],
+                     "radius": 1e40, "feather": 50.0, "flow": 1e40, "erase": false},
+                    {"points": [{"x": 1e40, "y": 0.1}],
+                     "radius": 0.05, "feather": 50.0, "flow": 50.0, "erase": false}
+                ]}}
+            ]}]
+        }"#;
+        let mut settings: DevelopSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.crop.rect.unwrap().width.is_infinite());
+
+        settings.sanitize_for(FileKind::Raster);
+
+        assert_eq!(settings.crop.rect, None, "an infinite rectangle is dropped");
+        assert_eq!(settings.crop.constraint, CropConstraint::Original);
+        let components = &settings.masks[0].components;
+        assert_eq!(
+            components.len(),
+            2,
+            "the gradient with no finite start is dropped"
+        );
+        let finite = |values: &[f32]| values.iter().all(|value| value.is_finite());
+        match &components[0].shape {
+            MaskShape::Radial {
+                center,
+                radius_x,
+                radius_y,
+                angle,
+                feather,
+                ..
+            } => assert!(finite(&[
+                center.x, center.y, *radius_x, *radius_y, *angle, *feather
+            ])),
+            other => panic!("expected the radial gradient, got {other:?}"),
+        }
+        match &components[1].shape {
+            MaskShape::Brush { strokes } => {
+                assert_eq!(strokes.len(), 1, "a stroke with no finite point is dropped");
+                assert_eq!(strokes[0].points.len(), 1);
+                let stroke = &strokes[0];
+                assert!(finite(&[stroke.radius, stroke.feather, stroke.flow]));
+                assert!(finite(&[stroke.points[0].x, stroke.points[0].y]));
+            }
+            other => panic!("expected the brush, got {other:?}"),
+        }
     }
 }

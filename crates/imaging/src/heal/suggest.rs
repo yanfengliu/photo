@@ -130,18 +130,28 @@ fn mismatch(target: &Look, candidate: &Look) -> f32 {
 ///
 /// When no candidate fits (a spot larger than the image), the result is the
 /// point 2.5 radii from the target toward the image centre, clamped into
-/// the image. A non-finite `target` is treated as the image centre, and
-/// with a non-positive or non-finite `radius` the target itself comes back.
+/// the image. The result is always inside the image.
+///
+/// A target outside the image is moved to the nearest point of its edge,
+/// and a NaN one to the centre. Radii above 1 (the whole long edge) are
+/// held at 1; with a radius of 0 or less, or NaN, the target itself comes
+/// back.
 pub fn suggest_heal_source(pyramid: &SourcePyramid, target: Point, radius: f32) -> Point {
     let (width, height) = pyramid.source_size();
     let (width, height) = (width as f32, height as f32);
-    let finite_or_half = |value: f32| if value.is_finite() { value } else { 0.5 };
-    let target = Point::new(finite_or_half(target.x), finite_or_half(target.y));
-    if !radius.is_finite() || radius <= 0.0 {
+    let inside = |value: f32| {
+        if value.is_nan() {
+            0.5
+        } else {
+            value.clamp(0.0, 1.0)
+        }
+    };
+    let target = Point::new(inside(target.x), inside(target.y));
+    if radius.is_nan() || radius <= 0.0 {
         return target;
     }
     let centre = (target.x * width, target.y * height);
-    let radius = radius * width.max(height);
+    let radius = radius.min(1.0) * width.max(height);
 
     let level =
         ((radius / WORKING_RADIUS).log2().floor().max(0.0) as usize).min(pyramid.level_count() - 1);

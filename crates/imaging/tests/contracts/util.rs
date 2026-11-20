@@ -161,7 +161,13 @@ pub fn flat_noise(plane: &Plane, margin: usize) -> f32 {
 /// Mean jump between the two columns either side of a [`noisy_step`].
 pub fn edge_height(plane: &Plane) -> f32 {
     let half = plane.width() / 2;
-    let column = |x: usize| mean(&(0..plane.height()).map(|y| plane.get(x, y)).collect::<Vec<_>>());
+    let column = |x: usize| {
+        mean(
+            &(0..plane.height())
+                .map(|y| plane.get(x, y))
+                .collect::<Vec<_>>(),
+        )
+    };
     column(half) - column(half - 1)
 }
 

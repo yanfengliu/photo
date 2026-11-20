@@ -130,15 +130,24 @@ impl Lattice {
 /// without energy at much larger scales, so it never shifts the brightness
 /// of a region. `size` below 1 (or not finite) is treated as 1, since finer
 /// grain than the pixel grid would only alias. Non-finite positions are
-/// treated as 0.
+/// treated as 0, and positions more than ten million grains from the origin
+/// are held there (an `f32` position that far out has no fraction left to
+/// vary over anyway).
 ///
 /// A view at reduced scale samples this function more sparsely than its
 /// grains; scaling the amplitude for that is the caller's decision.
 #[inline]
 pub fn grain_noise(x: f32, y: f32, size: f32) -> f32 {
+    const LIMIT: f32 = 1.0e7;
     let size = if size.is_finite() { size.max(1.0) } else { 1.0 };
-    let finite_or_zero = |value: f32| if value.is_finite() { value } else { 0.0 };
-    let (x, y) = (finite_or_zero(x) / size, finite_or_zero(y) / size);
+    let in_grains = |value: f32| {
+        if value.is_finite() {
+            (value / size).clamp(-LIMIT, LIMIT)
+        } else {
+            0.0
+        }
+    };
+    let (x, y) = (in_grains(x), in_grains(y));
     (FIRST.noise(x, y) + SECOND.noise(x, y)) * UNIT_VARIANCE
 }
 

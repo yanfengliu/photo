@@ -6,16 +6,20 @@
 //! composed rather than summed, so any combination is increasing by
 //! construction. The minimum slope of each curve follows from its constants
 //! and is noted beside them.
+//!
+//! The zone bands are deliberately tight, following the owner's standing
+//! rule of Gaussian-like bands about one stop wide (σ = 1 EV) with about
+//! 1.5 EV of reach: at σ = √2 a single full-strength slider reads as a
+//! global exposure shift rather than as targeted recovery.
+
+use photo_core::meta::FileKind;
 
 use crate::math::{slider_unit, smoothstep_d};
 
 // ---- Tunable constants ----------------------------------------------------
 
-/// Shadows: a bell that rises from black to its peak and is gone by 0.66.
-/// The band is kept tight on purpose (it follows the owner's rule of about
-/// one stop of width and 1.5 EV of reach): at `v = 0.5` it is down to 46% of
-/// its peak, and it does not reach the highlights at all, so a single
-/// full-strength slider reads as shadow recovery, not as an exposure shift.
+/// Shadows: a bell that rises from black to its peak and is gone by 0.66,
+/// so it never reaches the highlights.
 const SHADOWS: Bell = Bell {
     lo: 0.0,
     peak: 0.32,
@@ -38,20 +42,32 @@ const HIGHLIGHTS_LIFT_BELL: Bell = Bell {
 };
 const HIGHLIGHTS_LIFT: f64 = 0.10;
 
-/// Highlights below zero: a recovery shelf. The pull-down grows from nothing
-/// at `RECOVERY_START` to `HIGHLIGHTS_DROP` at `RECOVERY_FULL` (smoothstep),
-/// then returns to zero at white along a parabola, so white stays white but
-/// everything just below it is pulled down by almost the full amount.
-///
-/// The slope at white, `1 + 2 * 0.18 / 0.02 = 19`, is the point of the
-/// shape: a base curve squeezes every scene value above the sensor's clip
-/// point into the last half percent below white, and a steep final segment
-/// is what a uniform exposure reduction of that whole range looks like in
-/// display terms (about -1.2 stops on the standard profile). On the rise the
-/// slope stays above `1 - 0.18 * 1.5 / 0.53 = 0.49`.
-const RECOVERY_START: f64 = 0.45;
-const RECOVERY_FULL: f64 = 0.98;
-const HIGHLIGHTS_DROP: f64 = 0.18;
+/// Highlights below zero for camera raw sources. The pull-down is complete
+/// at 0.98 and returns to zero at white as a cube root, so that the headroom
+/// a base curve squeezes into the last half percent below white is pulled
+/// back into the visible range, the brighter the more: on the standard
+/// profile, Highlights -100 lands the sensor's clip point at display 0.66
+/// and two stops above it at 0.93, where a uniform cut would leave the
+/// second stop within a percent of white and any positive Whites would clip
+/// it again. The slope on the rise stays above `1 - 0.22 * 1.5 / 0.53 =
+/// 0.38`; on the return it is above 1.
+const RAW_RECOVERY: Shelf = Shelf {
+    start: 0.45,
+    full: 0.98,
+    drop: 0.22,
+    power: 1.0 / 3.0,
+};
+/// Highlights below zero for raster sources, which have no headroom: the
+/// pull-down is complete at 0.85 and returns to zero at white along a
+/// parabola, whose slope at white, `1 + 2 * 0.18 / 0.15 = 3.4`, is kept low
+/// so that the top codes of an 8-bit file are not stretched into bands. The
+/// slope on the rise stays above `1 - 0.18 * 1.5 / 0.40 = 0.33`.
+const RASTER_RECOVERY: Shelf = Shelf {
+    start: 0.45,
+    full: 0.85,
+    drop: 0.18,
+    power: 1.0,
+};
 
 /// Blacks: the gain `1 + a (1 - v)^12`, largest at black and gone by about
 /// 0.3. The perceptual shift `a v (1 - v)^12` peaks at `v = 1/13`. The
@@ -76,13 +92,14 @@ const CONTRAST_LIMIT: f64 = 400.0;
 pub const BLACKS_PEAK: f32 = 1.0 / 13.0;
 /// The perceptual value at which Shadows shifts pixels the most.
 pub const SHADOWS_PEAK: f32 = 0.32;
-/// A perceptual value inside the range where Highlights acts most in both
-/// directions (positive values peak at 0.80, negative ones keep growing to
-/// 0.98; both are within a fifth of their maximum here).
+/// A perceptual value where Highlights acts at least 80% as strongly as
+/// anywhere, in both directions and for both kinds of source (a lift peaks
+/// at 0.80, a raster pull-down at 0.85, a raw pull-down at 0.98).
 pub const HIGHLIGHTS_PEAK: f32 = 0.85;
 /// A perceptual value just inside the range where Whites acts most (its
-/// effect keeps growing all the way to white and beyond).
-pub const WHITES_PEAK: f32 = 0.995;
+/// effect keeps growing all the way to white and beyond). It sits this close
+/// to white because a raw source's Highlights reaches almost as far.
+pub const WHITES_PEAK: f32 = 0.999;
 
 // ---------------------------------------------------------------------------
 
@@ -106,23 +123,37 @@ impl Bell {
     }
 }
 
+/// The weight of the negative-Highlights pull-down: zero up to `start`,
+/// rising (smoothstep) to one at `full`, then back to zero at white as
+/// `(1 - t)^power (1 + power t)`, with `t` running from 0 at `full` to 1 at
+/// white. The return leaves `full` flat, so the shelf is C1; with
+/// `power = 1` it is the parabola `1 - t²` and has a finite slope at white,
+/// below 1 its slope there is unbounded. The return only ever falls, so the
+/// pull-down `v - drop * weight` rises with a slope of at least 1 there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shelf {
+    start: f64,
+    full: f64,
+    drop: f64,
+    power: f64,
+}
+
+impl Shelf {
+    fn weight(&self, v: f64) -> f64 {
+        if v <= self.start || v >= 1.0 {
+            0.0
+        } else if v <= self.full {
+            smoothstep_d((v - self.start) / (self.full - self.start))
+        } else {
+            let t = (v - self.full) / (1.0 - self.full);
+            (1.0 - t).powf(self.power) * (1.0 + self.power * t)
+        }
+    }
+}
+
 fn signed(slider: f32, up: f64, down: f64) -> f64 {
     let amount = slider_unit(slider);
     amount * if amount >= 0.0 { up } else { down }
-}
-
-/// The shape of the negative-Highlights pull-down: zero up to
-/// `RECOVERY_START`, one at `RECOVERY_FULL`, back to zero at white with a
-/// finite slope. C1 throughout.
-fn recovery_shelf(v: f64) -> f64 {
-    if v <= RECOVERY_START || v >= 1.0 {
-        0.0
-    } else if v <= RECOVERY_FULL {
-        smoothstep_d((v - RECOVERY_START) / (RECOVERY_FULL - RECOVERY_START))
-    } else {
-        let t = (v - RECOVERY_FULL) / (1.0 - RECOVERY_FULL);
-        1.0 - t * t
-    }
 }
 
 /// The Highlights and Shadows controls as one curve on perceptual values:
@@ -130,6 +161,11 @@ fn recovery_shelf(v: f64) -> f64 {
 /// neutral area of perceptual value `v` lands; the pipeline realises it as a
 /// scene-linear gain looked up from an edge-aware base (see
 /// [`crate::base::SceneToDisplay`]).
+///
+/// Negative Highlights depends on the kind of source: a camera raw source
+/// has headroom above the sensor's clip point, squeezed by the base curve
+/// into the last fraction of a percent below white, and the curve reaches
+/// into it; a raster file has none.
 ///
 /// Identity outside `(0, 1)`, so black and white stay put; strictly
 /// increasing for every pair of slider values. Slider values beyond ±100 are
@@ -140,14 +176,21 @@ pub struct ZoneCurve {
     /// Signed shift at full weight: a lift when positive, a pull-down when
     /// negative (the two use different shapes).
     highlights: f64,
+    recovery: Shelf,
 }
 
 impl ZoneCurve {
-    /// Build from the two slider values (-100 to 100).
-    pub fn new(highlights: f32, shadows: f32) -> Self {
+    /// Build from the two slider values (-100 to 100) for a source of the
+    /// given kind.
+    pub fn new(highlights: f32, shadows: f32, kind: FileKind) -> Self {
+        let recovery = match kind {
+            FileKind::Raw => RAW_RECOVERY,
+            FileKind::Raster => RASTER_RECOVERY,
+        };
         Self {
             shadows: signed(shadows, SHADOWS_LIFT, SHADOWS_DROP),
-            highlights: signed(highlights, HIGHLIGHTS_LIFT, HIGHLIGHTS_DROP),
+            highlights: signed(highlights, HIGHLIGHTS_LIFT, recovery.drop),
+            recovery,
         }
     }
 
@@ -172,7 +215,7 @@ impl ZoneCurve {
         let weight = if self.highlights >= 0.0 {
             HIGHLIGHTS_LIFT_BELL.eval(lifted)
         } else {
-            recovery_shelf(lifted)
+            self.recovery.weight(lifted)
         };
         lifted + self.highlights * weight
     }
@@ -278,6 +321,18 @@ pub(crate) fn contrast_d(v: f64, amount: f64) -> f64 {
 mod tests {
     use super::*;
 
+    const KINDS: [FileKind; 2] = [FileKind::Raster, FileKind::Raw];
+
+    fn least_slope(curve: &ZoneCurve) -> f64 {
+        let steps = 20_000;
+        (0..steps)
+            .map(|step| {
+                let v = f64::from(step) / f64::from(steps);
+                (curve.eval_d(v + 1.0 / f64::from(steps)) - curve.eval_d(v)) * f64::from(steps)
+            })
+            .fold(f64::MAX, f64::min)
+    }
+
     #[test]
     fn a_bell_is_one_at_its_peak_and_zero_outside() {
         for bell in [SHADOWS, HIGHLIGHTS_LIFT_BELL] {
@@ -289,51 +344,93 @@ mod tests {
     }
 
     #[test]
-    fn the_recovery_shelf_is_smooth_and_leaves_white_with_the_stated_slope() {
-        assert_eq!(recovery_shelf(RECOVERY_START), 0.0);
-        assert_eq!(recovery_shelf(RECOVERY_FULL), 1.0);
-        assert_eq!(recovery_shelf(1.0), 0.0);
-        assert_eq!(recovery_shelf(0.2), 0.0);
-        // C1 where the smoothstep meets the parabola: both are flat there.
-        let h = 1e-6;
-        let before = (recovery_shelf(RECOVERY_FULL) - recovery_shelf(RECOVERY_FULL - h)) / h;
-        let after = (recovery_shelf(RECOVERY_FULL + h) - recovery_shelf(RECOVERY_FULL)) / h;
-        assert!(before.abs() < 1e-3 && after.abs() < 1e-3, "{before} {after}");
-
-        let curve = ZoneCurve::new(-100.0, 0.0);
-        let at_white = (curve.eval_d(1.0) - curve.eval_d(1.0 - h)) / h;
-        let stated = 1.0 + 2.0 * HIGHLIGHTS_DROP / (1.0 - RECOVERY_FULL);
-        assert!((at_white - stated).abs() < 1e-2, "{at_white} vs {stated}");
-        // White itself and everything above it stay where they are.
-        assert_eq!(curve.eval_d(1.0), 1.0);
-        assert_eq!(curve.eval_d(1.3), 1.3);
-        let mut least = f64::MAX;
-        for step in 0..10_000 {
-            let v = f64::from(step) / 10_000.0;
-            least = least.min((curve.eval_d(v + 1e-4) - curve.eval_d(v)) * 1e4);
+    fn the_recovery_shelves_are_c1_and_keep_white_and_their_stated_slopes() {
+        for shelf in [RAW_RECOVERY, RASTER_RECOVERY] {
+            assert_eq!(shelf.weight(shelf.start), 0.0);
+            assert_eq!(shelf.weight(shelf.full), 1.0);
+            assert_eq!(shelf.weight(1.0), 0.0);
+            assert_eq!(shelf.weight(0.2), 0.0);
+            // C1 where the rise meets the return: both are flat there.
+            let h = 1e-7;
+            let before = (shelf.weight(shelf.full) - shelf.weight(shelf.full - h)) / h;
+            let after = (shelf.weight(shelf.full + h) - shelf.weight(shelf.full)) / h;
+            assert!(
+                before.abs() < 1e-3 && after.abs() < 1e-3,
+                "{before} {after}"
+            );
         }
-        assert!(least > 0.48, "the shelf's rise flattens the curve to {least}");
+        let raster = ZoneCurve::new(-100.0, 0.0, FileKind::Raster);
+        let h = 1e-7;
+        let at_white = (raster.eval_d(1.0) - raster.eval_d(1.0 - h)) / h;
+        let stated = 1.0 + 2.0 * RASTER_RECOVERY.drop / (1.0 - RASTER_RECOVERY.full);
+        assert!((at_white - stated).abs() < 1e-3, "{at_white} vs {stated}");
+        // The raw shelf keeps steepening toward white.
+        let raw = ZoneCurve::new(-100.0, 0.0, FileKind::Raw);
+        let slope = |v: f64| (raw.eval_d(v + 1e-9) - raw.eval_d(v)) / 1e-9;
+        assert!(slope(0.9999) > slope(0.999) && slope(0.999) > slope(0.99));
+        for curve in [raster, raw] {
+            assert_eq!(curve.eval_d(1.0), 1.0);
+            assert_eq!(curve.eval_d(1.3), 1.3);
+        }
+    }
+
+    #[test]
+    fn every_zone_curve_keeps_its_stated_minimum_slope() {
+        // One slider alone keeps the minimum stated beside its constants.
+        let alone = |highlights: f32, shadows: f32, kind| {
+            least_slope(&ZoneCurve::new(highlights, shadows, kind))
+        };
+        for kind in KINDS {
+            assert!((alone(0.0, 100.0, kind) - 0.162).abs() < 2e-3);
+            assert!((alone(0.0, -100.0, kind) - 0.437).abs() < 2e-3);
+            assert!((alone(100.0, 0.0, kind) - 0.25).abs() < 2e-3);
+        }
+        assert!((alone(-100.0, 0.0, FileKind::Raw) - 0.377).abs() < 2e-3);
+        assert!((alone(-100.0, 0.0, FileKind::Raster) - 0.325).abs() < 2e-3);
+        // Composed, the slopes multiply where the two bands overlap: never
+        // below the product of the two smallest minima.
+        for kind in KINDS {
+            for highlights in [-100.0, 0.0, 100.0] {
+                for shadows in [-100.0, 0.0, 100.0] {
+                    let least = alone(highlights, shadows, kind);
+                    assert!(
+                        least > 0.162 * 0.325,
+                        "{kind:?} {highlights}/{shadows}: {least}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn the_stated_peaks_are_where_the_controls_shift_most() {
         let argmax = |f: &dyn Fn(f64) -> f64| {
-            (1..1000)
-                .map(|step| f64::from(step) / 1000.0)
+            (1..10_000)
+                .map(|step| f64::from(step) / 10_000.0)
                 .max_by(|a, b| f(*a).abs().total_cmp(&f(*b).abs()))
                 .unwrap()
         };
-        let shadows = ZoneCurve::new(0.0, 100.0);
-        assert!((argmax(&|v| shadows.eval_d(v) - v) - f64::from(SHADOWS_PEAK)).abs() < 2e-3);
-        // Highlights peaks at a different place in each direction; the
-        // published sample point is well inside both.
-        let lift = ZoneCurve::new(100.0, 0.0);
-        let pull = ZoneCurve::new(-100.0, 0.0);
+        let shadows = ZoneCurve::new(0.0, 100.0, FileKind::Raster);
+        let found = argmax(&|v| shadows.eval_d(v) - v);
+        assert!((found - f64::from(SHADOWS_PEAK)).abs() < 2e-3, "{found}");
+        // Highlights peaks at a different place in each direction and for
+        // each kind of source; the published sample point is well inside
+        // all of them.
+        let lift = ZoneCurve::new(100.0, 0.0, FileKind::Raster);
         assert!((argmax(&|v| lift.eval_d(v) - v) - HIGHLIGHTS_LIFT_BELL.peak).abs() < 2e-3);
-        assert!((argmax(&|v| pull.eval_d(v) - v) - RECOVERY_FULL).abs() < 2e-3);
         let sample = f64::from(HIGHLIGHTS_PEAK);
         assert!(lift.eval_d(sample) - sample > 0.8 * HIGHLIGHTS_LIFT);
-        assert!(sample - pull.eval_d(sample) > 0.8 * HIGHLIGHTS_DROP);
+        for (kind, shelf) in [
+            (FileKind::Raw, RAW_RECOVERY),
+            (FileKind::Raster, RASTER_RECOVERY),
+        ] {
+            let pull = ZoneCurve::new(-100.0, 0.0, kind);
+            assert!(
+                (argmax(&|v| pull.eval_d(v) - v) - shelf.full).abs() < 2e-3,
+                "{kind:?}"
+            );
+            assert!(sample - pull.eval_d(sample) > 0.8 * shelf.drop, "{kind:?}");
+        }
         for blacks in [
             EndpointCurve::new(0.0, 100.0),
             EndpointCurve::new(0.0, -100.0),

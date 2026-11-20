@@ -101,7 +101,10 @@ fn timings_on_a_2048_by_1365_buffer() {
     let pyramid = SourcePyramid::new(source);
     let upright = Geometry::identity(6000, 4000);
     let fit = View::fit(&upright, WIDTH as u32);
-    assert_eq!((fit.width() as usize, fit.height() as usize), (WIDTH, HEIGHT));
+    assert_eq!(
+        (fit.width() as usize, fit.height() as usize),
+        (WIDTH, HEIGHT)
+    );
     let window = View::new(
         Rect::new(1000.0, 1000.0, 3048.0, 2365.0),
         WIDTH as u32,
@@ -131,11 +134,11 @@ fn timings_on_a_2048_by_1365_buffer() {
         milliseconds(|| SourcePyramid::new(pyramid.level(0).clone())),
     );
     report(
-        "resample, fit view (triangle, level 1)",
+        "resample, fit view (level 1, mixed kernel)",
         milliseconds(|| resample(&pyramid, &upright, &fit, 0)),
     );
     report(
-        "resample, 1:1 view (cubic, level 0)",
+        "resample, 1:1 view (level 0, cubic)",
         milliseconds(|| resample(&pyramid, &upright, &window, 0)),
     );
     report(

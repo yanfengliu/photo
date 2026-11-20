@@ -8,10 +8,15 @@
 //! | Step | Stage | In | Out |
 //! | --- | --- | --- | --- |
 //! | [`PixelPipeline::input`] | 3 | source-native RGB | white-balanced working RGB |
-//! | [`PixelPipeline::scene_to_display`] | 5 | scene-linear | display-linear |
-//! | [`PixelPipeline::tone`] | 6 | display-linear + base | display-linear |
+//! | [`PixelPipeline::tone_base`] | (5) | stage 3's output | the value to smooth into the base plane |
+//! | [`PixelPipeline::scene_to_display`] | 5 | scene-linear + base | display-linear |
+//! | [`PixelPipeline::tone`] | 6 | display-linear | display-linear |
 //! | [`PixelPipeline::color`] | 7 | display-linear | display-linear |
 //! | [`PixelPipeline::output_u8`] and friends | 11 | display-linear | encoded |
+//!
+//! Stage 5 holds exposure, Highlights and Shadows (a scene-linear gain
+//! looked up from the edge-aware base) and the base curve; stage 6 holds
+//! Whites, Blacks, Contrast and the tone curves.
 //!
 //! Every step takes the pixel's [`LocalDelta`]: the alpha-weighted sum of the
 //! mask adjustments covering it, or `None` outside every mask. Without a
@@ -24,7 +29,7 @@ use photo_core::colorimetry::{
 use photo_core::develop::{DevelopSettings, LocalAdjustments, WbPreset, WhiteBalance};
 use photo_core::image::SourceColor;
 
-use crate::base::SceneToDisplay;
+use crate::base::{SceneDelta, SceneToDisplay};
 use crate::camera::{CameraInput, camera_as_shot_temp_tint, pick_camera_white_balance};
 use crate::color::ColorStage;
 use crate::math::non_negative;
@@ -45,9 +50,9 @@ pub struct LocalDelta {
     pub exposure: f32,
     /// Added to Contrast (stage 6).
     pub contrast: f32,
-    /// Added to Highlights (stage 6).
+    /// Added to Highlights (stage 5).
     pub highlights: f32,
-    /// Added to Shadows (stage 6).
+    /// Added to Shadows (stage 5).
     pub shadows: f32,
     /// Added to Whites (stage 6).
     pub whites: f32,
@@ -88,21 +93,17 @@ impl LocalDelta {
         self.temp != 0.0 || self.tint != 0.0
     }
 
-    /// True when the delta changes stage 5 (exposure).
+    /// True when the delta changes stage 5 (exposure, highlights or
+    /// shadows).
     #[inline]
     pub fn affects_scene(&self) -> bool {
-        self.exposure != 0.0
+        self.exposure != 0.0 || self.highlights != 0.0 || self.shadows != 0.0
     }
 
-    /// True when the delta changes stage 6 (contrast, highlights, shadows,
-    /// whites or blacks).
+    /// True when the delta changes stage 6 (contrast, whites or blacks).
     #[inline]
     pub fn affects_tone(&self) -> bool {
-        self.contrast != 0.0
-            || self.highlights != 0.0
-            || self.shadows != 0.0
-            || self.whites != 0.0
-            || self.blacks != 0.0
+        self.contrast != 0.0 || self.whites != 0.0 || self.blacks != 0.0
     }
 
     /// True when the delta changes stage 7 (saturation).
@@ -111,11 +112,17 @@ impl LocalDelta {
         self.saturation != 0.0
     }
 
+    fn scene(&self) -> SceneDelta {
+        SceneDelta {
+            exposure: self.exposure,
+            highlights: self.highlights,
+            shadows: self.shadows,
+        }
+    }
+
     fn tone(&self) -> ToneDelta {
         ToneDelta {
             contrast: self.contrast,
-            highlights: self.highlights,
-            shadows: self.shadows,
             whites: self.whites,
             blacks: self.blacks,
         }
@@ -222,7 +229,7 @@ impl PixelPipeline {
         });
         Self {
             input,
-            scene: SceneToDisplay::new(settings.profile, settings.tone.exposure, source),
+            scene: SceneToDisplay::new(settings.profile, &settings.tone, source),
             tone: ToneStage::new(&settings.tone, &settings.tone_curve),
             color: ColorStage::new(settings),
             output: OutputTransform::new(RgbSpace::Srgb),
@@ -292,47 +299,65 @@ impl PixelPipeline {
         matches!(self.input, Input::Raster { combined: None, .. })
     }
 
-    /// Stage 5: exposure and base rendering, scene-linear to display-linear
-    /// (see [`SceneToDisplay`]). A delta's `exposure` is added in stops.
+    /// The value to smooth into the edge-aware base plane for Highlights and
+    /// Shadows, from this pixel's [`Self::input`] output: the perceptual
+    /// display value a neutral pixel of its luminance would get from stage
+    /// 5 with Highlights and Shadows at zero (see
+    /// [`SceneToDisplay::base_value`]). Luminance and one table lookup; only
+    /// the delta's `exposure` is read.
     #[inline]
-    pub fn scene_to_display(&self, rgb: [f32; 3], delta: Option<&LocalDelta>) -> [f32; 3] {
+    pub fn tone_base(&self, rgb: [f32; 3], delta: Option<&LocalDelta>) -> f32 {
+        self.scene
+            .base_value(rgb, delta.map_or(0.0, |delta| delta.exposure))
+    }
+
+    /// True when the base plane has to be computed: the global Highlights or
+    /// Shadows slider is active, or an active mask adjusts either. When it
+    /// is false, [`Self::scene_to_display`] ignores its `base` argument.
+    pub fn tone_needs_base(&self) -> bool {
+        self.scene.needs_base() || self.masks_need_base
+    }
+
+    /// Stage 5: exposure, Highlights and Shadows, and the base curve,
+    /// scene-linear to display-linear (see [`SceneToDisplay`]). `base` is
+    /// this pixel's value in the smoothed plane of [`Self::tone_base`]. A
+    /// delta's `exposure` is added in stops, its `highlights` and `shadows`
+    /// to the sliders.
+    #[inline]
+    pub fn scene_to_display(
+        &self,
+        rgb: [f32; 3],
+        base: f32,
+        delta: Option<&LocalDelta>,
+    ) -> [f32; 3] {
         match delta {
             Some(delta) if delta.affects_scene() => {
-                self.scene.apply_with_exposure(rgb, delta.exposure)
+                self.scene.apply_with_delta(rgb, base, &delta.scene())
             }
-            _ => self.scene.apply(rgb),
+            _ => self.scene.apply(rgb, base),
         }
     }
 
     /// True when [`Self::scene_to_display`] without a delta is the identity:
-    /// a raster source at zero exposure.
+    /// a raster source with Exposure, Highlights and Shadows at zero.
     pub fn scene_to_display_is_identity(&self) -> bool {
         self.scene.is_identity()
     }
 
-    /// Stage 6: tone (see [`ToneStage`]). `base` is this pixel's value in
-    /// the edge-aware base plane: filter [`crate::tone::tone_base_value`] of
-    /// the stage's input and pass the result here. It is only read when
-    /// [`Self::tone_needs_base`] is true.
+    /// Stage 6: Whites, Blacks, Contrast and the tone curves (see
+    /// [`ToneStage`]). A delta's `contrast`, `whites` and `blacks` are added
+    /// to the sliders.
     #[inline]
-    pub fn tone(&self, rgb: [f32; 3], base: f32, delta: Option<&LocalDelta>) -> [f32; 3] {
+    pub fn tone(&self, rgb: [f32; 3], delta: Option<&LocalDelta>) -> [f32; 3] {
         match delta {
-            Some(delta) if delta.affects_tone() => {
-                self.tone.apply_with_delta(rgb, base, &delta.tone())
-            }
-            _ => self.tone.apply(rgb, base),
+            Some(delta) if delta.affects_tone() => self.tone.apply_with_delta(rgb, &delta.tone()),
+            _ => self.tone.apply(rgb),
         }
     }
 
     /// True when [`Self::tone`] without a delta is the identity.
     pub fn tone_is_identity(&self) -> bool {
         self.tone.is_identity()
-    }
-
-    /// True when the base plane has to be computed: the global Highlights or
-    /// Shadows slider is active, or an active mask adjusts either.
-    pub fn tone_needs_base(&self) -> bool {
-        self.tone.needs_base() || self.masks_need_base
     }
 
     /// Stage 7: colour (see [`ColorStage`]). A delta's `saturation` is added
@@ -370,11 +395,6 @@ impl PixelPipeline {
     #[inline]
     pub fn output_f32(&self, rgb: [f32; 3]) -> [f32; 3] {
         self.output.encode(rgb)
-    }
-
-    /// The compiled tone stage, for callers that want its curves.
-    pub fn tone_stage(&self) -> &ToneStage {
-        &self.tone
     }
 }
 

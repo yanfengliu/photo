@@ -90,6 +90,32 @@ fn a_click_and_a_double_click_are_told_apart() -> TestResult {
 }
 
 #[test]
+fn two_cells_double_clicked_one_after_the_other_both_open() -> TestResult {
+    let mut harness = cells();
+    harness.run()?;
+    let second = harness
+        .control(Role::ListBoxOption, "IMG_0002.jpg")?
+        .rect
+        .center();
+
+    harness.double_click(Role::ListBoxOption, "IMG_0001.jpg")?;
+    // Straight on to the next cell: egui counts the second click as a triple.
+    for _ in 0..2 {
+        harness.pointer_down(second)?;
+        harness.pointer_up(second)?;
+    }
+    let opened = event("IMG_0002.jpg", "double-click");
+    assert_eq!(harness.app().state.last(), Some(&opened));
+
+    // One click more is a click again, not a second double-click.
+    harness.pointer_down(second)?;
+    harness.pointer_up(second)?;
+    let clicked = event("IMG_0002.jpg", "click");
+    assert_eq!(harness.app().state.last(), Some(&clicked));
+    Ok(())
+}
+
+#[test]
 fn clicks_carry_their_modifiers() -> TestResult {
     let mut harness = cells();
     harness.run()?;
@@ -405,5 +431,44 @@ fn the_key_press_that_opens_a_dialog_does_not_answer_it() -> TestResult {
     harness.press_key(Key::Enter, Modifiers::NONE)?;
     assert_eq!(harness.app().state.1, [DialogOutcome::Confirmed]);
     assert!(!harness.app().state.0, "that Enter did not open it again");
+    Ok(())
+}
+
+#[test]
+fn a_held_down_enter_does_not_answer_a_dialog() -> TestResult {
+    let mut harness = HarnessBuilder::new()
+        .size([640.0, 420.0])
+        .strict_glyphs(true)
+        .build_ui(Vec::new(), |ui, outcomes: &mut Vec<DialogOutcome>| {
+            // Enter held down since before the dialog opened: the system
+            // repeats it, and every frame has a repeated press in it.
+            ui.input_mut(|input| {
+                input.events.push(egui::Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: true,
+                    modifiers: Modifiers::NONE,
+                });
+            });
+            if outcomes.is_empty() {
+                let response = Dialog::new("Replace Files").show(ui.ctx(), |ui| {
+                    ui.label("Body");
+                });
+                if response.outcome != DialogOutcome::Open {
+                    outcomes.push(response.outcome);
+                }
+            }
+        });
+    harness.run()?;
+    harness.step(10);
+    assert!(
+        harness.app().state.is_empty(),
+        "the repeats are not answers"
+    );
+
+    // A fresh press is.
+    harness.press_key(Key::Enter, Modifiers::NONE)?;
+    assert_eq!(harness.app().state, [DialogOutcome::Confirmed]);
     Ok(())
 }

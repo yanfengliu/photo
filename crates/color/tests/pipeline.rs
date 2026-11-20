@@ -1,7 +1,6 @@
 //! Contracts of the compiled per-pixel pipeline: the stage boundaries that
 //! `photo-develop` calls, end to end.
 
-use photo_color::tone::tone_base_value;
 use photo_color::{LocalDelta, PixelPipeline, displayed_white_balance, pick_white_balance};
 use photo_core::colorimetry::{RgbSpace, luminance, mat3_apply, rgb_to_rgb};
 use photo_core::develop::{DevelopSettings, Tone, Treatment, WbPreset, WhiteBalance};
@@ -42,9 +41,9 @@ fn settings(edit: impl FnOnce(&mut DevelopSettings)) -> DevelopSettings {
 /// Stages 3, 5, 6 and 7 with the tone base equal to the pixel's own value.
 fn develop(pipeline: &PixelPipeline, source: [f32; 3], delta: Option<&LocalDelta>) -> [f32; 3] {
     let balanced = pipeline.input(source, delta);
-    let display = pipeline.scene_to_display(balanced, delta);
-    let toned = pipeline.tone(display, tone_base_value(display), delta);
-    pipeline.color(toned, delta)
+    let base = pipeline.tone_base(balanced, delta);
+    let display = pipeline.scene_to_display(balanced, base, delta);
+    pipeline.color(pipeline.tone(display, delta), delta)
 }
 
 fn assert_close(a: [f32; 3], b: [f32; 3], tolerance: f32) {
@@ -235,9 +234,9 @@ fn t5_no_input_produces_nan_or_a_negative_value_anywhere_in_the_chain() {
             for rgb in inputs {
                 for local in [None, Some(&delta)] {
                     let balanced = pipeline.input(rgb, local);
-                    let display = pipeline.scene_to_display(balanced, local);
-                    let base = tone_base_value(display);
-                    let toned = pipeline.tone(display, base, local);
+                    let base = pipeline.tone_base(balanced, local);
+                    let display = pipeline.scene_to_display(balanced, base, local);
+                    let toned = pipeline.tone(display, local);
                     let coloured = pipeline.color(toned, local);
                     for (stage, value) in [
                         ("input", balanced),

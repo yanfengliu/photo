@@ -25,6 +25,7 @@ use photo_core::meta::{ColorLabel, Flag, Rating};
 
 use super::color_label::label_color;
 use super::icons::Icon;
+use super::{end_click_burst, in_click_burst, meant_double_click};
 use crate::theme::{self, palette, radius, space};
 
 /// Cells shorter than this drop the index and rating strips.
@@ -182,7 +183,11 @@ impl<'a> Thumbnail<'a> {
         if ui.is_rect_visible(rect) {
             self.paint(ui, &response, rect);
         }
-        let double_clicked = response.double_clicked();
+        let burst = in_click_burst(ui.ctx(), response.id);
+        let double_clicked = meant_double_click(&response, burst);
+        if double_clicked {
+            end_click_burst(ui.ctx(), response.id);
+        }
         ThumbnailResponse {
             clicked: response.clicked() && !double_clicked,
             double_clicked,

@@ -12,6 +12,7 @@ mod heal;
 mod mask;
 mod mask_views;
 mod misc;
+mod pyramid;
 mod resample;
 mod sliders;
 mod timing;

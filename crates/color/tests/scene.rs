@@ -1,14 +1,35 @@
-//! Contracts of exposure and base rendering (DESIGN §5.4).
+//! Contracts of exposure and base rendering (DESIGN §5.4). Highlights and
+//! Shadows, which also act in this stage, have their own file (`zones.rs`).
 
 use photo_color::base::{
-    RAW_EXPOSURE_BIAS_EV, SceneToDisplay, base_curve, exposure_gain, raster_exposure, rgb_tone,
-    soft_clip,
+    RAW_EXPOSURE_BIAS_EV, SceneDelta, SceneToDisplay, base_curve, exposure_gain, raster_exposure,
+    rgb_tone, soft_clip,
 };
 use photo_core::colorimetry::RgbSpace;
-use photo_core::develop::Profile;
+use photo_core::develop::{Profile, Tone};
 use photo_core::image::{CameraColor, SourceColor};
 
 const RASTER: SourceColor = SourceColor::Rgb(RgbSpace::Srgb);
+
+/// Stage 5 with only the Exposure slider set.
+fn exposed(profile: Profile, exposure: f32, source: &SourceColor) -> SceneToDisplay {
+    let tone = Tone {
+        exposure,
+        ..Default::default()
+    };
+    SceneToDisplay::new(profile, &tone, source)
+}
+
+/// A local exposure offset in stops.
+fn local(exposure: f32) -> SceneDelta {
+    SceneDelta {
+        exposure,
+        ..Default::default()
+    }
+}
+
+/// With Highlights and Shadows at zero the base is not read; any value does.
+const NO_BASE: f32 = 0.0;
 
 fn camera(baseline_exposure: f32) -> SourceColor {
     SourceColor::Camera(CameraColor {
@@ -31,18 +52,20 @@ const CURVED: [Profile; 3] = [Profile::Standard, Profile::Neutral, Profile::Vivi
 
 #[test]
 fn raster_exposure_at_zero_is_exactly_the_identity() {
-    let stage = SceneToDisplay::new(Profile::Standard, 0.0, &RASTER);
-    assert!(stage.is_identity());
+    let stage = exposed(Profile::Standard, 0.0, &RASTER);
+    assert!(stage.is_identity() && !stage.needs_base());
     for rgb in [
         [0.0, 0.5, 1.0],
         [0.123_456_7, 0.2, 0.999_999],
         [1.0e-6, 3.0, 16.0],
     ] {
-        assert_eq!(stage.apply(rgb), rgb);
-        assert_eq!(stage.apply_with_exposure(rgb, 0.0), rgb);
+        for base in [NO_BASE, 0.7, f32::NAN] {
+            assert_eq!(stage.apply(rgb, base), rgb);
+            assert_eq!(stage.apply_with_delta(rgb, base, &local(0.0)), rgb);
+        }
     }
-    assert!(!SceneToDisplay::new(Profile::Standard, 0.01, &RASTER).is_identity());
-    assert!(!SceneToDisplay::new(Profile::Standard, 0.0, &camera(0.0)).is_identity());
+    assert!(!exposed(Profile::Standard, 0.01, &RASTER).is_identity());
+    assert!(!exposed(Profile::Standard, 0.0, &camera(0.0)).is_identity());
 }
 
 #[test]
@@ -180,7 +203,7 @@ fn profiles_are_ordered_by_contrast_and_saturation() {
 
     let source = camera(0.0);
     let chroma = |profile| {
-        let out = SceneToDisplay::new(profile, 0.0, &source).apply([0.12, 0.08, 0.05]);
+        let out = exposed(profile, 0.0, &source).apply([0.12, 0.08, 0.05], NO_BASE);
         (out[0] - out[2]) / out[1]
     };
     assert!(chroma(Profile::Neutral) < chroma(Profile::Standard));
@@ -191,10 +214,17 @@ fn profiles_are_ordered_by_contrast_and_saturation() {
 fn the_camera_stage_applies_the_bias_then_the_curve() {
     for profile in CURVED {
         for baseline in [0.0, 0.5] {
-            let stage = SceneToDisplay::new(profile, 0.3, &camera(baseline));
+            let stage = exposed(profile, 0.3, &camera(baseline));
             let gain = exposure_gain(0.3 + RAW_EXPOSURE_BIAS_EV + baseline);
             for raw in [0.0, 0.004, 0.05, 0.1, 0.4, 1.0, 2.3] {
-                let out = stage.apply([raw; 3]);
+                let out = stage.apply([raw; 3], NO_BASE);
+                // The base handed to the guided filter is the perceptual
+                // value of exactly this, read from luminance alone.
+                let base = stage.base_value([raw; 3], 0.0);
+                assert!(
+                    (base - out[1].powf(1.0 / 2.2)).abs() < 2e-5,
+                    "{profile:?} at {raw}"
+                );
                 let expected = base_curve(profile, raw * gain);
                 assert!(
                     (out[0] - expected).abs() < 2e-5,
@@ -210,19 +240,19 @@ fn the_camera_stage_applies_the_bias_then_the_curve() {
     }
     // A raw value of 0.1 is middle grey after the +0.85 EV bias.
     let grey =
-        SceneToDisplay::new(Profile::Standard, 0.0, &camera(0.0)).apply([0.18 / clip_point(); 3]);
+        exposed(Profile::Standard, 0.0, &camera(0.0)).apply([0.18 / clip_point(); 3], NO_BASE);
     assert!((0.18..=0.20).contains(&grey[0]), "{grey:?}");
 }
 
 #[test]
 fn the_linear_profile_is_a_gain_with_a_soft_clip() {
-    let stage = SceneToDisplay::new(Profile::Linear, 0.0, &camera(0.7));
+    let stage = exposed(Profile::Linear, 0.0, &camera(0.7));
     assert_eq!(
-        stage.apply([0.1, 0.4, 0.75]),
+        stage.apply([0.1, 0.4, 0.75], NO_BASE),
         [0.1, 0.4, 0.75],
         "no bias, no curve below the knee"
     );
-    let doubled = SceneToDisplay::new(Profile::Linear, 1.0, &camera(0.0)).apply([0.1, 0.2, 0.3]);
+    let doubled = exposed(Profile::Linear, 1.0, &camera(0.0)).apply([0.1, 0.2, 0.3], NO_BASE);
     assert_eq!(doubled, [0.2, 0.4, 0.6]);
     assert_eq!(soft_clip(0.5), 0.5);
     let mut previous = 0.0;
@@ -240,7 +270,7 @@ fn more_exposure_is_brighter_for_both_source_kinds() {
     for source in [RASTER, camera(0.0)] {
         let mut previous = [0.0f32; 3];
         for ev in [-5.0, -2.0, -0.5, 0.0, 0.5, 2.0, 5.0] {
-            let out = SceneToDisplay::new(Profile::Standard, ev, &source).apply([0.02, 0.05, 0.03]);
+            let out = exposed(Profile::Standard, ev, &source).apply([0.02, 0.05, 0.03], NO_BASE);
             assert!(
                 out.iter().zip(previous).all(|(now, before)| *now > before),
                 "{ev} EV: {out:?}"
@@ -255,12 +285,18 @@ fn a_local_exposure_offset_equals_the_same_global_exposure() {
     for source in [RASTER, camera(0.2)] {
         for profile in Profile::ALL {
             for rgb in [[0.02, 0.05, 0.03], [0.6, 0.3, 0.9], [0.4, 0.4, 0.4]] {
-                let global = SceneToDisplay::new(profile, 1.25, &source).apply(rgb);
-                let local =
-                    SceneToDisplay::new(profile, 0.5, &source).apply_with_exposure(rgb, 0.75);
-                for (a, b) in global.iter().zip(local) {
-                    assert!((a - b).abs() < 1e-5, "{profile:?}: {global:?} vs {local:?}");
+                let global = exposed(profile, 1.25, &source).apply(rgb, NO_BASE);
+                let stage = exposed(profile, 0.5, &source);
+                let masked = stage.apply_with_delta(rgb, NO_BASE, &local(0.75));
+                for (a, b) in global.iter().zip(masked) {
+                    assert!(
+                        (a - b).abs() < 1e-5,
+                        "{profile:?}: {global:?} vs {masked:?}"
+                    );
                 }
+                // The base of a masked pixel includes its local exposure.
+                let global_base = exposed(profile, 1.25, &source).base_value(rgb, 0.0);
+                assert!((stage.base_value(rgb, 0.75) - global_base).abs() < 1e-5);
             }
         }
     }
@@ -318,14 +354,38 @@ fn every_input_gives_a_finite_non_negative_result() {
     for source in [RASTER, camera(0.0), camera(-1.0)] {
         for profile in Profile::ALL {
             for ev in [-5.0, 0.0, 0.01, 5.0] {
-                let stage = SceneToDisplay::new(profile, ev, &source);
-                for rgb in inputs {
-                    for delta in [0.0, -4.0, 4.0, f32::NAN] {
-                        let out = stage.apply_with_exposure(rgb, delta);
-                        assert!(
-                            out.iter().all(|v| v.is_finite() && *v >= 0.0),
-                            "{profile:?} {ev} EV, {rgb:?} + {delta}: {out:?}"
-                        );
+                for zone in [0.0, -100.0, 100.0] {
+                    let tone = Tone {
+                        exposure: ev,
+                        highlights: zone,
+                        shadows: -zone,
+                        ..Default::default()
+                    };
+                    let stage = SceneToDisplay::new(profile, &tone, &source);
+                    for rgb in inputs {
+                        for delta in [0.0, -4.0, 4.0, f32::NAN] {
+                            let base = stage.base_value(rgb, delta);
+                            assert!(
+                                base.is_finite() && base >= 0.0,
+                                "{profile:?} {rgb:?}: {base}"
+                            );
+                            let masked = SceneDelta {
+                                exposure: delta,
+                                highlights: delta * 25.0,
+                                shadows: -delta * 25.0,
+                            };
+                            for base in [base, 0.0, 1.0, 7.0, -1.0, f32::NAN] {
+                                for out in [
+                                    stage.apply(rgb, base),
+                                    stage.apply_with_delta(rgb, base, &masked),
+                                ] {
+                                    assert!(
+                                        out.iter().all(|v| v.is_finite() && *v >= 0.0),
+                                        "{profile:?} {tone:?}, {rgb:?} + {delta} at {base}: {out:?}"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -355,7 +355,10 @@ mod tests {
             let x = f64::from(step) * 0.05;
             let y = f64::from(soft_clip(x as f32));
             if y < 0.9999 {
-                assert!((soft_clip_inverse(y) - x).abs() < 2e-3 * x.max(1.0), "soft clip at {x}");
+                assert!(
+                    (soft_clip_inverse(y) - x).abs() < 2e-3 * x.max(1.0),
+                    "soft clip at {x}"
+                );
             }
         }
         assert!(soft_clip_inverse(1.0).is_infinite());
@@ -382,7 +385,10 @@ mod tests {
                 assert!((curve.eval(x) - exact as f32).abs() < 4e-6, "at {x}");
                 if step >= 5 {
                     let perceptual = encode_d(exact) as f32;
-                    assert!((curve.eval_perceptual(x) - perceptual).abs() < 2e-5, "at {x}");
+                    assert!(
+                        (curve.eval_perceptual(x) - perceptual).abs() < 2e-5,
+                        "at {x}"
+                    );
                 }
             }
             assert!(curve.eval(f32::MAX) <= 1.0 && curve.eval(f32::INFINITY) <= 1.0);

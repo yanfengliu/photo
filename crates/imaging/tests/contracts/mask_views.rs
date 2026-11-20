@@ -131,8 +131,20 @@ fn r1_a_padded_tile_of_a_mask_matches_the_whole() {
             );
             let inner = tile.crop(6, 6, w as usize, h as usize);
             let expected = whole.crop(x as usize, y as usize, w as usize, h as usize);
-            let diff = max_abs_diff(inner.as_slice(), expected.as_slice());
-            assert!(diff <= 1e-4, "scale {scale}: {diff}");
+            // The same bits, not merely close: a tile stamps only the brush
+            // cells it reads, but each cell comes out as it does for the whole.
+            let bits = |plane: &Plane| {
+                plane
+                    .as_slice()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                bits(&inner) == bits(&expected),
+                "scale {scale}: differs by {}",
+                max_abs_diff(inner.as_slice(), expected.as_slice())
+            );
         }
     }
 }
@@ -197,6 +209,45 @@ fn padding_adds_real_coverage_around_the_view() {
     assert_eq!(padded.crop(9, 9, 80, 40), plain);
     // The padding column left of the tile is further toward the start.
     assert!(padded.get(0, 20) > plain.get(0, 20));
+}
+
+#[test]
+fn a_distant_stroke_does_not_change_how_another_renders() {
+    // Two hard dabs at opposite corners of a 24 MP source, seen at 1:1
+    // around the first one. Adding the second must not touch a single bit
+    // of the first: no shared resolution budget, no shared rounding.
+    let (width, height) = (6_000u32, 4_000u32);
+    let geometry = Geometry::identity(width, height);
+    let dab = |x: f32, y: f32| BrushStroke {
+        points: vec![Point::new(x, y)],
+        radius: 0.005,
+        feather: 0.0,
+        flow: 100.0,
+        erase: false,
+    };
+    let one = mask(vec![add(brush(vec![dab(0.05, 0.05)]))]);
+    let two = mask(vec![add(brush(vec![dab(0.05, 0.05), dab(0.95, 0.95)]))]);
+    // The first dab is 30 px in radius around (300, 200).
+    let view = View::full(&geometry).tile(250, 150, 100, 100);
+    let alone = rasterize_mask(&one, &geometry, &view, 2);
+    let together = rasterize_mask(&two, &geometry, &view, 2);
+    let bits = |plane: &Plane| {
+        plane
+            .as_slice()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert!(bits(&alone) == bits(&together));
+    // And the dab's edge is as sharp as a 1:1 view can show: from full to
+    // empty within two pixels along a row through its centre.
+    let row: Vec<f32> = (0..104).map(|x| alone.get(x, 52)).collect();
+    let partial = row.iter().filter(|&&v| v > 0.0 && v < 1.0).count();
+    assert!(
+        partial <= 4,
+        "{partial} partly covered pixels across two edges"
+    );
+    assert_eq!(row[52], 1.0);
 }
 
 #[test]

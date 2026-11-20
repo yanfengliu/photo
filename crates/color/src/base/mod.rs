@@ -20,80 +20,22 @@
 //! the guided filter of He, Sun and Tang (2010) is the intended choice.
 
 mod curve;
+mod zones;
 
 use photo_core::colorimetry::{WORKING_LUMA, luminance};
 use photo_core::develop::{Profile, Tone};
 use photo_core::image::SourceColor;
+use photo_core::meta::FileKind;
 
-use crate::lut::Lut;
 use crate::math::{max3, non_negative, scale3, toward_luminance};
-use crate::tone::{ZoneCurve, decode_d, encode_perceptual};
-use curve::{CURVES, SOFT_CLIP_KNEE, Shoulder, curve_index, shoulder_inverse, soft_clip_inverse};
+use crate::tone::{ZoneCurve, encode_perceptual};
+use curve::{CURVES, SOFT_CLIP_KNEE, Shoulder, curve_index};
+use zones::{Rendering, Zones, local_zone_gain, zone_gain};
 
 pub use curve::{RAW_EXPOSURE_BIAS_EV, base_curve, exposure_gain, rgb_tone, soft_clip};
 
-// ---- Tunable constants ----------------------------------------------------
-
-/// Samples of the zone-gain table over the base, 0 to 1.
-const ZONE_CELLS: usize = 2048;
-/// The zone gain is evaluated no closer to white than this: at white itself
-/// the inverse of a base curve is infinite, and the gain there is defined as
-/// its limit.
-const BASE_LIMIT: f64 = 1.0 - 1.0e-9;
-/// Bounds on the zone gain (about ±6 stops), far beyond what the zone curve
-/// can ask for; they only keep a degenerate base from producing an absurd
-/// multiplier.
-const ZONE_GAIN_RANGE: (f64, f64) = (1.0 / 64.0, 64.0);
 /// Bounds on the total exposure gain, global and local together.
 const GAIN_RANGE: (f32, f32) = (1.0e-6, 1.0e6);
-
-// ---------------------------------------------------------------------------
-
-/// Which scalar curve follows the gain.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Rendering {
-    /// A raster source: gain and shoulder.
-    Raster,
-    /// A camera source with the curved profile at this index of [`CURVES`].
-    Curve(usize),
-    /// A camera source with the linear profile: gain and soft clip.
-    Linear,
-}
-
-impl Rendering {
-    /// The already-gained scene value that this rendering maps to display
-    /// value `display`. `gain` only matters for a raster source, whose
-    /// shoulder depends on it.
-    fn inverse(self, gain: f64, display: f64) -> f64 {
-        match self {
-            Self::Raster if gain > 1.0 => shoulder_inverse(gain, display),
-            Self::Raster => display.max(0.0),
-            Self::Curve(index) => CURVES[index].exact.inverse(display),
-            Self::Linear => soft_clip_inverse(display),
-        }
-    }
-}
-
-/// The scene-linear gain that moves a flat area whose perceptual display
-/// value is `base` to where `zone` puts it. One wherever the zone curve is
-/// the identity, and for a base that is not a positive number.
-fn zone_gain(rendering: Rendering, gain: f64, zone: &ZoneCurve, base: f64) -> f64 {
-    if base.is_nan() || base <= 0.0 {
-        return 1.0;
-    }
-    let base = base.min(BASE_LIMIT);
-    let target = zone.eval_d(base);
-    if target == base {
-        return 1.0;
-    }
-    let from = rendering.inverse(gain, decode_d(base));
-    let to = rendering.inverse(gain, decode_d(target));
-    if from > 0.0 && from.is_finite() && to.is_finite() {
-        (to / from).clamp(ZONE_GAIN_RANGE.0, ZONE_GAIN_RANGE.1)
-    } else {
-        1.0
-    }
-}
 
 /// Scale colour around luminance and bring any channel that went negative
 /// back by desaturating. Neutral values are untouched.
@@ -155,19 +97,13 @@ pub struct SceneDelta {
     pub shadows: f32,
 }
 
-/// The global zone curve and its gain as a table over the base.
-#[derive(Clone, Debug)]
-struct Zones {
-    curve: ZoneCurve,
-    gain: Lut,
-}
-
 /// Stage 5 compiled for one source and one set of tone settings:
 /// white-balanced scene-linear working RGB in, display-linear working RGB
 /// out (nominally 0 to 1).
 #[derive(Clone, Debug)]
 pub struct SceneToDisplay {
     rendering: Rendering,
+    kind: FileKind,
     gain: f32,
     highlights: f32,
     shadows: f32,
@@ -186,26 +122,24 @@ impl SceneToDisplay {
     pub fn new(profile: Profile, tone: &Tone, source: &SourceColor) -> Self {
         let finite = |value: f32| if value.is_finite() { value } else { 0.0 };
         let exposure = finite(tone.exposure);
-        let (rendering, gain) = match source {
-            SourceColor::Rgb(_) => (Rendering::Raster, exposure_gain(exposure)),
+        let (rendering, kind, gain) = match source {
+            SourceColor::Rgb(_) => (Rendering::Raster, FileKind::Raster, exposure_gain(exposure)),
             SourceColor::Camera(camera) => match curve_index(profile) {
-                None => (Rendering::Linear, exposure_gain(exposure)),
+                None => (Rendering::Linear, FileKind::Raw, exposure_gain(exposure)),
                 Some(index) => (
                     Rendering::Curve(index),
-                    exposure_gain(exposure + RAW_EXPOSURE_BIAS_EV + finite(camera.baseline_exposure)),
+                    FileKind::Raw,
+                    exposure_gain(
+                        exposure + RAW_EXPOSURE_BIAS_EV + finite(camera.baseline_exposure),
+                    ),
                 ),
             },
         };
         let (highlights, shadows) = (finite(tone.highlights), finite(tone.shadows));
-        let curve = ZoneCurve::new(highlights, shadows);
-        let zones = (!curve.is_identity()).then(|| Zones {
-            curve,
-            gain: Lut::build(ZONE_CELLS, 1.0, |base| {
-                zone_gain(rendering, f64::from(gain), &curve, base)
-            }),
-        });
+        let zones = Zones::new(rendering, gain, ZoneCurve::new(highlights, shadows, kind));
         Self {
             rendering,
+            kind,
             gain,
             highlights,
             shadows,
@@ -229,7 +163,8 @@ impl SceneToDisplay {
     /// The value to smooth into the edge-aware base: the perceptual display
     /// value that a neutral pixel of this pixel's luminance gets from this
     /// stage with Highlights and Shadows at zero. It needs only the pixel's
-    /// luminance and one table lookup, and is exact for a neutral pixel.
+    /// luminance and one table lookup, and for a neutral pixel it is that
+    /// pixel's displayed value (to table precision, 2e-5).
     ///
     /// `exposure_delta` is the pixel's local exposure in stops (zero outside
     /// every mask); pass the same value that the pixel is later rendered
@@ -252,12 +187,13 @@ impl SceneToDisplay {
     /// when [`Self::needs_base`] is true.
     ///
     /// The result is finite and non-negative for every input. A flat neutral
-    /// area whose base equals its own [`Self::base_value`] `v` comes out at
-    /// perceptual value `Z(v)`, the zone curve of the settings.
+    /// area whose base is its own [`Self::base_value`] `v` comes out at
+    /// perceptual value `Z(v)`, the zone curve of the settings, for every
+    /// `v` up to `1 - 1e-5`.
     #[inline]
     pub fn apply(&self, rgb: [f32; 3], base: f32) -> [f32; 3] {
         let zone = match &self.zones {
-            Some(zones) => zones.gain.eval(base),
+            Some(zones) => zones.at(base),
             None => 1.0,
         };
         self.render(rgb, self.gain, zone)
@@ -272,21 +208,33 @@ impl SceneToDisplay {
         let gain = self.gain_with(delta.exposure);
         let changed = |local: f32| local != 0.0 && local.is_finite();
         let zone = if changed(delta.highlights) || changed(delta.shadows) {
-            let add = |global: f32, local: f32| if changed(local) { global + local } else { global };
+            let add = |global: f32, local: f32| {
+                if changed(local) {
+                    global + local
+                } else {
+                    global
+                }
+            };
             let curve = ZoneCurve::new(
                 add(self.highlights, delta.highlights),
                 add(self.shadows, delta.shadows),
+                self.kind,
             );
-            zone_gain(self.rendering, f64::from(gain), &curve, f64::from(base)) as f32
+            local_zone_gain(self.rendering, gain, &curve, base)
         } else {
             match &self.zones {
                 None => 1.0,
                 // A raster shoulder depends on the gain, so the table only
                 // holds for the global exposure.
                 Some(zones) if self.rendering == Rendering::Raster && gain != self.gain => {
-                    zone_gain(self.rendering, f64::from(gain), &zones.curve, f64::from(base)) as f32
+                    zone_gain(
+                        self.rendering,
+                        f64::from(gain),
+                        &zones.curve,
+                        f64::from(base),
+                    ) as f32
                 }
-                Some(zones) => zones.gain.eval(base),
+                Some(zones) => zones.at(base),
             }
         };
         self.render(rgb, gain, zone)
@@ -330,7 +278,6 @@ impl SceneToDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tone::encode_d;
     use photo_core::colorimetry::RgbSpace;
     use photo_core::image::CameraColor;
 
@@ -340,61 +287,6 @@ mod tests {
             as_shot_gains: [1.0; 3],
             baseline_exposure: 0.0,
         })
-    }
-
-    #[test]
-    fn the_zone_gain_puts_a_flat_area_where_the_zone_curve_says() {
-        let zone = ZoneCurve::new(-100.0, 100.0);
-        let renderings = [
-            (Rendering::Raster, 1.0),
-            (Rendering::Raster, 4.0),
-            (Rendering::Curve(0), 1.0),
-            (Rendering::Curve(2), 1.0),
-            (Rendering::Linear, 1.0),
-        ];
-        for (rendering, gain) in renderings {
-            for step in 1..1000 {
-                let base = f64::from(step) / 1000.0;
-                let from = rendering.inverse(gain, decode_d(base));
-                let k = zone_gain(rendering, gain, &zone, base);
-                // Rendering the scaled scene value must give decode(Z(base)):
-                // check it through the inverse, which is exact.
-                let landed = rendering.inverse(gain, decode_d(zone.eval_d(base)));
-                assert!(
-                    (k * from / landed - 1.0).abs() < 1e-9,
-                    "{rendering:?} gain {gain} at base {base}"
-                );
-            }
-            // Outside (0, 1) the zone curve is the identity; at white the
-            // gain is its finite limit.
-            assert_eq!(zone_gain(rendering, gain, &zone, 0.0), 1.0);
-            assert_eq!(zone_gain(rendering, gain, &zone, f64::NAN), 1.0);
-            let at_white = zone_gain(rendering, gain, &zone, 1.0);
-            assert!(at_white > 0.0 && at_white <= 1.0, "{rendering:?}: {at_white}");
-            assert_eq!(zone_gain(rendering, gain, &zone, 7.0), at_white);
-        }
-    }
-
-    #[test]
-    fn above_the_clip_point_highlight_recovery_is_a_uniform_exposure_cut() {
-        // Every scene value from the sensor's clip point upward gets nearly
-        // the same gain, so recovered highlights keep their own gradation.
-        let zone = ZoneCurve::new(-100.0, 0.0);
-        let sigmoid = &CURVES[0].exact;
-        let clip = 2.0f64.powf(f64::from(RAW_EXPOSURE_BIAS_EV));
-        let gains: Vec<f64> = [1.0, 1.5, 2.0, 4.0, 16.0]
-            .iter()
-            .map(|multiple| {
-                let base = encode_d(sigmoid.eval(clip * multiple));
-                zone_gain(Rendering::Curve(0), 1.0, &zone, base)
-            })
-            .collect();
-        for gain in &gains {
-            // Between one and one and a half stops down.
-            assert!((0.35..0.5).contains(gain), "{gains:?}");
-        }
-        let spread = gains.iter().cloned().fold(0.0, f64::max) / gains.iter().cloned().fold(9.0, f64::min);
-        assert!(spread < 1.1, "{gains:?}");
     }
 
     #[test]

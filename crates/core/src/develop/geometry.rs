@@ -184,6 +184,29 @@ impl CropRect {
     pub fn aspect(&self, frame_aspect: f32) -> f32 {
         self.width * frame_aspect / self.height
     }
+
+    /// This rectangle with its sides forced into `MIN_SIDE..=1` and its
+    /// centre moved just far enough that, unrotated, it lies inside the
+    /// frame; `None` when a number is not finite and there is no rectangle
+    /// to keep. Straightened, it can still reach past the frame at its
+    /// corners: whether it does depends on the frame's aspect ratio, which
+    /// settings alone do not know.
+    pub fn sanitized(self) -> Option<Self> {
+        let finite = [self.cx, self.cy, self.width, self.height]
+            .iter()
+            .all(|value| value.is_finite());
+        if !finite {
+            return None;
+        }
+        let width = self.width.clamp(Self::MIN_SIDE, 1.0);
+        let height = self.height.clamp(Self::MIN_SIDE, 1.0);
+        Some(Self {
+            cx: self.cx.clamp(width / 2.0, 1.0 - width / 2.0),
+            cy: self.cy.clamp(height / 2.0, 1.0 - height / 2.0),
+            width,
+            height,
+        })
+    }
 }
 
 /// The aspect ratio the crop tool holds the rectangle to.
@@ -197,6 +220,21 @@ pub enum CropConstraint {
     Free,
     /// A fixed ratio such as 16 : 9.
     Ratio { width: f32, height: f32 },
+}
+
+impl CropConstraint {
+    /// This constraint, or [`Self::Original`] when a ratio is not two
+    /// finite, positive numbers.
+    pub fn sanitized(self) -> Self {
+        match self {
+            Self::Ratio { width, height }
+                if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) =>
+            {
+                Self::Original
+            }
+            other => other,
+        }
+    }
 }
 
 /// Crop and straighten.

@@ -111,6 +111,48 @@ fn out_of_range_spot_settings_are_clamped_not_trusted() {
 }
 
 #[test]
+fn a_source_absurdly_far_away_reads_the_nearest_edge() {
+    // 1e20 widths to the right: far past where a pixel offset still fits
+    // in an integer. Inside the 8 px spot every pixel is then a copy of the
+    // image's right-hand column, as for any source beyond the edge.
+    let image = noise_source(80, 60, 12);
+    let far = spot(SpotMode::Clone, (0.5, 0.5), (1.0e20, 0.5), 0.1);
+    let healed = heal_image(&image, &[far]);
+    assert_eq!(healed.pixel(40, 30), image.pixel(79, 30));
+    assert_eq!(healed.pixel(36, 27), image.pixel(79, 27));
+    let below = spot(SpotMode::Heal, (0.5, 0.5), (0.5, -1.0e20), 0.1);
+    let healed = heal_image(
+        &image,
+        &[
+            below,
+            Spot {
+                mode: SpotMode::Heal,
+                ..far
+            },
+        ],
+    );
+    assert_eq!(healed.pixels.len(), image.pixels.len());
+}
+
+#[test]
+fn spots_larger_than_the_picture_are_held_at_its_size() {
+    // The radius is held at the long edge, which also bounds the work a
+    // spot can ask for.
+    let image = noise_source(120, 80, 13);
+    let huge = spot(SpotMode::Heal, (0.5, 0.5), (0.6, 0.5), 30.0);
+    let largest = Spot {
+        radius: 1.0,
+        ..huge
+    };
+    assert!(heal_image(&image, &[huge]) == heal_image(&image, &[largest]));
+    let endless = Spot {
+        radius: f32::INFINITY,
+        ..huge
+    };
+    assert!(heal_image(&image, &[endless]) == heal_image(&image, &[largest]));
+}
+
+#[test]
 fn opacity_and_feather_blend_the_copy_in() {
     let image = source_from_fn(100, 100, |x, _| [if x < 50 { 0.2 } else { 0.8 }; 3]);
     let (dark, bright) = (image.pixel(0, 0)[0] as f32, image.pixel(99, 0)[0] as f32);
@@ -404,4 +446,15 @@ fn a_suggestion_is_always_usable_even_when_nothing_fits() {
     assert_ne!(source, Point::new(0.5, 0.5));
     let source = suggest_heal_source(&pyramid, Point::new(f32::NAN, 0.5), -1.0);
     assert!(source.x.is_finite() && source.y.is_finite());
+    // Absurd but finite inputs still give a point inside the image.
+    let in_image = |p: Point| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y);
+    for (target, radius) in [
+        (Point::new(0.5, 0.5), 1.0e36),
+        (Point::new(0.5, 0.5), f32::INFINITY),
+        (Point::new(3.0e38, -3.0e38), 0.05),
+        (Point::new(f32::INFINITY, 0.2), 0.05),
+    ] {
+        let source = suggest_heal_source(&pyramid, target, radius);
+        assert!(in_image(source), "{target:?}, {radius}: {source:?}");
+    }
 }

@@ -25,22 +25,33 @@ const MAX_GAIN: f32 = 16.0;
 const WINDOW_FRACTION: f64 = 0.15;
 const MIN_SAMPLES: f64 = 8.0;
 const MAX_SAMPLES: f64 = 48.0;
+/// Most pixels read along each side of a window. A larger window is read
+/// on a regular sub-grid: plenty for a mean that only steers low-frequency
+/// tone, and it keeps a spot's cost from growing with its size.
+const MAX_WINDOW_SIDE: i64 = 32;
 
 /// Mean of the `(2 * half + 1)` square of pixels around `(x, y)`, with the
-/// image's edge replicated.
+/// image's edge replicated. Windows wider than [`MAX_WINDOW_SIDE`] pixels
+/// are read every `ceil(side / MAX_WINDOW_SIDE)` pixels, centred on `(x, y)`.
 fn window_mean(image: &SourceImage, x: i64, y: i64, half: i64) -> [f32; 3] {
     let (width, height) = (i64::from(image.width), i64::from(image.height));
+    let stride = (2 * half + 1 + MAX_WINDOW_SIDE - 1) / MAX_WINDOW_SIDE;
+    let samples = 2 * half / stride + 1;
+    let (left, top) = (
+        x - (samples - 1) * stride / 2,
+        y - (samples - 1) * stride / 2,
+    );
     let mut sum = [0u64; 3];
-    for row in y - half..=y + half {
+    for row in (0..samples).map(|k| top + k * stride) {
         let start = row.clamp(0, height - 1) as usize * image.width as usize;
-        for column in x - half..=x + half {
+        for column in (0..samples).map(|k| left + k * stride) {
             let index = (start + column.clamp(0, width - 1) as usize) * CHANNELS;
             for (total, &value) in sum.iter_mut().zip(&image.pixels[index..index + CHANNELS]) {
                 *total += u64::from(value);
             }
         }
     }
-    let count = ((2 * half + 1) * (2 * half + 1)) as f32;
+    let count = (samples * samples) as f32;
     sum.map(|total| total as f32 / count)
 }
 
@@ -60,9 +71,11 @@ impl Membrane {
     /// target and around the source of `stamp`.
     pub(super) fn new(image: &SourceImage, stamp: &Stamp) -> Self {
         let half = (WINDOW_FRACTION * stamp.radius).round().max(1.0);
-        // Far enough out that no window reaches into the spot itself, where
-        // the blemish being removed would tint the estimate.
-        let ring = stamp.radius + half + 0.5;
+        // Far enough out that no pixel of any window lies inside the spot,
+        // where the blemish being removed would tint the estimate: a
+        // window's nearest corner is `half` pixels away along both axes,
+        // plus up to one more for rounding its centre to a pixel.
+        let ring = stamp.radius + (half + 1.0) * std::f64::consts::SQRT_2 + 0.5;
         let count = (TAU * ring / (2.0 * half + 1.0))
             .ceil()
             .clamp(MIN_SAMPLES, MAX_SAMPLES) as usize;
@@ -147,6 +160,59 @@ mod tests {
         assert_eq!(window_mean(&ramp, 50, 40, 2), [500.0; 3]);
         // Columns -2..=2 read 0, 0, 0, 10, 20.
         assert_eq!(window_mean(&ramp, 0, 0, 2), [6.0; 3]);
+    }
+
+    #[test]
+    fn a_wide_window_is_read_on_a_centred_sub_grid() {
+        // A ramp's mean over a symmetric window is its centre value, read
+        // densely or not.
+        let ramp = image(|x, _| x as u16 * 10);
+        assert_eq!(window_mean(&ramp, 50, 40, 15), [500.0; 3], "31 wide: dense");
+        assert_eq!(
+            window_mean(&ramp, 50, 40, 16),
+            [500.0; 3],
+            "33 wide: every 2nd"
+        );
+        assert_eq!(
+            window_mean(&ramp, 50, 40, 30),
+            [500.0; 3],
+            "61 wide: every 2nd"
+        );
+        // However wide the window, about a thousand pixels are read, and a
+        // flat image still gives its own value.
+        let flat = image(|_, _| 777);
+        assert_eq!(window_mean(&flat, 10, 10, 5000), [777.0; 3]);
+    }
+
+    #[test]
+    fn no_window_of_the_ring_reaches_into_the_spot() {
+        for radius in [3.0, 10.0, 40.0, 250.0] {
+            let spot = Stamp {
+                radius,
+                inner: radius,
+                outer: radius + 0.5,
+                ..stamp((25, 10))
+            };
+            let half = (WINDOW_FRACTION * radius).round().max(1.0) as i64;
+            let membrane = Membrane::new(&image(|_, _| 100), &spot);
+            // Rebuild each window as `Membrane::new` places it, and find the
+            // pixel of any window closest to the spot's centre.
+            let mut closest = f64::INFINITY;
+            for &(cos, sin) in &membrane.directions {
+                let x = (spot.centre.0 + membrane.ring * f64::from(cos)).floor() as i64;
+                let y = (spot.centre.1 + membrane.ring * f64::from(sin)).floor() as i64;
+                for row in y - half..=y + half {
+                    for column in x - half..=x + half {
+                        let (px, py) = (column as f64 + 0.5, row as f64 + 0.5);
+                        closest = closest.min((px - spot.centre.0).hypot(py - spot.centre.1));
+                    }
+                }
+            }
+            assert!(
+                closest >= spot.outer,
+                "radius {radius}: a window pixel at {closest}"
+            );
+        }
     }
 
     #[test]

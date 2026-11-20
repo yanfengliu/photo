@@ -52,18 +52,24 @@ impl Spot {
         if !placed {
             return None;
         }
-        let in_range = |value: f32, min: f32, max: f32, fallback: f32| {
-            if value.is_finite() {
-                value.clamp(min, max)
-            } else {
-                fallback
-            }
-        };
         self.radius = in_range(self.radius, Self::MIN_RADIUS, Self::MAX_RADIUS, 0.02);
         self.feather = in_range(self.feather, 0.0, 100.0, 50.0);
         self.opacity = in_range(self.opacity, 0.0, 100.0, 100.0);
         Some(self)
     }
+}
+
+/// `value` clamped to `min..=max`, or `fallback` when it is not finite.
+fn in_range(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
+    }
+}
+
+fn is_placed(point: Point) -> bool {
+    point.x.is_finite() && point.y.is_finite()
 }
 
 /// Adjustments a mask applies on top of the global ones. `exposure` is in
@@ -109,6 +115,21 @@ pub struct BrushStroke {
     pub erase: bool,
 }
 
+impl BrushStroke {
+    /// This stroke without the points that are not finite and with every
+    /// number in range, or `None` when no point is left to paint.
+    pub fn sanitized(mut self) -> Option<Self> {
+        self.points.retain(|point| is_placed(*point));
+        if self.points.is_empty() {
+            return None;
+        }
+        self.radius = in_range(self.radius, Spot::MIN_RADIUS, Spot::MAX_RADIUS, 0.02);
+        self.feather = in_range(self.feather, 0.0, 100.0, 50.0);
+        self.flow = in_range(self.flow, 1.0, 100.0, 100.0);
+        Some(self)
+    }
+}
+
 /// The shape of one mask component.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -135,6 +156,43 @@ pub enum MaskShape {
 }
 
 impl MaskShape {
+    /// Largest half-width or half-height of a radial gradient, as a fraction
+    /// of the source's long edge. An ellipse may reach well past the image.
+    pub const MAX_RADIAL_RADIUS: f32 = 10.0;
+
+    /// This shape with every number in range, or `None` when it cannot be
+    /// placed because a gradient's position is not finite. A brush keeps
+    /// its finite strokes, and may be left with none (a new brush mask has
+    /// none until it is painted).
+    pub fn sanitized(self) -> Option<Self> {
+        match self {
+            Self::Linear { start, end } => {
+                (is_placed(start) && is_placed(end)).then_some(Self::Linear { start, end })
+            }
+            Self::Radial {
+                center,
+                radius_x,
+                radius_y,
+                angle,
+                feather,
+                invert,
+            } => is_placed(center).then(|| Self::Radial {
+                center,
+                radius_x: in_range(radius_x, Spot::MIN_RADIUS, Self::MAX_RADIAL_RADIUS, 0.25),
+                radius_y: in_range(radius_y, Spot::MIN_RADIUS, Self::MAX_RADIAL_RADIUS, 0.25),
+                angle: in_range(angle, -360.0, 360.0, 0.0),
+                feather: in_range(feather, 0.0, 100.0, 50.0),
+                invert,
+            }),
+            Self::Brush { strokes } => Some(Self::Brush {
+                strokes: strokes
+                    .into_iter()
+                    .filter_map(BrushStroke::sanitized)
+                    .collect(),
+            }),
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Linear { .. } => "Linear Gradient",

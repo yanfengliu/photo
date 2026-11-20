@@ -1,12 +1,77 @@
 //! What each geometry slider does, by its effect on the picture: the sign
-//! table on `Geometry`, pinned. Also the largest crop that avoids empty
-//! areas, which depends on all of them.
+//! table on `Geometry`, pinned; what happens at and beyond the sliders'
+//! limits; and the largest crop that avoids empty areas, which depends on
+//! all of them.
 
 use photo_core::develop::{Crop, CropRect, LensCorrections, Orientation, Transform};
 use photo_core::geom::Point;
 use photo_imaging::Geometry;
 
-use crate::geometry::{H, W, build, lens, perspective, with_transform};
+use crate::geometry::{H, W, build, cropped, lens, perspective, with_transform};
+
+#[test]
+fn hostile_settings_still_give_a_usable_geometry() {
+    let crop = Crop {
+        rect: Some(CropRect {
+            cx: f32::NAN,
+            cy: 0.5,
+            width: -3.0,
+            height: 0.0,
+        }),
+        angle: f32::INFINITY,
+        ..Default::default()
+    };
+    let transform = Transform {
+        vertical: f32::NAN,
+        scale: 0.0,
+        ..Default::default()
+    };
+    let geometry = Geometry::new(
+        0,
+        0,
+        &lens(f32::NAN),
+        Orientation::IDENTITY,
+        &transform,
+        &crop,
+    );
+    let (w, h) = geometry.output_size();
+    assert!(w >= 1 && h >= 1);
+    let p = geometry.out_to_src(Point::new(0.5, 0.5));
+    assert!(p.x.is_finite() && p.y.is_finite());
+    // Tilts far beyond the slider's range are held at full scale.
+    let extreme = with_transform(Transform {
+        vertical: 1.0e9,
+        ..Default::default()
+    });
+    let full = with_transform(Transform {
+        vertical: 100.0,
+        ..Default::default()
+    });
+    assert_eq!(extreme, full);
+    // A crop centred absurdly far away is brought back to the frame, so the
+    // mapping stays finite for every finite position.
+    let adrift = cropped(Crop {
+        rect: Some(CropRect {
+            cx: 1.0e37,
+            cy: -1.0e37,
+            width: 1.0,
+            height: 1.0,
+        }),
+        ..Default::default()
+    });
+    let p = adrift.out_to_src(Point::new(0.5, 0.5));
+    assert!(p.x.is_finite() && p.y.is_finite(), "{p:?}");
+    let offsets = with_transform(Transform {
+        x_offset: 3.0e38,
+        y_offset: -3.0e38,
+        scale: 3.0e38,
+        aspect: 3.0e38,
+        rotate: 3.0e38,
+        ..Default::default()
+    });
+    let p = offsets.out_to_src(Point::new(300.0, 200.0));
+    assert!(p.x.is_finite() && p.y.is_finite(), "{p:?}");
+}
 
 fn with_lens(distortion: f32) -> Geometry {
     build(
@@ -335,5 +400,8 @@ fn a_frame_pushed_out_of_the_picture_has_no_valid_crop() {
         ..Default::default()
     });
     let rect = overlapping.largest_valid_crop(0.0, 1.5).unwrap();
-    assert!(rect.width >= CropRect::MIN_SIDE && rect.width < 0.12, "{rect:?}");
+    assert!(
+        rect.width >= CropRect::MIN_SIDE && rect.width < 0.12,
+        "{rect:?}"
+    );
 }

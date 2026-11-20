@@ -110,7 +110,11 @@ mod tests {
         let mirror = [[-1.0, 0.0, 250_000.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         assert_eq!(invert(&mirror), Some(mirror));
         // 1% about the centre of a 6000 x 4000 frame.
-        let tiny = chain(&[translate(3000.0, 2000.0), scale(0.01, 0.01), translate(-3000.0, -2000.0)]);
+        let tiny = chain(&[
+            translate(3000.0, 2000.0),
+            scale(0.01, 0.01),
+            translate(-3000.0, -2000.0),
+        ]);
         let inverse = invert(&tiny).expect("a hundredth is small, not singular");
         let [x, y, w] = apply(&inverse, 3010.0, 1990.0);
         assert!((x - 4000.0).abs() < 1e-6 && (y - 1000.0).abs() < 1e-6 && w == 1.0);

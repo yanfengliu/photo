@@ -229,10 +229,16 @@ fn grain_depends_only_on_position_over_size() {
     for (x, y) in [
         (-1.0e6f32, 3.0f32),
         (1.0e9, -1.0e9),
+        (3.4e38, 0.0),
+        (-3.4e38, 3.4e38),
         (f32::NAN, 0.0),
         (f32::INFINITY, 1.0),
     ] {
-        assert!(grain_noise(x, y, 2.0).is_finite(), "({x}, {y})");
+        let value = grain_noise(x, y, 1.0);
+        assert!(
+            value.is_finite() && value.abs() < 4.7,
+            "({x}, {y}): {value}"
+        );
     }
 }
 
@@ -251,6 +257,10 @@ fn downscaling_keeps_flat_colour_alpha_and_the_colour_space() {
             "{space:?}"
         );
     }
+    // However many source pixels feed one output pixel: a million here,
+    // where single-precision sums drift by a whole code value.
+    let flat = rgba(1000, 1000, RgbSpace::Srgb, |_, _| [254, 254, 254, 255]);
+    assert_eq!(downscale_rgba8(&flat, 1, 1).pixels, [254, 254, 254, 255]);
 }
 
 #[test]

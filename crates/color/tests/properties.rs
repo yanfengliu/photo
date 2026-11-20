@@ -3,7 +3,6 @@
 //! sweep a few thousand random combinations of settings, sources, pixels and
 //! local deltas (from a fixed seed, so a failure reproduces).
 
-use photo_color::tone::tone_base_value;
 use photo_color::{LocalDelta, PixelPipeline};
 use photo_core::colorimetry::{RgbSpace, luminance};
 use photo_core::develop::{
@@ -212,9 +211,9 @@ fn random_pixel(rng: &mut Rng) -> [f32; 3] {
 
 fn develop(pipeline: &PixelPipeline, source: [f32; 3], delta: Option<&LocalDelta>) -> [f32; 3] {
     let balanced = pipeline.input(source, delta);
-    let display = pipeline.scene_to_display(balanced, delta);
-    let toned = pipeline.tone(display, tone_base_value(display), delta);
-    pipeline.color(toned, delta)
+    let base = pipeline.tone_base(balanced, delta);
+    let display = pipeline.scene_to_display(balanced, base, delta);
+    pipeline.color(pipeline.tone(display, delta), delta)
 }
 
 #[test]
@@ -230,14 +229,16 @@ fn every_stage_output_is_finite_and_non_negative_and_output_stays_in_range() {
             let delta = random_delta(&mut rng, 1.5);
             let local = rng.chance(0.5).then_some(&delta);
             let balanced = pipeline.input(pixel, local);
-            let display = pipeline.scene_to_display(balanced, local);
+            let own = pipeline.tone_base(balanced, local);
+            assert!(own.is_finite() && own >= 0.0, "base {own} for {pixel:?}");
             // The base comes from a filter, so it need not match the pixel.
             let base = if rng.chance(0.5) {
-                tone_base_value(display)
+                own
             } else {
                 rng.range(-0.2, 1.5)
             };
-            let toned = pipeline.tone(display, base, local);
+            let display = pipeline.scene_to_display(balanced, base, local);
+            let toned = pipeline.tone(display, local);
             let coloured = pipeline.color(toned, local);
             for (stage, value) in [
                 ("input", balanced),
@@ -309,16 +310,16 @@ fn tone_keeps_neutrals_neutral_and_the_order_of_the_channels() {
             let delta = random_delta(&mut rng, 1.0);
             let local = rng.chance(0.3).then_some(&delta);
             // Stages 5 and 6 on a neutral pixel: exactly neutral out.
-            let display = pipeline.scene_to_display([level; 3], local);
-            let grey = pipeline.tone(display, rng.unit(), local);
+            let display = pipeline.scene_to_display([level; 3], rng.unit(), local);
+            let grey = pipeline.tone(display, local);
             assert!(
                 grey[0] == grey[1] && grey[1] == grey[2],
                 "{level} -> {grey:?}\n{settings:?}"
             );
 
             let pixel = [rng.unit() * 1.2, rng.unit() * 1.2, rng.unit() * 1.2];
-            let display = pipeline.scene_to_display(pixel, local);
-            let toned = pipeline.tone(display, tone_base_value(display), local);
+            let base = pipeline.tone_base(pixel, local);
+            let toned = pipeline.tone(pipeline.scene_to_display(pixel, base, local), local);
             for i in 0..3 {
                 for j in 0..3 {
                     if pixel[i] >= pixel[j] {
@@ -412,9 +413,15 @@ fn a_local_delta_agrees_with_the_same_change_made_globally() {
                 develop(&local, pixel, Some(&delta)),
                 develop(&global, pixel, None),
             );
+            // Compared as perceptual values. The masked path reads its own
+            // tables, which agree with the global ones to about 1e-4 except
+            // near a corner of a point curve (a curve is flat beyond its end
+            // points), where each 1024-cell table can be off by about 1e-3:
+            // the bound is two of those, still under an 8-bit code.
             for channel in 0..3 {
+                let (x, y) = (a[channel].powf(1.0 / 2.2), b[channel].powf(1.0 / 2.2));
                 assert!(
-                    (a[channel] - b[channel]).abs() <= 1.5e-3 * b[channel].max(0.1),
+                    (x - y).abs() <= 2.5e-3,
                     "{pixel:?}: local {a:?} vs global {b:?}\n{base:?}\n{delta:?}"
                 );
             }
@@ -460,8 +467,10 @@ fn settings_that_are_not_numbers_neither_panic_nor_poison_pixels() {
                 for pixel in [[0.0; 3], [0.2, 0.5, 0.8], [3.0, 0.0, 1.0e-6], [1.0; 3]] {
                     for local in [None, Some(&delta)] {
                         let balanced = pipeline.input(pixel, local);
-                        let display = pipeline.scene_to_display(balanced, local);
-                        let toned = pipeline.tone(display, bad, local);
+                        let base = pipeline.tone_base(balanced, local);
+                        assert!(base.is_finite() && base >= 0.0, "{bad}: base {base}");
+                        let display = pipeline.scene_to_display(balanced, bad, local);
+                        let toned = pipeline.tone(display, local);
                         let coloured = pipeline.color(toned, local);
                         for value in [balanced, display, toned, coloured] {
                             assert!(

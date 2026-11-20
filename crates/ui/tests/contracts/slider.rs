@@ -395,3 +395,28 @@ fn one_click_too_many_does_not_undo_a_double_click_reset() -> TestResult {
     assert!(harness.app().state.value > 30.0);
     Ok(())
 }
+
+#[test]
+fn sliders_reset_one_after_another_by_double_clicking_each() -> TestResult {
+    let values = (40.0_f32, -30.0_f32, 25.0_f32);
+    let mut harness = HarnessBuilder::new().build_ui(values, |ui, (lights, darks, whites)| {
+        AdjSlider::new(Adj::Highlights.spec(), lights, 0.0).show(ui);
+        AdjSlider::new(Adj::Shadows.spec(), darks, 0.0).show(ui);
+        AdjSlider::new(Adj::Whites.spec(), whites, 0.0).show(ui);
+    });
+    harness.run()?;
+    let first = harness.control(Role::Slider, "Highlights")?.rect;
+    let track = across(harness.control(Role::Slider, "Shadows")?.rect, 0.2);
+    let whites = harness.control(Role::Slider, "Whites")?.rect;
+    let label = egui::pos2(whites.left() - 40.0, whites.center().y);
+
+    // Straight on from one to the next, as quickly as a hand moves: egui
+    // counts the second click of each later double-click as a triple.
+    harness.double_click_at(across(first, 0.7))?;
+    for spot in [track, track, label, label] {
+        harness.pointer_down(spot)?;
+        harness.pointer_up(spot)?;
+    }
+    assert_eq!(harness.app().state, (0.0, 0.0, 0.0));
+    Ok(())
+}

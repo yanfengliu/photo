@@ -124,13 +124,14 @@ impl RgbImage {
         self.data[y * self.width + x] = value;
     }
 
-    /// Row `y`. Panics when out of bounds.
+    /// Row `y`. Panics when `y` is not below the height, except on an image
+    /// of zero width, every row of which is empty.
     #[inline]
     pub fn row(&self, y: usize) -> &[[f32; 3]] {
         &self.data[y * self.width..(y + 1) * self.width]
     }
 
-    /// Row `y`, mutable. Panics when out of bounds.
+    /// Row `y`, mutable. Panics as [`Self::row`] does.
     #[inline]
     pub fn row_mut(&mut self, y: usize) -> &mut [[f32; 3]] {
         &mut self.data[y * self.width..(y + 1) * self.width]

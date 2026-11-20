@@ -5,10 +5,16 @@
 //! - **Radii are in pixels of the plane they are given.** A parameter
 //!   defined at full resolution is multiplied by the view scale before it
 //!   gets here. Radii are fractional wherever that has a meaning, so a
-//!   result changes smoothly with the scale instead of in steps.
+//!   result changes smoothly with the scale instead of in steps. (The fast
+//!   guided filter's reduction factor does step with the radius, but its
+//!   result moves only by a hair at each step.)
 //! - **Cost does not grow with the radius.**
 //! - **Edges are replicated**: a window that hangs over the plane's edge
-//!   reads the nearest edge sample.
+//!   reads the nearest edge sample (the fast guided filter replicates whole
+//!   cells of its reduced grid instead).
+//! - **Settings are read defensively**: a radius of 0 or less, or NaN,
+//!   means no smoothing at all; one too large, infinity included, is held
+//!   at a limit far beyond any plane.
 //! - **Every filter states its support radius**, as a number or a
 //!   `*_support` function: the distance beyond which input cannot affect an
 //!   output pixel. Give a filter a region padded by its support and crop the

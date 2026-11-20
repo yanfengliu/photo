@@ -10,7 +10,7 @@ use photo_core::develop::AdjSpec;
 
 use super::{Edit, Scale, round_to_decimals};
 use crate::theme::{palette, radius, size};
-use crate::widgets::{end_click_burst, in_click_burst, recall, remember};
+use crate::widgets::{end_click_burst, in_click_burst, meant_double_click, recall, remember};
 
 /// How far from the handle's centre a press still counts as grabbing the
 /// handle (rather than asking the handle to jump to the pointer).
@@ -91,7 +91,7 @@ impl Track<'_> {
         let released = response.clicked() || response.drag_stopped_by(PointerButton::Primary);
         let burst = in_click_burst(ui.ctx(), self.id);
 
-        if response.double_clicked() {
+        if meant_double_click(response, burst) {
             gesture = None;
             edit.commit(value, self.default);
             end_click_burst(ui.ctx(), self.id);
