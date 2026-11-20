@@ -1,6 +1,6 @@
 # Architecture
 
-> Last verified: 2026-11-19 (v0.3.0)
+> Last verified: 2026-11-20 (v0.3.1)
 
 ## Section map
 
@@ -17,24 +17,24 @@ Photo is a catalog-based, non-destructive photo organiser and raw developer for 
 
 The workspace is layered so that the dependency graph is the architecture: shared data types at the bottom, independent engines above them (colour math, image primitives, decoding, catalog, XMP), the develop pipeline and export composing those, an engine that is the whole application without a user interface, and a thin egui layer on top.
 
-At v0.3.0 only `photo-core` is implemented; the other crates are documented skeletons. This document describes the structure they are being built into, and is updated as each lands.
+At v0.3.1 the Library module runs end to end on the engine's Library side. The develop pipeline is built and tested but not yet wired into the engine, and `photo-export` is still a skeleton; the State column says which is which.
 
 ## Component map
 
 | Crate | Path | Owns | May depend on | State |
 | --- | --- | --- | --- | --- |
-| `photo` | `src/main.rs` | Entry point: CLI parsing, the default catalog location, logging, launching the UI. | ui, engine, directories | Stub |
-| `photo-core` | `crates/core` | Shared data types: `DevelopSettings` and the `Adj` table, settings groups, ids, rating/flag/label, `PhotoMetadata`, `DateTime`, `SourceImage`, colour-space constants and matrices. No I/O, no pixel loops. | serde | Done |
-| `photo-color` | `crates/color` | Per-pixel colour science on `[f32; 3]`: white balance, base curves, tone, curves, colour mixer, grading, output transform. | core | In progress |
-| `photo-imaging` | `crates/imaging` | Buffer primitives: planes, mip pyramid, resampling, geometry mapping, filters, mask rasterization, healing, histogram. | core, rayon | In progress |
-| `photo-develop` | `crates/develop` | The pipeline: stage order, region and scale handling, stage caches, auto tone and auto white balance. | core, color, imaging, rayon | Planned |
-| `photo-decode` | `crates/decode` | Files in; `SourceImage`, `PhotoMetadata` and an embedded preview out. | core, image, rawler, kamadak-exif, rayon | In progress |
-| `photo-catalog` | `crates/catalog` | The SQLite catalog. | core, rusqlite, serde_json | In progress |
-| `photo-xmp` | `crates/xmp` | XMP sidecar parsing and writing. | core, quick-xml | In progress |
-| `photo-export` | `crates/export` | Rendering through `photo-develop` and encoding to disk. | core, decode, develop, image | Planned |
-| `photo-engine` | `crates/engine` | The application without a UI: open catalog, background jobs, preview service, undo, selection, clipboard, presets. | every crate above | Planned |
-| `photo-ui` | `crates/ui` | egui views, input mapping and the headless harness. No business logic. | core, engine, egui, eframe, rfd | In progress |
-| `photo-testkit` | `crates/testkit` | Dev-only synthetic fixtures. | core, image, tempfile | In progress |
+| `photo` | `src/main.rs`, `src/repo.rs`, `src/lib.rs` | Entry point: finds the stores and launches the UI. `src/repo.rs` is the only code that decides where data lives (a checkout's root, else `Pictures/Photo`) and owns the harness's sandbox override; the library target shares it with the coming `harnessctl`. | ui, directories, env_logger, log | Working |
+| `photo-core` | `crates/core` | Shared data types: `DevelopSettings` and the `Adj` table, `SETTINGS_FORMAT` (pinned to the JSON shape by a gate), settings groups, ids, rating/flag/label, `PhotoMetadata`, `DateTime`, `SourceImage`, colour-space constants and matrices. No I/O, no pixel loops. | serde | Done |
+| `photo-color` | `crates/color` | Per-pixel colour science on `[f32; 3]`: white balance, base curves, Highlights and Shadows as a scene-linear gain in front of the base curve, tone, curves, colour mixer, grading, output transform. | core | Done |
+| `photo-imaging` | `crates/imaging` | Buffer primitives: planes, mip pyramid, resampling, geometry mapping, filters, mask rasterization, healing, histogram. | core, rayon | Done |
+| `photo-develop` | `crates/develop` | The pipeline: stage order, region and scale handling, stage caches, auto tone and auto white balance; the single source of the rotated, cropped output rectangle. | core, color, imaging, rayon | Done, not yet used by the engine |
+| `photo-decode` | `crates/decode` | Files in; `SourceImage`, `PhotoMetadata` and an embedded preview out. | core, image, rawler, kamadak-exif, rayon | Done |
+| `photo-catalog` | `crates/catalog` | The SQLite catalog: schema 1, format numbers on stored settings and rules, restore records for every removal and deletion. | core, rusqlite, serde, serde_json | Done, reviewed |
+| `photo-xmp` | `crates/xmp` | XMP sidecar parsing and writing; never overwrites what it cannot read. | core, quick-xml, serde_json | Done, reviewed |
+| `photo-export` | `crates/export` | Rendering through `photo-develop` and encoding to disk. | core, decode, develop, image | Being built |
+| `photo-engine` | `crates/engine` | The application without a UI: open catalog, background jobs, preview service, undo, selection, organisation, import, sidecars; the Develop side is being built. | core, catalog, decode, xmp, imaging, image | Library side working |
+| `photo-ui` | `crates/ui` | egui views, input mapping and the headless driver. No business logic. | core, engine, egui, eframe, egui_kittest, image, rfd | Library module working |
+| `photo-testkit` | `crates/testkit` | Dev-only synthetic fixtures. | core, image, tempfile | Done |
 
 ## Boundaries
 

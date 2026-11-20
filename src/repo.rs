@@ -68,18 +68,39 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// The checkout this process runs from, found from the executable's location
-/// first (so `./target/release/photo` finds its own checkout whatever the
-/// working directory is), then from the working directory.
+/// The checkout this process belongs to: the one it was built from, else
+/// the one its executable is in (so `./target/release/photo` finds its own
+/// checkout whatever the working directory is), else the one it is run
+/// from. See [`resolve_repo_root`].
 pub fn repo_root() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| find_repo_root(exe.parent()?))
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|dir| find_repo_root(&dir))
-        })
+    let exe = std::env::current_exe().ok();
+    let cwd = std::env::current_dir().ok();
+    resolve_repo_root(
+        Some(Path::new(env!("CARGO_MANIFEST_DIR"))),
+        exe.as_deref(),
+        cwd.as_deref(),
+    )
+}
+
+/// The rule [`repo_root`] applies, as a pure function of its inputs: the
+/// checkout the binary was built from (`built_from`, recorded at compile
+/// time) if it still is one, then the checkout containing the executable,
+/// then the one containing the working directory.
+///
+/// The first matters when the build directory lies outside the checkout,
+/// as with a `CARGO_TARGET_DIR` shared between worktrees: found from the
+/// executable alone, a worktree's binary would open another checkout's
+/// catalog.
+pub fn resolve_repo_root(
+    built_from: Option<&Path>,
+    exe: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    built_from
+        .filter(|root| is_repo_root(root))
+        .map(Path::to_path_buf)
+        .or_else(|| exe.and_then(Path::parent).and_then(find_repo_root))
+        .or_else(|| cwd.and_then(find_repo_root))
 }
 
 /// Where the stores live for this process: the runtime override if one was
@@ -369,6 +390,59 @@ mod tests {
         assert!(
             ignore.lines().any(|line| line.trim() == ignored),
             "{ignored} is not in .gitignore, so run artifacts could be committed"
+        );
+    }
+
+    fn checkout_in(parent: &Path, name: &str) -> PathBuf {
+        let root = parent.join(name);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "# AGENTS.md\n").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"photo\"\n").unwrap();
+        std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        root
+    }
+
+    /// A binary built from one checkout into another checkout's build
+    /// directory (`CARGO_TARGET_DIR`, shared between worktrees) belongs to
+    /// the checkout it was built from. Found from the executable alone, it
+    /// would open the other checkout's catalog.
+    #[test]
+    fn the_checkout_a_binary_was_built_from_wins_over_where_it_was_put() {
+        let parent = tempfile::tempdir().unwrap();
+        let built_from = checkout_in(parent.path(), "worktree");
+        let other = checkout_in(parent.path(), "primary");
+        let exe = other.join("target").join("release").join("photo");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let elsewhere = parent.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+
+        assert_eq!(
+            resolve_repo_root(Some(&built_from), Some(&exe), Some(&elsewhere)),
+            Some(built_from.clone())
+        );
+        // Moved away from where it was built, a binary finds the checkout
+        // it is put in, then the one it is run from.
+        let gone = parent.path().join("deleted-worktree");
+        assert_eq!(
+            resolve_repo_root(Some(&gone), Some(&exe), Some(&built_from)),
+            Some(other)
+        );
+        assert_eq!(
+            resolve_repo_root(
+                Some(&gone),
+                Some(&elsewhere.join("photo")),
+                Some(&built_from)
+            ),
+            Some(built_from)
+        );
+        assert_eq!(
+            resolve_repo_root(
+                Some(&gone),
+                Some(&elsewhere.join("photo")),
+                Some(&elsewhere)
+            ),
+            None
         );
     }
 }
