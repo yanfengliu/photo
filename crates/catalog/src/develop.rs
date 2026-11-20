@@ -42,7 +42,8 @@ pub struct HistoryStep {
     pub is_current: bool,
 }
 
-/// What one develop mutation changed, in a form that can be undone and
+/// What one develop mutation changed (or several consecutive ones, folded
+/// together with [`DevelopChange::merge`]), in a form that can be undone and
 /// redone exactly. Opaque; it only makes sense for the catalog it came from.
 #[derive(Clone, Debug)]
 pub struct DevelopChange {
@@ -73,7 +74,10 @@ impl DevelopChange {
     ///
     /// Fails with [`CatalogError::StaleChange`], leaving this change as it
     /// was, if `next` does not start from the settings and history this
-    /// change left behind.
+    /// change left behind. Only the two changes are compared, not the
+    /// catalog, so fold changes as they are made, while both are applied:
+    /// a merged change that no longer fits the catalog's state is refused
+    /// by undo and redo with the same error, like any stale change.
     pub fn merge(&mut self, next: &DevelopChange) -> Result<()> {
         if self.photo != next.photo || !self.after.is_state(&next.before) {
             return Err(CatalogError::StaleChange(self.photo));
