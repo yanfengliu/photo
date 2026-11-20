@@ -307,7 +307,8 @@ impl PixelPipeline {
     /// the delta's `exposure` is read.
     #[inline]
     pub fn tone_base(&self, rgb: [f32; 3], delta: Option<&LocalDelta>) -> f32 {
-        self.scene.base_value(rgb, delta.map_or(0.0, |delta| delta.exposure))
+        self.scene
+            .base_value(rgb, delta.map_or(0.0, |delta| delta.exposure))
     }
 
     /// True when the base plane has to be computed: the global Highlights or

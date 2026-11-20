@@ -43,17 +43,19 @@ const HIGHLIGHTS_LIFT_BELL: Bell = Bell {
 const HIGHLIGHTS_LIFT: f64 = 0.10;
 
 /// Highlights below zero for camera raw sources. The pull-down is complete
-/// at 0.98 and returns to zero at white as a square root, so that the
-/// headroom a base curve squeezes into the last half percent below white is
-/// pulled back into the visible range, the brighter the more (2 EV of
-/// headroom above the sensor's clip point land between display 0.69 and
-/// 0.96 on the standard profile). The slope on the rise stays above
-/// `1 - 0.22 * 1.5 / 0.53 = 0.38`; on the return it is above 1.
+/// at 0.98 and returns to zero at white as a cube root, so that the headroom
+/// a base curve squeezes into the last half percent below white is pulled
+/// back into the visible range, the brighter the more: on the standard
+/// profile, Highlights -100 lands the sensor's clip point at display 0.66
+/// and two stops above it at 0.93, where a uniform cut would leave the
+/// second stop within a percent of white and any positive Whites would clip
+/// it again. The slope on the rise stays above `1 - 0.22 * 1.5 / 0.53 =
+/// 0.38`; on the return it is above 1.
 const RAW_RECOVERY: Shelf = Shelf {
     start: 0.45,
     full: 0.98,
     drop: 0.22,
-    power: 0.5,
+    power: 1.0 / 3.0,
 };
 /// Highlights below zero for raster sources, which have no headroom: the
 /// pull-down is complete at 0.85 and returns to zero at white along a
@@ -95,8 +97,9 @@ pub const SHADOWS_PEAK: f32 = 0.32;
 /// at 0.80, a raster pull-down at 0.85, a raw pull-down at 0.98).
 pub const HIGHLIGHTS_PEAK: f32 = 0.85;
 /// A perceptual value just inside the range where Whites acts most (its
-/// effect keeps growing all the way to white and beyond).
-pub const WHITES_PEAK: f32 = 0.998;
+/// effect keeps growing all the way to white and beyond). It sits this close
+/// to white because a raw source's Highlights reaches almost as far.
+pub const WHITES_PEAK: f32 = 0.999;
 
 // ---------------------------------------------------------------------------
 
@@ -351,7 +354,10 @@ mod tests {
             let h = 1e-7;
             let before = (shelf.weight(shelf.full) - shelf.weight(shelf.full - h)) / h;
             let after = (shelf.weight(shelf.full + h) - shelf.weight(shelf.full)) / h;
-            assert!(before.abs() < 1e-3 && after.abs() < 1e-3, "{before} {after}");
+            assert!(
+                before.abs() < 1e-3 && after.abs() < 1e-3,
+                "{before} {after}"
+            );
         }
         let raster = ZoneCurve::new(-100.0, 0.0, FileKind::Raster);
         let h = 1e-7;
@@ -387,7 +393,10 @@ mod tests {
             for highlights in [-100.0, 0.0, 100.0] {
                 for shadows in [-100.0, 0.0, 100.0] {
                     let least = alone(highlights, shadows, kind);
-                    assert!(least > 0.162 * 0.325, "{kind:?} {highlights}/{shadows}: {least}");
+                    assert!(
+                        least > 0.162 * 0.325,
+                        "{kind:?} {highlights}/{shadows}: {least}"
+                    );
                 }
             }
         }
@@ -411,9 +420,15 @@ mod tests {
         assert!((argmax(&|v| lift.eval_d(v) - v) - HIGHLIGHTS_LIFT_BELL.peak).abs() < 2e-3);
         let sample = f64::from(HIGHLIGHTS_PEAK);
         assert!(lift.eval_d(sample) - sample > 0.8 * HIGHLIGHTS_LIFT);
-        for (kind, shelf) in [(FileKind::Raw, RAW_RECOVERY), (FileKind::Raster, RASTER_RECOVERY)] {
+        for (kind, shelf) in [
+            (FileKind::Raw, RAW_RECOVERY),
+            (FileKind::Raster, RASTER_RECOVERY),
+        ] {
             let pull = ZoneCurve::new(-100.0, 0.0, kind);
-            assert!((argmax(&|v| pull.eval_d(v) - v) - shelf.full).abs() < 2e-3, "{kind:?}");
+            assert!(
+                (argmax(&|v| pull.eval_d(v) - v) - shelf.full).abs() < 2e-3,
+                "{kind:?}"
+            );
             assert!(sample - pull.eval_d(sample) > 0.8 * shelf.drop, "{kind:?}");
         }
         for blacks in [

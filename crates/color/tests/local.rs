@@ -1,7 +1,6 @@
 //! Contracts of local (masked) adjustments: the per-pixel [`LocalDelta`]
 //! that carries `Σ alphaᵢ · amountᵢ · localᵢ` into each stage (DESIGN §5.2).
 
-use photo_color::tone::tone_base_value;
 use photo_color::{LocalDelta, PixelPipeline};
 use photo_core::colorimetry::RgbSpace;
 use photo_core::develop::{
@@ -45,9 +44,9 @@ fn settings(edit: impl FnOnce(&mut DevelopSettings)) -> DevelopSettings {
 /// Stages 3, 5, 6 and 7 with the tone base equal to the pixel's own value.
 fn develop(pipeline: &PixelPipeline, source: [f32; 3], delta: Option<&LocalDelta>) -> [f32; 3] {
     let balanced = pipeline.input(source, delta);
-    let display = pipeline.scene_to_display(balanced, delta);
-    let toned = pipeline.tone(display, tone_base_value(display), delta);
-    pipeline.color(toned, delta)
+    let base = pipeline.tone_base(balanced, delta);
+    let display = pipeline.scene_to_display(balanced, base, delta);
+    pipeline.color(pipeline.tone(display, delta), delta)
 }
 
 fn assert_close(a: [f32; 3], b: [f32; 3], tolerance: f32) {
@@ -120,6 +119,35 @@ fn a_local_delta_matches_the_same_change_made_globally() {
             develop(&global, rgb, None),
             3e-4,
         );
+    }
+
+    // A camera source, where every tone delta acts in front of the base
+    // curve or behind it exactly as its slider does. (A camera's local
+    // temperature is relative while its global one is absolute, so white
+    // balance is left out here.)
+    let tone_only = LocalDelta {
+        temp: 0.0,
+        tint: 0.0,
+        ..delta
+    };
+    let as_shot = |settings: DevelopSettings| DevelopSettings {
+        white_balance: WhiteBalance::default(),
+        ..settings
+    };
+    let (local, global) = (
+        PixelPipeline::new(&as_shot(base), &camera()),
+        PixelPipeline::new(&as_shot(summed), &camera()),
+    );
+    for level in [0.01, 0.05, 0.2, 0.6, 1.0] {
+        for tint in [[1.0, 1.0, 1.0], [1.3, 1.0, 0.8]] {
+            let raw = raw_grey(level).map(|channel| channel * 0.9);
+            let rgb = [raw[0] * tint[0], raw[1] * tint[1], raw[2] * tint[2]];
+            let (a, b) = (
+                develop(&local, rgb, Some(&tone_only)),
+                develop(&global, rgb, None),
+            );
+            assert_close(a, b, 1e-3 * b.iter().cloned().fold(0.05, f32::max));
+        }
     }
 }
 
@@ -208,7 +236,7 @@ fn mask_adjustments_accumulate_into_a_delta() {
     assert_eq!(partial.exposure, 0.25);
 
     let pipeline = PixelPipeline::new(&DevelopSettings::default(), &WORKING);
-    let lit = pipeline.scene_to_display([0.05; 3], Some(&delta));
+    let lit = pipeline.scene_to_display([0.05; 3], 0.0, Some(&delta));
     assert_close(lit, [0.2; 3], 1e-6);
     // A camera source takes local temperature as a relative warming too.
     let raw = PixelPipeline::new(&DevelopSettings::default(), &camera());
@@ -297,10 +325,10 @@ fn a_compiled_pipeline_can_be_shared_between_render_threads() {
         contrast: 30.0,
         ..Default::default()
     };
-    let expected = pipeline.tone([0.2, 0.3, 0.4], 0.5, Some(&delta));
+    let expected = pipeline.tone([0.2, 0.3, 0.4], Some(&delta));
     std::thread::scope(|scope| {
         for _ in 0..4 {
-            scope.spawn(|| assert_eq!(pipeline.tone([0.2, 0.3, 0.4], 0.5, Some(&delta)), expected));
+            scope.spawn(|| assert_eq!(pipeline.tone([0.2, 0.3, 0.4], Some(&delta)), expected));
         }
     });
 }

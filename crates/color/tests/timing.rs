@@ -11,7 +11,6 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use photo_color::tone::tone_base_value;
 use photo_color::{LocalDelta, PixelPipeline};
 use photo_core::colorimetry::RgbSpace;
 use photo_core::develop::{CurvePoint, DevelopSettings, PointCurve, Tone, WbPreset, WhiteBalance};
@@ -119,8 +118,9 @@ fn chain(name: &str, settings: &DevelopSettings, source: &SourceColor, local: Op
     let source_pixels = pixels();
     let total = best_of(&source_pixels, |pixel| {
         let balanced = pipeline.input(pixel, local);
-        let display = pipeline.scene_to_display(balanced, local);
-        let toned = pipeline.tone(display, tone_base_value(display), local);
+        let base = pipeline.tone_base(balanced, local);
+        let display = pipeline.scene_to_display(balanced, base, local);
+        let toned = pipeline.tone(display, local);
         let bytes = pipeline.output_u8(pipeline.color(toned, local));
         f32::from(bytes[0]) + f32::from(bytes[1]) + f32::from(bytes[2])
     });
@@ -141,16 +141,15 @@ fn breakdown(
         .iter()
         .map(|p| pipeline.input(*p, local))
         .collect();
-    let display: Vec<[f32; 3]> = balanced
+    let with_base: Vec<([f32; 3], f32)> = balanced
         .iter()
-        .map(|p| pipeline.scene_to_display(*p, local))
+        .map(|p| (*p, pipeline.tone_base(*p, local)))
         .collect();
-    let with_base: Vec<([f32; 3], f32)> =
-        display.iter().map(|p| (*p, tone_base_value(*p))).collect();
-    let toned: Vec<[f32; 3]> = with_base
+    let display: Vec<[f32; 3]> = with_base
         .iter()
-        .map(|(p, base)| pipeline.tone(*p, *base, local))
+        .map(|(p, base)| pipeline.scene_to_display(*p, *base, local))
         .collect();
+    let toned: Vec<[f32; 3]> = display.iter().map(|p| pipeline.tone(*p, local)).collect();
     let coloured: Vec<[f32; 3]> = toned.iter().map(|p| pipeline.color(*p, local)).collect();
     let stages = [
         (
@@ -158,14 +157,16 @@ fn breakdown(
             best_of(&source_pixels, |p| sum(pipeline.input(p, local))),
         ),
         (
-            "scene_to_display",
-            best_of(&balanced, |p| sum(pipeline.scene_to_display(p, local))),
+            "tone_base",
+            best_of(&balanced, |p| pipeline.tone_base(p, local)),
         ),
-        ("tone_base_value", best_of(&display, tone_base_value)),
         (
-            "tone",
-            best_of(&with_base, |(p, base)| sum(pipeline.tone(p, base, local))),
+            "scene_to_display",
+            best_of(&with_base, |(p, base)| {
+                sum(pipeline.scene_to_display(p, base, local))
+            }),
         ),
+        ("tone", best_of(&display, |p| sum(pipeline.tone(p, local)))),
         ("color", best_of(&toned, |p| sum(pipeline.color(p, local)))),
         (
             "output_u8",

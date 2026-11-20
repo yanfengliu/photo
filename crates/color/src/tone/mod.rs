@@ -20,7 +20,7 @@ use std::sync::LazyLock;
 use photo_core::develop::{Tone, ToneCurve};
 use photo_core::meta::FileKind;
 
-use crate::lut::Lut;
+use crate::lut::{Lut, extend_above_one};
 
 pub use parametric::ParametricShape;
 pub use point::MonotoneCubic;
@@ -33,6 +33,13 @@ pub use stage::{ToneDelta, ToneStage};
 /// The exponent of the perceptual encoding the tone controls work in.
 pub const PERCEPTUAL_GAMMA: f32 = 2.2;
 const GAMMA: f64 = 2.2;
+
+/// Samples per stage-6 table. Tables are rebuilt on every settings change,
+/// so this trades build time (well under 0.1 ms each) against interpolation
+/// error (below 1e-5 for the curves these controls can produce). It also
+/// fixes how the shared curve continues above 1.0 (along the secant of its
+/// last cell), which the plotted curve repeats.
+const CELLS: usize = 1024;
 
 /// The fast encoder's table covers linear values up to this; brighter ones
 /// fall back to `powf`.
@@ -136,6 +143,14 @@ impl DisplayCurves {
     pub(crate) fn shared_d(&self, v: f64) -> f64 {
         self.curves_d(shape::contrast_d(v, self.contrast))
     }
+
+    /// The shared curve on linear light, continued above 1.0 the way
+    /// [`ToneStage`] continues it.
+    pub(crate) fn shared_linear(&self, linear: f64) -> f64 {
+        extend_above_one(CELLS, linear, |linear| {
+            decode_d(self.shared_d(encode_d(linear)))
+        })
+    }
 }
 
 /// Every tone curve of a set of settings, as functions of a perceptual
@@ -164,12 +179,16 @@ impl ToneCurves {
     /// `v` is the perceptual value a neutral pixel would be displayed at
     /// with every tone control at zero (exposure and the profile's base
     /// curve included); the result is where the pipeline displays a flat
-    /// neutral area of that value. The per-channel curves are separate
-    /// ([`Self::channel`]).
+    /// neutral area of that value, values above 1.0 included (they clip only
+    /// at output). The per-channel curves are separate ([`Self::channel`]).
     pub fn eval(&self, v: f32) -> f32 {
         let zoned = self.zone.eval_d(f64::from(v));
-        self.display
-            .shared_d(self.display.endpoints.eval_d(zoned)) as f32
+        let ended = self.display.endpoints.eval_d(zoned);
+        if ended <= 1.0 {
+            self.display.shared_d(ended) as f32
+        } else {
+            encode_d(self.display.shared_linear(decode_d(ended))) as f32
+        }
     }
 
     /// The highlights/shadows zone curve alone.
@@ -187,8 +206,8 @@ impl ToneCurves {
         &self.display.parametric
     }
 
-    /// The red (0), green (1) or blue (2) point curve at perceptual `v`.
-    /// Other indices, and channels without a curve, return `v`.
+    /// The red (0), green (1) or blue (2) point curve at perceptual `v`, 0
+    /// to 1. Other indices, and channels without a curve, return `v`.
     pub fn channel(&self, index: usize, v: f32) -> f32 {
         match self.display.channels.get(index) {
             Some(Some(curve)) => curve.eval(v),
@@ -231,7 +250,8 @@ mod tests {
         curve.parametric.darks = 50.0;
         for kind in [FileKind::Raster, FileKind::Raw] {
             let curves = ToneCurves::new(&tone, &curve, kind);
-            for step in 0..=20 {
+            // Below white; above it the curve continues as its table does.
+            for step in 0..20 {
                 let v = step as f32 / 20.0;
                 let expected = curves.parametric().eval(contrast_curve(
                     curves.endpoints().eval(curves.zone().eval(v)),

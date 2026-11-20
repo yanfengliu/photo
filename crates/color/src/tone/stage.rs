@@ -13,17 +13,13 @@ use photo_core::colorimetry::luminance;
 use photo_core::develop::{Tone, ToneCurve};
 
 use super::shape::{EndpointCurve, contrast_d};
-use super::{DisplayCurves, GAMMA, decode_d, encode_d, encode_perceptual};
+use super::{CELLS, DisplayCurves, GAMMA, decode_d, encode_d, encode_perceptual};
 use crate::base::rgb_tone;
 use crate::lut::{LinearCurveLut, Lut, extend_above_one};
 use crate::math::{non_negative, scale3};
 
 // ---- Tunable constants ----------------------------------------------------
 
-/// Samples per table. Tables are rebuilt on every settings change, so this
-/// trades build time (well under 0.1 ms each) against interpolation error
-/// (below 1e-5 for the curves these controls can produce).
-const CELLS: usize = 1024;
 /// The whites/blacks gain table is indexed by the square root of linear
 /// luminance and covers values up to this (linear 4.0); beyond it the gain
 /// stays constant.
@@ -119,7 +115,10 @@ impl ToneStage {
     /// Contrast is not). A zero delta is exactly [`Self::apply`]. Otherwise
     /// the end-point and contrast curves are evaluated directly for the
     /// summed values instead of being read from the global tables, which is
-    /// several times slower and agrees with the tables to about 1e-4.
+    /// several times slower. The result agrees with the same change made
+    /// globally to about 1e-4, and to about 2e-3 in perceptual terms near a
+    /// corner of a point curve, where both paths' tables interpolate across
+    /// the corner on different grids.
     pub fn apply_with_delta(&self, rgb: [f32; 3], delta: &ToneDelta) -> [f32; 3] {
         if delta.is_zero() {
             return self.apply(rgb);
