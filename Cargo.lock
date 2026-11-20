@@ -3381,6 +3381,7 @@ dependencies = [
  "image",
  "log",
  "photo-core",
+ "photo-engine",
  "photo-testkit",
  "rfd",
  "tempfile",

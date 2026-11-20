@@ -13,3 +13,8 @@ photo-color = { workspace = true }
 photo-core = { workspace = true }
 photo-imaging = { workspace = true }
 rayon = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }
+photo-testkit = { workspace = true }
+tempfile = { workspace = true }
