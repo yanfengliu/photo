@@ -153,6 +153,24 @@ impl Icon {
                 pen.line(&[[8.0, 6.3], [8.0, 10.0]]);
                 pen.dot(8.0, 11.8, 0.8);
             }
+            Self::Folder => pen.outline(&[
+                [1.5, 3.5],
+                [6.0, 3.5],
+                [7.5, 5.0],
+                [14.5, 5.0],
+                [14.5, 13.0],
+                [1.5, 13.0],
+            ]),
+            Self::Collection => photo_stack(&pen),
+            Self::SmartCollection => {
+                photo_stack(&pen);
+                pen.dot(9.5, 6.5, 1.7);
+            }
+            Self::Check => pen.line(&[[3.0, 8.5], [6.5, 12.0], [13.0, 4.5]]),
+            Self::Close => {
+                pen.line(&[[4.0, 4.0], [12.0, 12.0]]);
+                pen.line(&[[12.0, 4.0], [4.0, 12.0]]);
+            }
         }
     }
 }
@@ -215,6 +233,12 @@ fn bandage(pen: &Pen<'_>) {
     for x in [-1.7, 1.7] {
         pen.line(&[turn([x, -2.8]), turn([x, 2.8])]);
     }
+}
+
+/// Two photos, one behind the other: a collection.
+fn photo_stack(pen: &Pen<'_>) {
+    pen.frame(4.5, 2.5, 14.5, 10.5);
+    pen.line(&[[1.5, 5.5], [1.5, 13.5], [11.5, 13.5]]);
 }
 
 /// A lens and its handle.

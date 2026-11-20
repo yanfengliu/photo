@@ -1,26 +1,62 @@
 //! Photo's user interface.
 //!
-//! This crate is the foundation the Library and Develop screens are built
-//! on: the visual system ([`theme`]), the widget kit ([`widgets`]), a
-//! headless driver for tests and automation ([`harness`]), and a [`gallery`]
-//! app that shows every widget in a realistic arrangement.
+//! The app is [`PhotoApp`]: the shell (top bar, side columns, filmstrip,
+//! toolbar) around the Library module, driving one `photo_engine::Engine`.
+//! It is built from the visual system ([`theme`]) and the widget kit
+//! ([`widgets`]); [`harness`] drives it (or any other `eframe::App`)
+//! without a window, and [`gallery`] is a showcase of every widget.
 //!
-//! The crate holds no business logic. Widgets edit plain `photo-core` values
-//! and report what happened; deciding what that means is the engine's job.
+//! The crate holds no business logic. Every user action is one engine call;
+//! the UI keeps only presentation state (which panels are open, the view,
+//! zoom and scroll, dialog fields, drags in progress).
 
 #![warn(missing_docs)]
 
+mod app;
 pub mod gallery;
 pub mod harness;
 pub mod theme;
 pub mod widgets;
 
-/// Open the app window. Returns when the window is closed.
-///
-/// Until the Library and Develop screens exist, the window shows the widget
-/// [`gallery`].
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let options = eframe::NativeOptions {
+use std::path::PathBuf;
+
+pub use app::{Layout, Module, PhotoApp, View, Zoom};
+use photo_engine::{Engine, EngineConfig, EngineError};
+
+/// Where the app keeps its data. Every path is chosen by the caller:
+/// nothing in this crate decides a location.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppOptions {
+    /// The catalog file; created if it does not exist.
+    pub catalog_path: PathBuf,
+    /// The folder preview files are kept in; created if it does not exist.
+    pub previews_dir: PathBuf,
+    /// Where exports go unless the user chooses another folder.
+    pub export_dir: PathBuf,
+}
+
+impl AppOptions {
+    /// Open the engine on these paths, with a worker per spare processor
+    /// (at least one). Fails as `Engine::open` does: a catalog that cannot
+    /// be opened or a previews folder that cannot be made.
+    pub fn open_engine(&self) -> Result<Engine, EngineError> {
+        let worker_threads = std::thread::available_parallelism()
+            .map(|count| count.get().saturating_sub(1).max(1))
+            .unwrap_or(2);
+        Engine::open(EngineConfig {
+            catalog_path: self.catalog_path.clone(),
+            previews_dir: self.previews_dir.clone(),
+            worker_threads,
+        })
+    }
+}
+
+/// Open the catalog `options` names and show the app in a window. Returns
+/// when the window is closed, or with the reason the catalog could not be
+/// opened or the window could not be made.
+pub fn run(options: AppOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let engine = options.open_engine()?;
+    let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Photo")
             .with_inner_size([1600.0, 1000.0])
@@ -29,8 +65,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     eframe::run_native(
         "Photo",
-        options,
-        Box::new(|cc| Ok(Box::new(gallery::GalleryApp::new(cc)))),
+        native,
+        Box::new(move |cc| Ok(Box::new(PhotoApp::new(cc, engine, options)))),
     )?;
     Ok(())
 }

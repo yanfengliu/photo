@@ -106,6 +106,22 @@ pub fn histogram(
     toggles: &mut ClippingToggles,
     height: f32,
 ) -> Response {
+    show(ui, data, Some(toggles), height)
+}
+
+/// The same histogram for a view that has no clipping overlay (the
+/// Library): the corner indicators still light up when that end is clipped,
+/// but they are marks, not buttons.
+pub fn histogram_readout(ui: &mut Ui, data: &HistogramData, height: f32) -> Response {
+    show(ui, data, None, height)
+}
+
+fn show(
+    ui: &mut Ui,
+    data: &HistogramData,
+    mut toggles: Option<&mut ClippingToggles>,
+    height: f32,
+) -> Response {
     let (rect, mut response) =
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     response.widget_info(|| WidgetInfo::labeled(Role::Image, true, "Histogram"));
@@ -133,7 +149,10 @@ pub fn histogram(
         Rect::from_min_size(rect.min + Vec2::splat(space::XS), Vec2::splat(INDICATOR)),
         Corner::Left,
         ("Show shadow clipping", palette::CLIP_SHADOWS),
-        (data.shadows_clipped(), &mut toggles.shadows),
+        (
+            data.shadows_clipped(),
+            toggles.as_deref_mut().map(|toggles| &mut toggles.shadows),
+        ),
     );
     let highlights = indicator(
         ui,
@@ -144,9 +163,12 @@ pub fn histogram(
         ),
         Corner::Right,
         ("Show highlight clipping", palette::CLIP_HIGHLIGHTS),
-        (data.highlights_clipped(), &mut toggles.highlights),
+        (
+            data.highlights_clipped(),
+            toggles.map(|toggles| &mut toggles.highlights),
+        ),
     );
-    for toggle in [shadows, highlights] {
+    for toggle in [shadows, highlights].into_iter().flatten() {
         if toggle.clicked() {
             response.mark_changed();
         }
@@ -191,26 +213,35 @@ enum Corner {
 }
 
 /// One clipping indicator: a corner triangle that is lit in `color` while
-/// that end is clipped, and boxed while its overlay is switched on.
+/// that end is clipped, and boxed while its overlay is switched on. With no
+/// toggle to flip it is only a mark, and returns no response.
 fn indicator(
     ui: &Ui,
     id: Id,
     rect: Rect,
     corner: Corner,
     (name, color): (&str, Color32),
-    (clipped, on): (bool, &mut bool),
-) -> Response {
-    let response = ui.interact(rect, id, Sense::click());
-    if response.clicked() {
-        *on = !*on;
-    }
-    let (enabled, state) = (ui.is_enabled(), *on);
-    response.widget_info(|| WidgetInfo::selected(Role::Button, enabled, state, name));
+    (clipped, toggle): (bool, Option<&mut bool>),
+) -> Option<Response> {
+    let response = toggle.map(|on| {
+        let response = ui.interact(rect, id, Sense::click());
+        if response.clicked() {
+            *on = !*on;
+        }
+        let (enabled, state) = (ui.is_enabled(), *on);
+        response.widget_info(|| WidgetInfo::selected(Role::Button, enabled, state, name));
+        (response, state)
+    });
+    let state = response.as_ref().is_some_and(|(_, state)| *state);
+    let hovered = response.as_ref().is_some_and(|(response, _)| response.hovered());
+    let focused = response
+        .as_ref()
+        .is_some_and(|(response, _)| response.has_focus());
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let rounding = CornerRadius::same(radius::SM);
-        if state || response.hovered() {
+        if state || hovered {
             painter.rect_filled(rect, rounding, palette::HEADER);
         }
         if state {
@@ -224,12 +255,12 @@ fn indicator(
         };
         let fill = if clipped { color } else { palette::TEXT_OFF };
         painter.add(Shape::convex_polygon(triangle, fill, Stroke::NONE));
-        if response.has_focus() {
+        if focused {
             let ring = Stroke::new(1.0, palette::ACCENT);
             painter.rect_stroke(rect.expand(1.0), rounding, ring, StrokeKind::Outside);
         }
     }
-    response
+    response.map(|(response, _)| response)
 }
 
 #[cfg(test)]

@@ -14,6 +14,11 @@
 //! the photo's colour label. Cells too small for the two strips (a filmstrip)
 //! drop them and mark rating, label and flag on the edge of the image; of the
 //! badges they keep only the missing-file warning.
+//!
+//! A photo shown large (Compare, Survey) is better without a mat: a large
+//! light surround would bias how its colours are judged. A
+//! [loose](Thumbnail::loose) cell stands on the work area itself and shows
+//! its selection tier as a line around the image instead.
 
 use egui::emath::GuiRounding as _;
 use egui::epaint::Shape;
@@ -57,7 +62,9 @@ pub enum ThumbImage {
         /// Width divided by height of the photo.
         aspect: f32,
     },
-    /// No thumbnail yet: an empty frame is drawn.
+    /// No thumbnail yet: an empty frame is drawn, in the shape set with
+    /// [`Thumbnail::placeholder_aspect`], so the cell does not change shape
+    /// when the picture arrives.
     Placeholder,
 }
 
@@ -70,6 +77,8 @@ pub struct Badges {
     pub virtual_copy: bool,
     /// The photo's file cannot be found.
     pub missing: bool,
+    /// The photo is in the quick collection: a dot beside the flag.
+    pub quick_collection: bool,
 }
 
 /// What a cell reports for one frame.
@@ -104,7 +113,12 @@ pub struct Thumbnail<'a> {
     label: ColorLabel,
     badges: Badges,
     index: Option<usize>,
+    placeholder_aspect: f32,
+    loose: bool,
 }
+
+/// The shape a placeholder takes when nothing better is known.
+const DEFAULT_ASPECT: f32 = 1.5;
 
 impl<'a> Thumbnail<'a> {
     /// A cell of `size` points for the photo called `name` (its file name,
@@ -121,7 +135,28 @@ impl<'a> Thumbnail<'a> {
             label: ColorLabel::None,
             badges: Badges::default(),
             index: None,
+            placeholder_aspect: DEFAULT_ASPECT,
+            loose: false,
         }
+    }
+
+    /// Leave out the mat: the photo stands on whatever is behind the cell,
+    /// a line around the image shows the selection tier (bright for the
+    /// active photo, dim for a selected one), and the colour label shows
+    /// only as its swatch. For photos shown large.
+    pub fn loose(mut self, loose: bool) -> Self {
+        self.loose = loose;
+        self
+    }
+
+    /// The shape (width / height) of the empty frame drawn while there is
+    /// no picture: the photo's own, when known. Ignored for a texture, which
+    /// brings its own; a value that is not a positive number is ignored.
+    pub fn placeholder_aspect(mut self, aspect: f32) -> Self {
+        if aspect.is_finite() && aspect > 0.0 {
+            self.placeholder_aspect = aspect;
+        }
+        self
     }
 
     /// The image to show.
@@ -221,6 +256,7 @@ impl<'a> Thumbnail<'a> {
             (self.badges.edited, "edited"),
             (self.badges.virtual_copy, "virtual copy"),
             (self.badges.missing, "missing"),
+            (self.badges.quick_collection, "in quick collection"),
         ] {
             if set {
                 parts.push(word.to_owned());
@@ -232,9 +268,15 @@ impl<'a> Thumbnail<'a> {
     fn paint(&self, ui: &Ui, response: &Response, rect: Rect) {
         let painter = ui.painter();
         let rounding = CornerRadius::same(radius::MD);
-        let mat = mat_color(self.tier, self.label, response.hovered());
-        painter.rect_filled(rect, rounding, mat);
-        if self.tier == SelectionTier::Active {
+        // A loose cell's "mat" is the work area it stands on.
+        let mat = if self.loose {
+            palette::WORK_AREA
+        } else {
+            let mat = mat_color(self.tier, self.label, response.hovered());
+            painter.rect_filled(rect, rounding, mat);
+            mat
+        };
+        if self.tier == SelectionTier::Active && !self.loose {
             let edge = Stroke::new(1.0, palette::TEXT);
             painter.rect_stroke(rect, rounding, edge, StrokeKind::Inside);
         }
@@ -252,6 +294,16 @@ impl<'a> Thumbnail<'a> {
             inner.shrink2(vec2(0.0, STRIP))
         };
         let image = self.paint_image(ui, frame);
+        if self.loose {
+            let line = match self.tier {
+                SelectionTier::Active => Some(Stroke::new(2.0, palette::TEXT_STRONG)),
+                SelectionTier::Selected => Some(Stroke::new(1.0, palette::TEXT_DIM)),
+                SelectionTier::None => None,
+            };
+            if let Some(line) = line {
+                painter.rect_stroke(image.expand(2.0), 0.0, line, StrokeKind::Outside);
+            }
+        }
 
         // Marks are drawn in whichever of white or black the mat leaves legible.
         let ink = if mat.r() > 150 {
@@ -273,7 +325,8 @@ impl<'a> Thumbnail<'a> {
         let painter = ui.painter();
         let aspect = match self.image {
             ThumbImage::Texture { aspect, .. } if aspect.is_finite() && aspect > 0.0 => aspect,
-            _ => 1.5,
+            ThumbImage::Texture { .. } => DEFAULT_ASPECT,
+            ThumbImage::Placeholder => self.placeholder_aspect,
         };
         let size = if frame.width() / frame.height() > aspect {
             vec2(frame.height() * aspect, frame.height())
@@ -334,6 +387,10 @@ impl<'a> Thumbnail<'a> {
             Flag::Rejected => Icon::FlagReject.paint(painter, flag, ink.gamma_multiply(0.7)),
             Flag::Unflagged => {}
         }
+        if self.badges.quick_collection {
+            let dot = pos2(top.right() - 20.0, top.center().y);
+            painter.circle_filled(dot, 3.0, ink);
+        }
 
         for star in 0..self.rating.stars() {
             let center = pos2(
@@ -370,6 +427,9 @@ impl<'a> Thumbnail<'a> {
         if let Some(color) = label_color(self.label) {
             let swatch = Rect::from_center_size(pos2(inner.right() - 5.0, y), vec2(10.0, 3.0));
             painter.rect_filled(swatch, 1.0, color);
+        }
+        if self.badges.quick_collection {
+            painter.circle_filled(pos2(inner.right() - 15.0, y), 1.8, ink);
         }
         if self.flag != Flag::Unflagged {
             let corner = image.left_top();
@@ -485,10 +545,20 @@ mod tests {
                 edited: true,
                 virtual_copy: true,
                 missing: false,
+                quick_collection: true,
             });
         assert_eq!(
             busy.describe(),
-            "active, 4 stars, pick, blue, edited, virtual copy"
+            "active, 4 stars, pick, blue, edited, virtual copy, in quick collection"
         );
+    }
+
+    #[test]
+    fn only_a_usable_aspect_shapes_the_placeholder() {
+        let cell = |aspect| Thumbnail::new("a.jpg", [160.0, 160.0]).placeholder_aspect(aspect);
+        assert_eq!(cell(0.75).placeholder_aspect, 0.75);
+        for nonsense in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(cell(nonsense).placeholder_aspect, DEFAULT_ASPECT);
+        }
     }
 }

@@ -41,6 +41,7 @@ pub fn roll(pictures: usize) -> Vec<Photo> {
         edited,
         virtual_copy,
         missing,
+        quick_collection: false,
     };
     let none = badge(false, false, false);
     let edited = badge(true, false, false);
@@ -77,7 +78,11 @@ pub fn roll(pictures: usize) -> Vec<Photo> {
             rating: Rating::new(stars),
             flag,
             label,
-            badges,
+            badges: Badges {
+                // Two photos sit in the quick collection.
+                quick_collection: index == 7 || index == 16,
+                ..badges
+            },
         })
         .collect()
 }
@@ -211,6 +216,7 @@ mod tests {
         assert!(roll.iter().any(|photo| photo.badges.edited));
         assert!(roll.iter().any(|photo| photo.badges.virtual_copy));
         assert!(roll.iter().any(|photo| photo.badges.missing));
+        assert!(roll.iter().any(|photo| photo.badges.quick_collection));
         assert_eq!(
             roll.iter().filter(|photo| photo.picture.is_none()).count(),
             1

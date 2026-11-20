@@ -83,11 +83,21 @@ pub enum Icon {
     Unlock,
     /// Something needs attention.
     Warning,
+    /// A folder on disk, or a set that holds collections.
+    Folder,
+    /// A collection of photos.
+    Collection,
+    /// A smart collection: photos gathered by rules.
+    SmartCollection,
+    /// Done, included, on.
+    Check,
+    /// Close, cancel, take away.
+    Close,
 }
 
 impl Icon {
     /// Every icon, in declaration order.
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 39] = [
         Self::Grid,
         Self::Loupe,
         Self::Compare,
@@ -122,6 +132,11 @@ impl Icon {
         Self::Lock,
         Self::Unlock,
         Self::Warning,
+        Self::Folder,
+        Self::Collection,
+        Self::SmartCollection,
+        Self::Check,
+        Self::Close,
     ];
 
     /// A short name for the icon, usable as a label.
@@ -161,6 +176,11 @@ impl Icon {
             Self::Lock => "Lock",
             Self::Unlock => "Unlock",
             Self::Warning => "Warning",
+            Self::Folder => "Folder",
+            Self::Collection => "Collection",
+            Self::SmartCollection => "Smart collection",
+            Self::Check => "Check",
+            Self::Close => "Close",
         }
     }
 }
