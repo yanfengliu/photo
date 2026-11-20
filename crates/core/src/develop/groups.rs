@@ -123,7 +123,9 @@ impl GroupSet {
     }
 
     pub fn iter(self) -> impl Iterator<Item = SettingsGroup> {
-        SettingsGroup::ALL.into_iter().filter(move |group| self.contains(*group))
+        SettingsGroup::ALL
+            .into_iter()
+            .filter(move |group| self.contains(*group))
     }
 }
 
@@ -228,7 +230,11 @@ mod tests {
     fn default_copy_leaves_out_what_is_tied_to_one_composition() {
         let set = GroupSet::default_copy();
         assert!(set.contains(SettingsGroup::Tone));
-        for group in [SettingsGroup::Crop, SettingsGroup::Healing, SettingsGroup::Masking] {
+        for group in [
+            SettingsGroup::Crop,
+            SettingsGroup::Healing,
+            SettingsGroup::Masking,
+        ] {
             assert!(!set.contains(group));
         }
     }
@@ -249,7 +255,9 @@ mod tests {
 
     #[test]
     fn a_group_set_serializes_as_a_list_of_names() {
-        let set = GroupSet::NONE.with(SettingsGroup::Tone).with(SettingsGroup::ToneCurve);
+        let set = GroupSet::NONE
+            .with(SettingsGroup::Tone)
+            .with(SettingsGroup::ToneCurve);
         let json = serde_json::to_string(&set).unwrap();
         assert_eq!(json, r#"["tone","tone_curve"]"#);
         assert_eq!(serde_json::from_str::<GroupSet>(&json).unwrap(), set);

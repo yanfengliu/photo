@@ -6,14 +6,20 @@ use super::{Adj, DevelopSettings, GroupSet, SettingsGroup, Treatment};
 use crate::meta::FileKind;
 
 /// Describe how `after` differs from `before`, e.g. `Exposure +0.35`.
-pub fn describe_change(before: &DevelopSettings, after: &DevelopSettings, kind: FileKind) -> String {
+pub fn describe_change(
+    before: &DevelopSettings,
+    after: &DevelopSettings,
+    kind: FileKind,
+) -> String {
     if before == after {
         return "No Change".to_string();
     }
     if let Some(label) = structural_change(before, after) {
         return label;
     }
-    let changed: Vec<Adj> = Adj::all().filter(|adj| adj.get(before) != adj.get(after)).collect();
+    let changed: Vec<Adj> = Adj::all()
+        .filter(|adj| adj.get(before) != adj.get(after))
+        .collect();
     match changed.as_slice() {
         [adj] => {
             let spec = adj.spec_for(kind);
@@ -41,11 +47,20 @@ fn structural_change(before: &DevelopSettings, after: &DevelopSettings) -> Optio
         }
         return Some(format!("Profile: {}", after.profile.label()));
     }
-    if only(SettingsGroup::WhiteBalance) && before.white_balance.preset != after.white_balance.preset {
-        return Some(format!("White Balance: {}", after.white_balance.preset.label()));
+    if only(SettingsGroup::WhiteBalance)
+        && before.white_balance.preset != after.white_balance.preset
+    {
+        return Some(format!(
+            "White Balance: {}",
+            after.white_balance.preset.label()
+        ));
     }
     if only(SettingsGroup::Healing) {
-        return Some(list_change("Spot Removal", before.spots.len(), after.spots.len()));
+        return Some(list_change(
+            "Spot Removal",
+            before.spots.len(),
+            after.spots.len(),
+        ));
     }
     if only(SettingsGroup::Masking) {
         return Some(list_change("Mask", before.masks.len(), after.masks.len()));
@@ -62,7 +77,8 @@ fn structural_change(before: &DevelopSettings, after: &DevelopSettings) -> Optio
             return Some("Crop Aspect".to_string());
         }
     }
-    if only(SettingsGroup::ToneCurve) && before.tone_curve.parametric == after.tone_curve.parametric {
+    if only(SettingsGroup::ToneCurve) && before.tone_curve.parametric == after.tone_curve.parametric
+    {
         return Some("Point Curve".to_string());
     }
     None
@@ -111,14 +127,18 @@ fn adjustment_name(adj: Adj) -> String {
 
 fn grading_range(adj: Adj) -> &'static str {
     match adj {
-        Adj::GradeShadowsHue | Adj::GradeShadowsSaturation | Adj::GradeShadowsLuminance => "Shadows Grade",
+        Adj::GradeShadowsHue | Adj::GradeShadowsSaturation | Adj::GradeShadowsLuminance => {
+            "Shadows Grade"
+        }
         Adj::GradeMidtonesHue | Adj::GradeMidtonesSaturation | Adj::GradeMidtonesLuminance => {
             "Midtones Grade"
         }
-        Adj::GradeHighlightsHue | Adj::GradeHighlightsSaturation | Adj::GradeHighlightsLuminance => {
-            "Highlights Grade"
+        Adj::GradeHighlightsHue
+        | Adj::GradeHighlightsSaturation
+        | Adj::GradeHighlightsLuminance => "Highlights Grade",
+        Adj::GradeGlobalHue | Adj::GradeGlobalSaturation | Adj::GradeGlobalLuminance => {
+            "Global Grade"
         }
-        Adj::GradeGlobalHue | Adj::GradeGlobalSaturation | Adj::GradeGlobalLuminance => "Global Grade",
         _ => "Grading",
     }
 }
@@ -126,7 +146,9 @@ fn grading_range(adj: Adj) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::develop::{ColorBand, CropRect, CurvePoint, Mask, MaskShape, PointCurve, Profile, WbPreset};
+    use crate::develop::{
+        ColorBand, CropRect, CurvePoint, Mask, MaskShape, PointCurve, Profile, WbPreset,
+    };
     use crate::geom::Point;
 
     fn describe(edit: impl FnOnce(&mut DevelopSettings)) -> String {
@@ -140,8 +162,14 @@ mod tests {
     fn a_single_slider_is_named_with_its_new_value() {
         assert_eq!(describe(|s| s.tone.exposure = 0.35), "Exposure +0.35");
         assert_eq!(describe(|s| s.tone.contrast = -12.0), "Contrast -12");
-        assert_eq!(describe(|s| s.detail.sharpening.amount = 60.0), "Sharpening Amount 60");
-        assert_eq!(describe(|s| s.effects.vignette.amount = -20.0), "Vignette Amount -20");
+        assert_eq!(
+            describe(|s| s.detail.sharpening.amount = 60.0),
+            "Sharpening Amount 60"
+        );
+        assert_eq!(
+            describe(|s| s.effects.vignette.amount = -20.0),
+            "Vignette Amount -20"
+        );
         assert_eq!(
             describe(|s| s.color_mixer.saturation[ColorBand::Blue.index()] = 15.0),
             "Blue Saturation +15"
@@ -156,7 +184,10 @@ mod tests {
         before.white_balance.temp = 5000.0;
         let mut after = before.clone();
         after.white_balance.temp = 5600.0;
-        assert_eq!(describe_change(&before, &after, FileKind::Raw), "Temperature 5600");
+        assert_eq!(
+            describe_change(&before, &after, FileKind::Raw),
+            "Temperature 5600"
+        );
     }
 
     #[test]
@@ -170,8 +201,14 @@ mod tests {
             describe(|s| s.white_balance.preset = WbPreset::Auto),
             "White Balance: Auto"
         );
-        assert_eq!(describe(|s| s.orientation = s.orientation.rotated_cw()), "Rotate");
-        assert_eq!(describe(|s| s.orientation = s.orientation.flipped_horizontal()), "Flip");
+        assert_eq!(
+            describe(|s| s.orientation = s.orientation.rotated_cw()),
+            "Rotate"
+        );
+        assert_eq!(
+            describe(|s| s.orientation = s.orientation.flipped_horizontal()),
+            "Flip"
+        );
         assert_eq!(
             describe(|s| {
                 s.crop.rect = Some(CropRect {

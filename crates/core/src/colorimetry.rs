@@ -56,8 +56,14 @@ pub struct Chromaticity {
 }
 
 impl Chromaticity {
-    pub const D65: Self = Self { x: 0.3127, y: 0.3290 };
-    pub const D50: Self = Self { x: 0.3457, y: 0.3585 };
+    pub const D65: Self = Self {
+        x: 0.3127,
+        y: 0.3290,
+    };
+    pub const D50: Self = Self {
+        x: 0.3457,
+        y: 0.3585,
+    };
 
     pub const fn new(x: f64, y: f64) -> Self {
         Self { x, y }
@@ -282,7 +288,10 @@ fn bradford_d(from_white: Chromaticity, to_white: Chromaticity) -> Mat3d {
             *value *= d / s;
         }
     }
-    mul_d(&invert_d(&CONE).expect("Bradford matrix is invertible"), &scaled)
+    mul_d(
+        &invert_d(&CONE).expect("Bradford matrix is invertible"),
+        &scaled,
+    )
 }
 
 fn widen(m: &Mat3) -> Mat3d {
@@ -312,11 +321,24 @@ fn mul_d(a: &Mat3d, b: &Mat3d) -> Mat3d {
 }
 
 fn invert_d(m: &Mat3d) -> Option<Mat3d> {
-    let cofactor = |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+    let cofactor =
+        |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
     let adjugate = [
-        [cofactor(1, 2, 1, 2), -cofactor(0, 2, 1, 2), cofactor(0, 1, 1, 2)],
-        [-cofactor(1, 2, 0, 2), cofactor(0, 2, 0, 2), -cofactor(0, 1, 0, 2)],
-        [cofactor(1, 2, 0, 1), -cofactor(0, 2, 0, 1), cofactor(0, 1, 0, 1)],
+        [
+            cofactor(1, 2, 1, 2),
+            -cofactor(0, 2, 1, 2),
+            cofactor(0, 1, 1, 2),
+        ],
+        [
+            -cofactor(1, 2, 0, 2),
+            cofactor(0, 2, 0, 2),
+            -cofactor(0, 1, 0, 2),
+        ],
+        [
+            cofactor(1, 2, 0, 1),
+            -cofactor(0, 2, 0, 1),
+            cofactor(0, 1, 0, 1),
+        ],
     ];
     let det = m[0][0] * adjugate[0][0] + m[0][1] * adjugate[1][0] + m[0][2] * adjugate[2][0];
     let scale = m.iter().flatten().fold(0.0f64, |acc, v| acc.max(v.abs()));
@@ -423,7 +445,11 @@ mod tests {
         let singular = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [0.0, 1.0, 0.0]];
         assert!(mat3_invert(&singular).is_none());
         let inverse = mat3_invert(&RgbSpace::Srgb.to_xyz()).unwrap();
-        assert_close(mat3_apply(&inverse, [0.9505, 1.0, 1.0891]), [1.0, 1.0, 1.0], 1e-3);
+        assert_close(
+            mat3_apply(&inverse, [0.9505, 1.0, 1.0891]),
+            [1.0, 1.0, 1.0],
+            1e-3,
+        );
     }
 
     #[test]

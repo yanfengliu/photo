@@ -166,7 +166,10 @@ impl Mask {
 
     /// True when rendering can skip this mask entirely.
     pub fn is_inert(&self) -> bool {
-        !self.enabled || self.amount == 0.0 || self.components.is_empty() || self.adjust.is_identity()
+        !self.enabled
+            || self.amount == 0.0
+            || self.components.is_empty()
+            || self.adjust.is_identity()
     }
 }
 

@@ -131,7 +131,9 @@ fn parse(text: &str) -> Option<DateTime> {
     }
     let number = |range: std::ops::Range<usize>| -> Option<u32> {
         let part = text.get(range)?;
-        part.bytes().all(|b| b.is_ascii_digit()).then(|| part.parse().ok())?
+        part.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| part.parse().ok())?
     };
     let date_separator = |index: usize| matches!(bytes[index], b'-' | b':');
     if !date_separator(4) || !date_separator(7) || !matches!(bytes[10], b' ' | b'T') {
@@ -181,7 +183,8 @@ fn civil_from_days(days: i64) -> (i64, u8, u8) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let shifted_month = (5 * day_of_year + 2) / 153;
     let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u8;

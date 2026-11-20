@@ -73,7 +73,12 @@ impl Rect {
     pub fn intersect(&self, other: &Self) -> Self {
         let x0 = self.x0.max(other.x0);
         let y0 = self.y0.max(other.y0);
-        Self::new(x0, y0, self.x1.min(other.x1).max(x0), self.y1.min(other.y1).max(y0))
+        Self::new(
+            x0,
+            y0,
+            self.x1.min(other.x1).max(x0),
+            self.y1.min(other.y1).max(y0),
+        )
     }
 
     /// Grow (or shrink, for negative `amount`) by `amount` on every side.

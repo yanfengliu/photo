@@ -173,7 +173,10 @@ impl DevelopSettings {
                 adj.set(self, clamped);
             }
         }
-        self.orientation = Orientation::new(self.orientation.quarter_turns, self.orientation.flip_horizontal);
+        self.orientation = Orientation::new(
+            self.orientation.quarter_turns,
+            self.orientation.flip_horizontal,
+        );
     }
 }
 
@@ -214,12 +217,16 @@ mod tests {
             1,
         ));
         let json = serde_json::to_string(&settings).unwrap();
-        assert_eq!(serde_json::from_str::<DevelopSettings>(&json).unwrap(), settings);
+        assert_eq!(
+            serde_json::from_str::<DevelopSettings>(&json).unwrap(),
+            settings
+        );
     }
 
     #[test]
     fn missing_fields_take_their_defaults() {
-        let settings: DevelopSettings = serde_json::from_str(r#"{"tone":{"exposure":1.5}}"#).unwrap();
+        let settings: DevelopSettings =
+            serde_json::from_str(r#"{"tone":{"exposure":1.5}}"#).unwrap();
         assert_eq!(settings.tone.exposure, 1.5);
         assert_eq!(settings.tone.contrast, 0.0);
         assert_eq!(settings.effects.vignette.midpoint, 50.0);
@@ -236,11 +243,20 @@ mod tests {
     #[test]
     fn raw_photos_start_with_capture_sharpening_and_colour_denoise() {
         let raw = DevelopSettings::default_for(FileKind::Raw);
-        assert_eq!(raw.detail.sharpening.amount, DevelopSettings::RAW_SHARPEN_AMOUNT);
-        assert_eq!(raw.detail.noise_reduction.color, DevelopSettings::RAW_COLOR_NOISE_REDUCTION);
+        assert_eq!(
+            raw.detail.sharpening.amount,
+            DevelopSettings::RAW_SHARPEN_AMOUNT
+        );
+        assert_eq!(
+            raw.detail.noise_reduction.color,
+            DevelopSettings::RAW_COLOR_NOISE_REDUCTION
+        );
         assert!(raw.is_default_for(FileKind::Raw));
         assert!(!raw.is_default_for(FileKind::Raster));
-        assert_eq!(DevelopSettings::default_for(FileKind::Raster), DevelopSettings::default());
+        assert_eq!(
+            DevelopSettings::default_for(FileKind::Raster),
+            DevelopSettings::default()
+        );
     }
 
     #[test]

@@ -173,13 +173,17 @@ mod tests {
 
     #[test]
     fn fewer_than_two_usable_points_falls_back_to_identity() {
-        assert_eq!(PointCurve::new([CurvePoint::new(0.3, 0.9)]), PointCurve::default());
+        assert_eq!(
+            PointCurve::new([CurvePoint::new(0.3, 0.9)]),
+            PointCurve::default()
+        );
         assert_eq!(PointCurve::new([]), PointCurve::default());
     }
 
     #[test]
     fn deserializing_repairs_an_invalid_curve() {
-        let curve: PointCurve = serde_json::from_str(r#"[{"x":0.8,"y":0.2},{"x":0.1,"y":0.9}]"#).unwrap();
+        let curve: PointCurve =
+            serde_json::from_str(r#"[{"x":0.8,"y":0.2},{"x":0.1,"y":0.9}]"#).unwrap();
         assert_eq!(curve.points()[0], CurvePoint::new(0.1, 0.9));
         let json = serde_json::to_string(&curve).unwrap();
         assert_eq!(serde_json::from_str::<PointCurve>(&json).unwrap(), curve);

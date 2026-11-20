@@ -4,9 +4,9 @@
 //! and step. The UI builds sliders from it, history labels are formatted from
 //! it, and XMP and the test harness address settings through its keys.
 
+use super::DevelopSettings;
 use super::color::ColorBand;
 use super::groups::SettingsGroup;
-use super::DevelopSettings;
 use crate::meta::FileKind;
 
 /// The static description of one adjustment.
@@ -358,7 +358,11 @@ mod tests {
             let value = spec.min + (spec.max - spec.min) * 0.75;
             adj.set(&mut settings, value);
             for (other_index, other) in all.iter().enumerate() {
-                let expected = if other_index == index { value } else { before[other_index] };
+                let expected = if other_index == index {
+                    value
+                } else {
+                    before[other_index]
+                };
                 assert_eq!(other.get(&settings), expected, "{adj:?} affected {other:?}");
             }
         }
@@ -380,7 +384,10 @@ mod tests {
         assert_eq!(Adj::Contrast.spec().format(0.0), "0");
         assert_eq!(Adj::Contrast.spec().format(-0.0), "0");
         assert_eq!(Adj::SharpenAmount.spec().format(40.0), "40");
-        assert_eq!(Adj::Temperature.spec_for(FileKind::Raw).format(5600.0), "5600");
+        assert_eq!(
+            Adj::Temperature.spec_for(FileKind::Raw).format(5600.0),
+            "5600"
+        );
     }
 
     #[test]

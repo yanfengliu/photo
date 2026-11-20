@@ -134,7 +134,13 @@ impl CropRect {
         let (sin, cos) = angle_degrees.to_radians().sin_cos();
         let half_w = self.width * 0.5 * frame_aspect;
         let half_h = self.height * 0.5;
-        [(-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)].map(|(dx, dy)| {
+        [
+            (-half_w, -half_h),
+            (half_w, -half_h),
+            (half_w, half_h),
+            (-half_w, half_h),
+        ]
+        .map(|(dx, dy)| {
             Point::new(
                 self.cx + (dx * cos - dy * sin) / frame_aspect,
                 self.cy + dx * sin + dy * cos,
@@ -147,7 +153,10 @@ impl CropRect {
     pub fn fits(&self, angle_degrees: f32, frame_aspect: f32) -> bool {
         const TOLERANCE: f32 = 1e-4;
         self.corners(angle_degrees, frame_aspect).iter().all(|p| {
-            p.x >= -TOLERANCE && p.x <= 1.0 + TOLERANCE && p.y >= -TOLERANCE && p.y <= 1.0 + TOLERANCE
+            p.x >= -TOLERANCE
+                && p.x <= 1.0 + TOLERANCE
+                && p.y >= -TOLERANCE
+                && p.y <= 1.0 + TOLERANCE
         })
     }
 
@@ -291,8 +300,14 @@ mod tests {
     #[test]
     fn a_clockwise_quarter_turn_moves_the_top_left_corner_to_the_top_right() {
         let turned = Orientation::IDENTITY.rotated_cw();
-        assert!(close(turned.forward(Point::new(0.0, 0.0)), Point::new(1.0, 0.0)));
-        assert!(close(turned.forward(Point::new(1.0, 0.0)), Point::new(1.0, 1.0)));
+        assert!(close(
+            turned.forward(Point::new(0.0, 0.0)),
+            Point::new(1.0, 0.0)
+        ));
+        assert!(close(
+            turned.forward(Point::new(1.0, 0.0)),
+            Point::new(1.0, 1.0)
+        ));
         assert_eq!(turned.apply_to_size(300, 200), (200, 300));
     }
 
@@ -300,14 +315,20 @@ mod tests {
     fn inverse_undoes_forward_for_all_eight_orientations() {
         let p = Point::new(0.2, 0.7);
         for orientation in all_orientations() {
-            assert!(close(orientation.inverse(orientation.forward(p)), p), "{orientation:?}");
+            assert!(
+                close(orientation.inverse(orientation.forward(p)), p),
+                "{orientation:?}"
+            );
         }
     }
 
     #[test]
     fn four_quarter_turns_and_two_flips_return_to_the_start() {
         for start in all_orientations() {
-            assert_eq!(start.rotated_cw().rotated_cw().rotated_cw().rotated_cw(), start);
+            assert_eq!(
+                start.rotated_cw().rotated_cw().rotated_cw().rotated_cw(),
+                start
+            );
             assert_eq!(start.rotated_cw().rotated_ccw(), start);
             assert_eq!(start.flipped_horizontal().flipped_horizontal(), start);
             assert_eq!(start.flipped_vertical().flipped_vertical(), start);
@@ -320,9 +341,15 @@ mod tests {
         for start in all_orientations() {
             let seen = start.forward(p);
             let mirrored = start.flipped_horizontal().forward(p);
-            assert!(close(mirrored, Point::new(1.0 - seen.x, seen.y)), "{start:?}");
+            assert!(
+                close(mirrored, Point::new(1.0 - seen.x, seen.y)),
+                "{start:?}"
+            );
             let upended = start.flipped_vertical().forward(p);
-            assert!(close(upended, Point::new(seen.x, 1.0 - seen.y)), "{start:?}");
+            assert!(
+                close(upended, Point::new(seen.x, 1.0 - seen.y)),
+                "{start:?}"
+            );
         }
     }
 
@@ -348,14 +375,20 @@ mod tests {
             for frame_aspect in [0.5, 1.0, 1.5, 3.0] {
                 for crop_aspect in [0.8, 1.0, 1.5, 16.0 / 9.0] {
                     let rect = CropRect::inscribed(angle, frame_aspect, crop_aspect);
-                    assert!(rect.fits(angle, frame_aspect), "{angle} {frame_aspect} {crop_aspect}");
+                    assert!(
+                        rect.fits(angle, frame_aspect),
+                        "{angle} {frame_aspect} {crop_aspect}"
+                    );
                     assert!((rect.aspect(frame_aspect) - crop_aspect).abs() < 1e-3);
                     let grown = CropRect {
                         width: rect.width * 1.01,
                         height: rect.height * 1.01,
                         ..rect
                     };
-                    assert!(!grown.fits(angle, frame_aspect), "{angle} {frame_aspect} {crop_aspect}");
+                    assert!(
+                        !grown.fits(angle, frame_aspect),
+                        "{angle} {frame_aspect} {crop_aspect}"
+                    );
                 }
             }
         }
