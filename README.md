@@ -4,7 +4,7 @@ A catalog-based, non-destructive photo organiser and raw developer for macOS and
 
 Photo is an independent project. It is not affiliated with Adobe, uses none of Adobe's code, artwork or names, and does not aim for pixel-identical output: slider names, ranges and `crs:` XMP values follow shared conventions, while the rendering math is its own and is documented with its real sources.
 
-> Status: under construction. Version 0.3.0 is the foundation of a from-scratch restart — the workspace, the shared data model and the design. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the design](docs/threads/current/lightroom-workflow-restart/DESIGN.md) and [the plan](docs/threads/current/lightroom-workflow-restart/PLAN.md) for what is being built and in what order.
+> Status: under construction. Version 0.3.0 is the foundation of a from-scratch restart — the workspace, the shared data model and the design. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the plan](docs/work/12_lightroom-workflow-restart/plan.md) and [the design](docs/work/12_lightroom-workflow-restart/design.md) for what is being built and in what order.
 
 ## Feature overview
 
@@ -59,11 +59,10 @@ crates/
 docs/
   architecture/      ARCHITECTURE.md, decisions.md, drift-log.md
   devlog/            summary.md and dated detailed logs
-  threads/           design, plan and review records per objective
-  policies/          local-rules.md: standing rules specific to this repository
-  learning/          lessons.md
+  work/              one numbered folder per piece of work: plan, design, review rounds
+  policies/          local-rules.md: the owner's rules specific to this repository
+  learning/          lessons.md, lessons-evidence.md, gate-proofs.md
   debugging/         template.md
-  api-reference.md   Public API of each crate
   changelog.md       One entry per version
 ```
 
@@ -72,7 +71,7 @@ Which crate may depend on which is the architecture; the table is in [docs/archi
 ## Public surface
 
 - `photo` — the application binary.
-- `photo-core` — `DevelopSettings`, `Adj`, `GroupSet`, `PhotoMetadata`, `SourceImage`, `RgbSpace`, `DateTime` and friends; see [docs/api-reference.md](docs/api-reference.md).
+- The crates under `crates/` are internal to this workspace. Their Rust types and doc comments are the API reference; `cargo doc --no-deps --open` renders them.
 
 ## Third-party licences
 

@@ -32,7 +32,7 @@ What carries over is knowledge, recorded in §10 and §5: the perceptual-space t
 4. **Resolution independence.** Every spatial parameter is defined at full resolution and scaled by the view scale, and every position-dependent effect is defined in image coordinates. A preview is the export seen through a smaller window (contract R1–R3 in §5.9).
 5. **Boundaries are crates.** Each responsibility in §4 is a crate; the dependency graph is the architecture. A crate that needs something outside its row asks for the boundary to change here first.
 6. **Agent-verifiable.** Every behaviour is reachable headlessly: engine behaviour through plain method calls, UI behaviour through `egui_kittest` (accessibility-tree queries plus real rendered frames).
-7. **Tests cannot touch real data.** No library code computes a default storage location. Only `src/main.rs` resolves the user's catalog path; everything else is handed explicit paths, and tests hand it temp directories.
+7. **Tests cannot touch real data.** No library code computes a default storage location. Only the root package does, in `src/repo.rs`, which owns storage-root discovery and the harness's sandbox override as `AGENTS.md` requires; everything else is handed explicit paths, and tests hand it temp directories.
 
 ## 4. Stack and crate map
 
@@ -203,7 +203,13 @@ Every interactive widget must have an accessible name. `egui_kittest` panics on 
 
 ### 8.7 Harness
 
-`photo-ui` exposes a headless driver built on `egui_kittest`: create an app on a temp catalog, press keys, click or set controls by name, drag at coordinates, wait until the engine is idle, and save the rendered frame as a PNG. UI tests use it directly; a `photo harness <script>` subcommand exposes the same driver to an agent as a JSON-lines script so the real app can be driven and observed without a window.
+There are two layers, and the second is the contract `AGENTS.md` states.
+
+The in-process driver, `photo_ui::harness`, is built on `egui_kittest`: create an app on a temp catalog, press keys, click or set controls by name, drag at coordinates, wait until the engine is idle, and save the rendered frame as a PNG. UI tests use it directly.
+
+The agent harness runs that same driver behind a process boundary. `photo --harness[=PORT]` starts the real app without a window (real GPU frames, rendered offscreen) and serves JSON lines over localhost TCP; `harnessctl <cmd> [params-json]` sends one command and `harnessctl script <file.jsonl>` replays a recorded session. Each launch creates `tmp/harness-runs/<run-id>/` holding `session.json` (port and token), `manifest.json`, `session.jsonl` (every request and response) and `artifacts/`. Storage is sandboxed by default: the catalog, its previews and the export folder resolve into `<run-dir>/storage/`, and only `--harness-real-storage` reaches the user's own catalog.
+
+Commands, following the previous app's guide so an agent that knew it is at home: `ping`, `observe` (module, view, selection, the active photo, every control with its kind, label, range and value, pending work), `observe_library` (a page of the current photo list), `screenshot` (the frame the user would see), `dump_render` (the develop pipeline's output for the active photo, with statistics computed at full resolution), `image_stats`, `compare_images`, `import_files`, `import_folder`, `open`, `set_slider` (a real drag: change events then a release), `reset_slider`, `click`, `key`, `drag`, `set_crop`, `wait_idle`, `quit`. An action response means the gesture was performed; `wait_idle` is how a caller learns that the work it started has finished. The guide, with the statistics semantics, the improvement loop and the findings schema, is `docs/guides/agent-harness.md`.
 
 ### 8.8 Visual design
 
@@ -217,7 +223,10 @@ A process-wide test override is guarded by a mutex held across the whole overrid
 
 ## 10. Rules carried over from the previous app
 
-These were the owner's standing local rules and still apply; they are restated in `docs/policies/local-rules.md`.
+These were the owner's standing local rules and still apply; `docs/policies/local-rules.md` keeps them in the owner's words, and this list only says where each one lands in the design.
+
+- The tone bands are deliberately tight: a single full-strength Highlights or Shadows slider must read as targeted recovery, not as a global exposure shift. The previous app chose σ = 1 with 1.5 EV of reach per band against darktable's σ = √2 for that reason.
+- Undo and redo are session-scoped. The undo stack lives in the engine and is not persisted; what persists is each photo's settings and its history steps.
 
 - Do not describe a tuning as "Lightroom-style" without a published Adobe reference. The DNG specification, the DNG SDK and the XMP specification are published Adobe references; the Basic-panel math is not. Cite what was actually used.
 - Photographer-facing contrast and tone controls operate in perceptual space with the pivot at perceptual 0.5; zone centres as in §5.5.

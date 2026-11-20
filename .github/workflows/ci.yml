@@ -17,8 +17,10 @@ jobs:
       - name: Install pinned toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # Claim: every workspace member is formatted, not only the root package.
+      # `--all` holds that whatever directory or manifest path the command is given.
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test

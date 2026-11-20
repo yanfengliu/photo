@@ -242,6 +242,10 @@
           "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/current/natural-edit-ranges/PLAN.md"
         }
       ]
+    },
+    {
+      "id": 12,
+      "theme": "lightroom-workflow-restart"
     }
   ]
 }

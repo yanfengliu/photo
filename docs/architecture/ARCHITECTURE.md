@@ -96,4 +96,4 @@ At v0.3.0 only `photo-core` is implemented; the other crates are documented skel
 
 - [Architectural decisions](decisions.md)
 - [Architecture drift log](drift-log.md)
-- [Design](../threads/current/lightroom-workflow-restart/DESIGN.md) and [plan](../threads/current/lightroom-workflow-restart/PLAN.md) for the restart
+- [Plan](../work/12_lightroom-workflow-restart/plan.md) and [design](../work/12_lightroom-workflow-restart/design.md) for the restart
