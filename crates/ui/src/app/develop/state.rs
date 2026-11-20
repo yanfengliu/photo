@@ -6,9 +6,12 @@ use std::collections::HashSet;
 
 use photo_core::develop::GroupSet;
 use photo_core::meta::PhotoId;
-use photo_engine::{BeforeSettings, CanvasView, Engine, HistoryStep, PresetInfo, PresetKey, Snapshot};
+use photo_engine::{
+    BeforeSettings, CanvasView, Engine, HistoryStep, PresetInfo, PresetKey, Snapshot,
+};
 
 use super::canvas::{CanvasState, Placement};
+use super::drafts::Pending;
 use crate::widgets::{ClippingToggles, PanelGroup};
 
 /// How the before view is shown with the edit.
@@ -30,6 +33,29 @@ impl BeforeAfter {
     /// Whether the before view is on screen.
     pub fn shows_before(self) -> bool {
         self != Self::Off
+    }
+}
+
+/// How much of the window around the photo is darkened (L).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Lights {
+    /// Everything shown as usual.
+    #[default]
+    On,
+    /// Everything but the photo dimmed.
+    Dim,
+    /// Everything but the photo black.
+    Out,
+}
+
+impl Lights {
+    /// L: on, dimmed, out, and on again.
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::On => Self::Dim,
+            Self::Dim => Self::Out,
+            Self::Out => Self::On,
+        }
     }
 }
 
@@ -170,9 +196,18 @@ pub(crate) struct DevelopState {
     pub(crate) seen: Option<egui::Rect>,
     /// Where the edit was placed in the last frame, for the zoom keys.
     pub(crate) last_placement: Option<Placement>,
+    /// The whole photo's rect on screen in the last frame, in points.
+    pub(crate) photo_rect: Option<egui::Rect>,
+    /// The canvas's stage (the work area under the line of information)
+    /// in the last frame, in points.
+    pub(crate) stage: Option<egui::Rect>,
+    pub(crate) lights: Lights,
     /// The Navigator's picture box in pixels: the size preset previews are
     /// rendered at.
     pub(crate) navigator_box: (u32, u32),
+    /// A draft edit waiting for the frame of the one before (see
+    /// `drafts`).
+    pub(crate) pending: Option<Pending>,
 }
 
 impl Default for DevelopState {
@@ -195,7 +230,11 @@ impl Default for DevelopState {
             lists: Lists::default(),
             seen: None,
             last_placement: None,
+            photo_rect: None,
+            stage: None,
+            lights: Lights::On,
             navigator_box: (480, 320),
+            pending: None,
         }
     }
 }
@@ -250,6 +289,7 @@ impl DevelopState {
         self.before_choice = BeforeSettings::Default;
         self.hovered_preset = None;
         self.picker = false;
+        self.pending = None;
     }
 }
 
@@ -292,7 +332,12 @@ mod tests {
         assert_eq!(solo.open_panels().collect::<Vec<_>>(), ["Detail"]);
         let unknown = decode_panels("-\nBasic\nNo Such Panel", &RIGHT_PANELS);
         assert_eq!(unknown.open_panels().collect::<Vec<_>>(), ["Basic"]);
-        assert!(decode_panels("", &RIGHT_PANELS).open_panels().next().is_none());
+        assert!(
+            decode_panels("", &RIGHT_PANELS)
+                .open_panels()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
@@ -303,6 +348,17 @@ mod tests {
         state.clipping.highlights = false;
         state.toggle_clipping();
         assert!(!state.clipping.shadows && !state.clipping.highlights);
+    }
+
+    #[test]
+    fn l_goes_from_on_to_dim_to_out_and_on_again() {
+        let mut lights = Lights::default();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            lights = lights.next();
+            seen.push(lights);
+        }
+        assert_eq!(seen, [Lights::Dim, Lights::Out, Lights::On]);
     }
 
     #[test]

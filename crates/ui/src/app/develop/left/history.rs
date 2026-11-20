@@ -44,7 +44,10 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
             })
             .inner;
         if row.clicked && !step.is_current {
-            cx.act(Action::Develop(DevelopAction::GoToHistoryStep(editing.photo, step.id)));
+            cx.act(Action::Develop(DevelopAction::GoToHistoryStep(
+                editing.photo,
+                step.id,
+            )));
         }
         egui::Popup::context_menu(&row.response).show(|ui| {
             if ui.button("Show as Before").clicked() {

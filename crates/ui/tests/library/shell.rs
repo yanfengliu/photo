@@ -24,7 +24,7 @@ fn an_empty_catalog_says_to_import_and_offers_the_way() -> TestResult {
 }
 
 #[test]
-fn develop_is_shown_as_the_next_module_but_cannot_be_chosen() -> TestResult {
+fn the_module_picker_lights_the_module_shown_and_develop_needs_a_photo() -> TestResult {
     let studio = Studio::new();
     let mut harness = studio.app();
     harness.run()?;
@@ -33,13 +33,13 @@ fn develop_is_shown_as_the_next_module_but_cannot_be_chosen() -> TestResult {
         Some(true)
     );
     let develop = harness.control(Role::Button, "Develop")?;
-    assert!(develop.disabled);
+    assert_eq!(develop.toggled, Some(false));
+    assert!(!develop.disabled);
 
-    harness.hover_at(develop.rect.center())?;
-    harness.advance(1.5);
-    assert!(shows(&harness, "Develop is the next module to be built."));
+    // With nothing in the catalog there is nothing to develop.
     harness.click(Role::Button, "Develop")?;
     assert_eq!(harness.app().module(), Module::Library);
+    assert!(shows(&harness, "Import photos to develop them."));
     Ok(())
 }
 

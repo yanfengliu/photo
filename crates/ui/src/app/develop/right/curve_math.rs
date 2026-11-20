@@ -134,7 +134,10 @@ impl Parametric {
                 0.0
             };
             let flank = if amount >= 0.0 { hi - peak } else { peak - lo };
-            (Bell { lo, peak, hi }, amount * (1.0 - MIN_SLOPE) * flank / 1.5)
+            (
+                Bell { lo, peak, hi },
+                amount * (1.0 - MIN_SLOPE) * flank / 1.5,
+            )
         };
         Self {
             regions: [

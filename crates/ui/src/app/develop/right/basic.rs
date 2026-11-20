@@ -6,10 +6,11 @@ use egui::{Button, ComboBox, RichText, Ui, vec2};
 use photo_core::develop::{Adj, DevelopSettings, Profile, Treatment, WbPreset, WhiteBalance};
 use photo_core::meta::FileKind;
 
-use super::{Editing, caption, heading, sliders};
+use super::{Editing, caption, edited, heading, sliders};
 use crate::app::Cx;
 use crate::app::actions::Action;
 use crate::app::develop::actions::DevelopAction;
+use crate::app::develop::drafts::Pending;
 use crate::theme::{palette, size};
 use crate::widgets::{AdjSlider, Icon, IconButton, Scale};
 
@@ -80,7 +81,8 @@ fn treatment(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
             (Treatment::Color, "Color"),
             (Treatment::BlackAndWhite, "Black & White"),
         ] {
-            let button = Button::selectable(current == treatment, label).min_size(vec2(0.0, size::ROW));
+            let button =
+                Button::selectable(current == treatment, label).min_size(vec2(0.0, size::ROW));
             if ui.add(button).clicked() && current != treatment {
                 apply(cx, editing, |settings| settings.treatment = treatment);
             }
@@ -104,7 +106,9 @@ fn profile(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
                 })
                 .response
                 .accessible_name("Profile")
-                .on_disabled_hover_text("Profiles render camera raw files; this file is already rendered.");
+                .on_disabled_hover_text(
+                    "Profiles render camera raw files; this file is already rendered.",
+                );
         });
     });
     if chosen != current {
@@ -125,17 +129,23 @@ fn white_balance(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
     let current = editing.settings.white_balance.preset;
     let mut chosen = current;
     ui.horizontal(|ui| {
-        let picker = IconButton::new(Icon::Picker, "White balance picker").selected(cx.ui.develop.picker);
+        let picker =
+            IconButton::new(Icon::Picker, "White balance picker").selected(cx.ui.develop.picker);
         let response = ui.add_enabled(editing.decoded, picker);
         if response.clicked() {
             cx.ui.develop.picker = !cx.ui.develop.picker;
         }
-        ui.allocate_ui(vec2(size::SLIDER_LABEL - size::ICON_BUTTON - 6.0, size::ROW), |ui| {
-            ui.label(RichText::new("WB").color(palette::TEXT));
-        });
+        ui.allocate_ui(
+            vec2(size::SLIDER_LABEL - size::ICON_BUTTON - 6.0, size::ROW),
+            |ui| {
+                ui.label(RichText::new("WB").color(palette::TEXT));
+            },
+        );
+        // The Auto button sits at the right edge, the menu fills between.
+        let auto_width = 40.0;
         ComboBox::from_id_salt("develop-white-balance")
             .selected_text(current.label())
-            .width(ui.available_width() - 4.0)
+            .width(ui.available_width() - auto_width - 2.0 * ui.spacing().item_spacing.x)
             .show_ui(ui, |ui| {
                 for preset in presets(editing.kind) {
                     ui.selectable_value(&mut chosen, preset, preset.label());
@@ -143,6 +153,16 @@ fn white_balance(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
             })
             .response
             .accessible_name("White balance");
+        let auto = ui
+            .add_enabled(
+                editing.decoded,
+                Button::new("Auto").small().min_size(vec2(auto_width, 0.0)),
+            )
+            .accessible_name("Auto White Balance")
+            .on_hover_text("Set the white balance from the photo");
+        if auto.clicked() {
+            cx.act(Action::Develop(DevelopAction::AutoWhiteBalance));
+        }
     });
     if chosen != current {
         choose_white_balance(cx, editing, chosen);
@@ -181,7 +201,11 @@ fn temperature_and_tint(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
     let Some((temp, tint)) = editing.shown_white_balance else {
         for label in ["Temp", "Tint"] {
             row(ui, label, |ui| {
-                ui.label(RichText::new("Reading the camera's balance…").color(palette::TEXT_DIM).small());
+                ui.label(
+                    RichText::new("Reading the camera's balance…")
+                        .color(palette::TEXT_DIM)
+                        .small(),
+                );
             });
         }
         return;
@@ -202,15 +226,13 @@ fn temperature_and_tint(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
         let response = widget.show(ui);
         let one_step = response.changed && response.finished;
         if one_step && shown == spec.clamp(default) && other == other_default {
-            apply(cx, editing, |settings| settings.white_balance = WhiteBalance::default());
+            apply(cx, editing, |settings| {
+                settings.white_balance = WhiteBalance::default()
+            });
             continue;
         }
-        if response.changed {
-            cx.act(Action::Develop(DevelopAction::Adjust(adj, shown)));
-        }
-        if response.finished {
-            cx.act(Action::Develop(DevelopAction::Commit));
-        }
+        let draft = response.changed.then_some(Pending::Adjust(adj, shown));
+        edited(cx, draft, response.finished);
     }
 }
 

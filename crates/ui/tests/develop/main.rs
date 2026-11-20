@@ -41,8 +41,8 @@ pub struct Studio {
     pub options: AppOptions,
 }
 
-impl Studio {
-    pub fn new() -> Self {
+impl Default for Studio {
+    fn default() -> Self {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let options = AppOptions {
             catalog_path: dir.path().join("Test.photocat"),
@@ -51,11 +51,22 @@ impl Studio {
         };
         Self { dir, options }
     }
+}
+
+impl Studio {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// The app on this studio's catalog as it is now.
     pub fn app(&self) -> Harness<PhotoApp> {
+        self.app_at(1.0)
+    }
+
+    /// The app at `pixels_per_point`.
+    pub fn app_at(&self, pixels_per_point: f32) -> Harness<PhotoApp> {
         let engine = self.options.open_engine().expect("the catalog opens");
-        self.harness(engine, 1.0)
+        self.harness(engine, pixels_per_point)
     }
 
     /// The app after `files` were imported in place.
@@ -221,7 +232,10 @@ pub fn open_panel(harness: &mut Harness<PhotoApp>, title: &str) -> TestResult {
         .open_panels()
         .map(str::to_owned)
         .collect();
-    for other in open.iter().filter(|other| *other != title && *other != "Histogram") {
+    for other in open
+        .iter()
+        .filter(|other| *other != title && *other != "Histogram")
+    {
         harness.click(Role::DisclosureTriangle, other)?;
     }
     if !harness.app().right_panels().is_open(title) {

@@ -136,14 +136,20 @@ pub(crate) fn open_copy_settings(cx: &mut Cx<'_>) {
         return;
     }
     let groups = cx.ui.develop.copy_groups;
-    open_develop(cx, DevelopDialog::Groups(GroupsDialog::new(GroupsPurpose::Copy, groups)));
+    open_develop(
+        cx,
+        DevelopDialog::Groups(GroupsDialog::new(GroupsPurpose::Copy, groups)),
+    );
 }
 
 /// Choose which settings of the active photo the other selected photos
 /// take.
 pub(crate) fn open_sync(cx: &mut Cx<'_>) {
     let groups = cx.ui.develop.copy_groups;
-    open_develop(cx, DevelopDialog::Groups(GroupsDialog::new(GroupsPurpose::Sync, groups)));
+    open_develop(
+        cx,
+        DevelopDialog::Groups(GroupsDialog::new(GroupsPurpose::Sync, groups)),
+    );
 }
 
 /// Save settings of the open photo as a preset.
@@ -153,17 +159,26 @@ pub(crate) fn open_new_preset(cx: &mut Cx<'_>) {
         group: USER_GROUP.to_owned(),
     };
     let groups = photo_core::develop::GroupSet::default_copy();
-    open_develop(cx, DevelopDialog::Groups(GroupsDialog::new(purpose, groups)));
+    open_develop(
+        cx,
+        DevelopDialog::Groups(GroupsDialog::new(purpose, groups)),
+    );
 }
 
 /// Give a user preset a new name and group.
 pub(crate) fn open_rename_preset(cx: &mut Cx<'_>, id: PresetId, group: &str, name: &str) {
-    open_develop(cx, DevelopDialog::RenamePreset(PresetDialog::new(id, group, name)));
+    open_develop(
+        cx,
+        DevelopDialog::RenamePreset(PresetDialog::new(id, group, name)),
+    );
 }
 
 /// Ask before deleting a user preset.
 pub(crate) fn open_delete_preset(cx: &mut Cx<'_>, id: PresetId, name: &str) {
-    open_develop(cx, DevelopDialog::Delete(DeleteLookDialog::new(Doomed::Preset(id), name)));
+    open_develop(
+        cx,
+        DevelopDialog::Delete(DeleteLookDialog::new(Doomed::Preset(id), name)),
+    );
 }
 
 /// Cmd+N in Develop: name a snapshot of the open photo.
@@ -173,7 +188,10 @@ pub(crate) fn open_new_snapshot(cx: &mut Cx<'_>) {
         return;
     };
     let existing = cx.ui.develop.lists.snapshots.len();
-    open_develop(cx, DevelopDialog::Snapshot(SnapshotDialog::new(photo, existing)));
+    open_develop(
+        cx,
+        DevelopDialog::Snapshot(SnapshotDialog::new(photo, existing)),
+    );
 }
 
 /// Give a snapshot of the open photo a new name.
@@ -181,12 +199,18 @@ pub(crate) fn open_rename_snapshot(cx: &mut Cx<'_>, id: SnapshotId, name: &str) 
     let Some(photo) = cx.engine.develop().map(|session| session.photo()) else {
         return;
     };
-    open_develop(cx, DevelopDialog::Snapshot(SnapshotDialog::rename(photo, id, name)));
+    open_develop(
+        cx,
+        DevelopDialog::Snapshot(SnapshotDialog::rename(photo, id, name)),
+    );
 }
 
 /// Ask before deleting a snapshot.
 pub(crate) fn open_delete_snapshot(cx: &mut Cx<'_>, id: SnapshotId, name: &str) {
-    open_develop(cx, DevelopDialog::Delete(DeleteLookDialog::new(Doomed::Snapshot(id), name)));
+    open_develop(
+        cx,
+        DevelopDialog::Delete(DeleteLookDialog::new(Doomed::Snapshot(id), name)),
+    );
 }
 
 /// The sets a collection can be put in, with their names, for a parent

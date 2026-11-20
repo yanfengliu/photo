@@ -101,9 +101,20 @@ pub(super) fn picture(
             let middle = painter.clip_rect().center().x;
             let left = painter.with_clip_rect(painter.clip_rect().with_max_x(middle));
             left.rect_filled(photo_rect, 0.0, palette::WELL);
-            frame(&left, &ctx, cx.frames.before.as_mut(), placement, ppp, toggles);
+            frame(
+                &left,
+                &ctx,
+                cx.frames.before.as_mut(),
+                placement,
+                ppp,
+                toggles,
+            );
             let seen = photo_rect.intersect(painter.clip_rect());
-            painter.vline(middle, seen.y_range(), Stroke::new(1.0, palette::TEXT_STRONG));
+            painter.vline(
+                middle,
+                seen.y_range(),
+                Stroke::new(1.0, palette::TEXT_STRONG),
+            );
         }
     }
     shown.current = shown.version.is_some() && shown.version == version;
@@ -189,7 +200,12 @@ pub(super) fn labels(
         ),
         Side::Split => {
             let middle = rect.center().x;
-            caption(painter, pos2(middle - 8.0, top), "Before", Align2::RIGHT_TOP);
+            caption(
+                painter,
+                pos2(middle - 8.0, top),
+                "Before",
+                Align2::RIGHT_TOP,
+            );
             caption(painter, pos2(middle + 8.0, top), "After", Align2::LEFT_TOP);
         }
     }

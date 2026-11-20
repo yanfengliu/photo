@@ -12,13 +12,15 @@
 mod draw;
 pub(crate) mod mapping;
 
-use egui::{Align2, CursorIcon, Rect, Sense, Ui, pos2, vec2};
+use egui::{
+    Align, Align2, CursorIcon, Label, Layout, Rect, RichText, Sense, Ui, UiBuilder, pos2, vec2,
+};
 use photo_core::geom::Point;
 use photo_engine::{DevelopLoad, PhotoSummary};
 
 pub use self::mapping::CanvasZoom;
-pub(crate) use self::mapping::{CanvasState, Placement};
 use self::mapping::to_pixels;
+pub(crate) use self::mapping::{CanvasState, Placement};
 use super::actions::DevelopAction;
 use super::state::BeforeAfter;
 use crate::app::actions::Action;
@@ -51,10 +53,13 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     else {
         cx.ui.develop.seen = None;
         cx.ui.develop.last_placement = None;
+        cx.ui.develop.photo_rect = None;
+        cx.ui.develop.stage = None;
         message(ui, area, "Select a photo in the filmstrip to develop it.");
         return;
     };
     let stage = area.with_min_y(area.top() + INFO);
+    cx.ui.develop.stage = Some(stage);
     let ppp = ui.ctx().pixels_per_point();
     let Some(output) = output_size(cx, &photo) else {
         message(ui, stage, "The photo's size is not known yet.");
@@ -68,7 +73,11 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
 
     // Input over the whole stage, with the placement of the box under the
     // pointer.
-    let response = ui.interact(stage, ui.make_persistent_id("develop-canvas"), Sense::click_and_drag());
+    let response = ui.interact(
+        stage,
+        ui.make_persistent_id("develop-canvas"),
+        Sense::click_and_drag(),
+    );
     let pointer = response
         .hover_pos()
         .or_else(|| response.interact_pointer_pos());
@@ -102,7 +111,9 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     }
     if let Some(at) = picked {
         develop.picker = false;
-        cx.act(Action::Develop(DevelopAction::PickWhiteBalance(Point::new(at.x, at.y))));
+        cx.act(Action::Develop(DevelopAction::PickWhiteBalance(
+            Point::new(at.x, at.y),
+        )));
     }
 
     // What the engine is asked to render: the box of the edit.
@@ -111,13 +122,17 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     let main_placement = place(main, &state);
     let view = main_placement.canvas_view();
     if cx.ui.develop.told.canvas != Some(view)
-        && cx.engine.develop().is_some_and(|session| session.photo() == photo.id)
+        && cx
+            .engine
+            .develop()
+            .is_some_and(|session| session.photo() == photo.id)
     {
         cx.ui.develop.told.canvas = Some(view);
         cx.act(Action::Develop(DevelopAction::SetCanvasView(view)));
     }
     cx.ui.develop.seen = main_placement.seen_fraction();
     cx.ui.develop.last_placement = Some(main_placement);
+    cx.ui.develop.photo_rect = Some(mapping::to_points(main_placement.photo(), ppp));
 
     let mut shown = draw::Shown::default();
     let paired = boxes.len() > 1;
@@ -188,9 +203,27 @@ pub(crate) fn set_zoom(cx: &mut Cx<'_>, zoom: CanvasZoom) {
     }
 }
 
+/// What the load indicator says while the photo is shown as `load`, and
+/// in which colour; nothing once the rendered frame is up.
+pub(crate) fn load_note(load: Option<&DevelopLoad>, read_only: bool) -> (String, egui::Color32) {
+    match load {
+        None | Some(DevelopLoad::Nothing) => ("Loading…".to_owned(), palette::TEXT_DIM),
+        Some(DevelopLoad::EmbeddedPreview) => (
+            "Camera preview: the raw file is being read".to_owned(),
+            palette::WARNING,
+        ),
+        Some(DevelopLoad::Decoded) => ("Rendering…".to_owned(), palette::TEXT_DIM),
+        Some(DevelopLoad::Failed(reason)) => {
+            (format!("Could not read the file: {reason}"), palette::ERROR)
+        }
+        Some(DevelopLoad::Rendered) if read_only => ("Read only".to_owned(), palette::WARNING),
+        Some(DevelopLoad::Rendered) => (String::new(), palette::TEXT_DIM),
+    }
+}
+
 /// The line above the photo: the file name and its readings at the left;
 /// at the right, what is shown while the photo loads, or why it cannot be.
-fn info_line(ui: &Ui, cx: &mut Cx<'_>, photo: &PhotoSummary, band: Rect) {
+fn info_line(ui: &mut Ui, cx: &mut Cx<'_>, photo: &PhotoSummary, band: Rect) {
     let mut parts = vec![text::photo_name(photo)];
     if let Some(time) = &photo.capture_time {
         parts.push(text::date_time(time));
@@ -200,40 +233,38 @@ fn info_line(ui: &Ui, cx: &mut Cx<'_>, photo: &PhotoSummary, band: Rect) {
         parts.extend(text::exposure(&record.metadata));
         parts.extend(record.metadata.iso.map(|iso| format!("ISO {iso}")));
     }
-    let session = cx.engine.develop().filter(|session| session.photo() == photo.id);
-    let (note, color) = match session.map(|session| (session.load_state(), session.read_only_reason())) {
-        None | Some((DevelopLoad::Nothing, _)) => ("Loading…".to_owned(), palette::TEXT_DIM),
-        Some((DevelopLoad::EmbeddedPreview, _)) => (
-            "Camera preview: the raw file is being read".to_owned(),
-            palette::WARNING,
-        ),
-        Some((DevelopLoad::Decoded, _)) => ("Rendering…".to_owned(), palette::TEXT_DIM),
-        Some((DevelopLoad::Failed(reason), _)) => {
-            (format!("Could not read the file: {reason}"), palette::ERROR)
-        }
-        Some((DevelopLoad::Rendered, Some(_))) => ("Read only".to_owned(), palette::WARNING),
-        Some((DevelopLoad::Rendered, None)) => (String::new(), palette::TEXT_DIM),
-    };
-    let painter = ui.painter_at(band);
-    let note_width = if note.is_empty() {
-        0.0
-    } else {
-        let galley = painter.layout_no_wrap(note, theme::small_font(), color);
-        let width = galley.size().x;
-        let at = Align2::RIGHT_CENTER.anchor_size(band.right_center() - vec2(12.0, 0.0), galley.size());
-        painter.galley(at.min, galley, color);
-        width + 24.0
-    };
-    let room = band.width() - note_width - 24.0;
-    let galley = text::fitted(
-        &painter,
-        &parts.join("    "),
-        theme::small_font(),
-        palette::TEXT,
-        room,
+    let session = cx
+        .engine
+        .develop()
+        .filter(|session| session.photo() == photo.id);
+    let (note, color) = load_note(
+        session.map(|session| session.load_state()),
+        session.is_some_and(|session| session.read_only_reason().is_some()),
     );
-    let at = Align2::LEFT_CENTER.anchor_size(band.left_center() + vec2(12.0, 0.0), galley.size());
-    painter.galley(at.min, galley, palette::TEXT);
+    let inner = band.shrink2(vec2(12.0, 0.0));
+    let mut right = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    if !note.is_empty() {
+        right.label(RichText::new(note).color(color).small());
+    }
+    let taken = right.min_rect().width();
+    let rest = inner.with_max_x(inner.right() - taken - 24.0);
+    let mut left = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rest)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    left.add(
+        Label::new(
+            RichText::new(parts.join("    "))
+                .color(palette::TEXT)
+                .small(),
+        )
+        .truncate(),
+    );
 }
 
 /// A line of text in the middle of `area`.

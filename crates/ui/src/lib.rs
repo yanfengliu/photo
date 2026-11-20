@@ -22,7 +22,7 @@ pub mod widgets;
 use std::path::PathBuf;
 
 pub use app::{
-    BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Layout, Module, PhotoApp, View, Zoom,
+    BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Layout, Lights, Module, PhotoApp, View, Zoom,
 };
 use photo_engine::{Engine, EngineConfig, EngineError};
 

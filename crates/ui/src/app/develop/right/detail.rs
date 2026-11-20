@@ -48,7 +48,13 @@ pub(super) fn lens(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
     slider(ui, cx, editing, Adj::LensDistortion, Some("Lens"));
     heading(ui, "Vignetting");
     slider(ui, cx, editing, Adj::LensVignetting, Some("Lens"));
-    slider(ui, cx, editing, Adj::LensVignettingMidpoint, Some("Lens Vignetting"));
+    slider(
+        ui,
+        cx,
+        editing,
+        Adj::LensVignettingMidpoint,
+        Some("Lens Vignetting"),
+    );
 }
 
 /// The Transform panel.
@@ -99,9 +105,20 @@ pub(super) fn effects(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
 /// The Calibration panel.
 pub(super) fn calibration(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
     heading(ui, "Shadows");
-    sliders_in(ui, cx, editing, &[Adj::CalibrationShadowsTint], WIDE_LABEL);
+    sliders_in(
+        ui,
+        cx,
+        editing,
+        &[Adj::CalibrationShadowsTint],
+        None,
+        WIDE_LABEL,
+    );
     for (primary, hue, saturation) in [
-        ("Red Primary", Adj::CalibrationRedHue, Adj::CalibrationRedSaturation),
+        (
+            "Red Primary",
+            Adj::CalibrationRedHue,
+            Adj::CalibrationRedSaturation,
+        ),
         (
             "Green Primary",
             Adj::CalibrationGreenHue,
@@ -114,6 +131,6 @@ pub(super) fn calibration(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
         ),
     ] {
         heading(ui, primary);
-        sliders_in(ui, cx, editing, &[hue, saturation], WIDE_LABEL);
+        sliders_in(ui, cx, editing, &[hue, saturation], None, WIDE_LABEL);
     }
 }

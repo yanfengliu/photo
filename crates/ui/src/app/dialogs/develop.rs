@@ -82,8 +82,10 @@ impl GroupsDialog {
                     ui.label(RichText::new("Settings to include").color(palette::TEXT_DIM));
                 } else if let GroupsPurpose::Sync = self.purpose {
                     ui.label(
-                        RichText::new("Give the other selected photos these settings of the active one.")
-                            .color(palette::TEXT_DIM),
+                        RichText::new(
+                            "Give the other selected photos these settings of the active one.",
+                        )
+                        .color(palette::TEXT_DIM),
                     );
                 }
                 ui.add_space(space::SM);
@@ -164,7 +166,10 @@ fn checklist(ui: &mut Ui, groups: &mut GroupSet) {
         for (index, group) in SettingsGroup::ALL.into_iter().enumerate() {
             let column = &mut columns[usize::from(index >= half)];
             let mut ticked = groups.contains(group);
-            if column.add(Checkbox::new(&mut ticked, group.label())).changed() {
+            if column
+                .add(Checkbox::new(&mut ticked, group.label()))
+                .changed()
+            {
                 groups.set(group, ticked);
             }
         }
@@ -267,7 +272,9 @@ impl PresetDialog {
         let response = Dialog::new("Rename Preset")
             .confirm_label("Rename")
             .can_confirm(!self.name.trim().is_empty())
-            .show(ctx, |ui| preset_fields(ui, &mut self.name, &mut self.group, focus));
+            .show(ctx, |ui| {
+                preset_fields(ui, &mut self.name, &mut self.group, focus)
+            });
         match response.outcome {
             DialogOutcome::Open => true,
             DialogOutcome::Cancelled => false,

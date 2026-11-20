@@ -194,7 +194,7 @@ impl Placement {
     }
 
     /// The output point under a screen position.
-    pub(crate) fn to_output(&self, screen: Pos2) -> Pos2 {
+    pub(crate) fn to_output(self, screen: Pos2) -> Pos2 {
         ((screen - self.origin) / self.scale).to_pos2()
     }
 
@@ -316,7 +316,11 @@ mod tests {
     #[test]
     fn one_to_one_puts_whole_output_pixels_on_whole_screen_pixels() {
         let center = vec2(0.3137, 0.7213);
-        for zoom in [CanvasZoom::OneToOne, CanvasZoom::TwoToOne, CanvasZoom::FourToOne] {
+        for zoom in [
+            CanvasZoom::OneToOne,
+            CanvasZoom::TwoToOne,
+            CanvasZoom::FourToOne,
+        ] {
             let placement = Placement::new(zoom, center, OUTPUT, canvas());
             assert_eq!(placement.origin, placement.origin.round());
             let CanvasView::Region { roi, scale } = placement.canvas_view() else {
@@ -352,7 +356,11 @@ mod tests {
         let CanvasView::Region { roi, .. } = moved.canvas_view() else {
             panic!("a region");
         };
-        assert_eq!((roi.width(), roi.height()), (300.0, 200.0), "only the photo");
+        assert_eq!(
+            (roi.width(), roi.height()),
+            (300.0, 200.0),
+            "only the photo"
+        );
     }
 
     #[test]
@@ -373,7 +381,11 @@ mod tests {
         state.set(CanvasZoom::TwoToOne);
         let deep = Placement::new(state.zoom, state.center, OUTPUT, canvas());
         state.toggle_at(&deep, None);
-        assert_eq!(state.zoom, CanvasZoom::Fill, "back to the zoom it came from");
+        assert_eq!(
+            state.zoom,
+            CanvasZoom::Fill,
+            "back to the zoom it came from"
+        );
     }
 
     #[test]
@@ -388,7 +400,10 @@ mod tests {
     fn points_and_pixels_convert_both_ways() {
         let rect = Rect::from_min_max(pos2(10.25, 20.0), pos2(110.0, 70.5));
         let pixels = to_pixels(rect, 2.0);
-        assert_eq!(pixels, Rect::from_min_max(pos2(21.0, 40.0), pos2(220.0, 141.0)));
+        assert_eq!(
+            pixels,
+            Rect::from_min_max(pos2(21.0, 40.0), pos2(220.0, 141.0))
+        );
         assert_eq!(to_points(pixels, 2.0).min, pos2(10.5, 20.0));
     }
 }

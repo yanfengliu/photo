@@ -6,13 +6,22 @@
 use egui::{Align, Button, Layout, RichText, Ui, vec2};
 use photo_core::develop::{Adj, ColorBand, GradeWheel, Treatment};
 
-use super::{Editing, heading, slider, sliders};
+use super::{Editing, edited, heading, slider, sliders};
 use crate::app::Cx;
-use crate::app::actions::Action;
-use crate::app::develop::actions::DevelopAction;
+use crate::app::develop::drafts::Pending;
 use crate::app::develop::state::MixerView;
 use crate::theme::{palette, space};
 use crate::widgets::ColorWheel;
+
+/// A family of sliders, one per colour band.
+type Family = fn(ColorBand) -> Adj;
+
+/// The mixer's families: the view that shows each, and its name.
+const FAMILIES: [(MixerView, Family, &str); 3] = [
+    (MixerView::Hue, Adj::MixHue, "Hue"),
+    (MixerView::Saturation, Adj::MixSaturation, "Saturation"),
+    (MixerView::Luminance, Adj::MixLuminance, "Luminance"),
+];
 
 /// The mixer's views: what each button shows and its accessible name.
 const VIEWS: [(MixerView, &str, &str); 4] = [
@@ -48,13 +57,8 @@ pub(super) fn mixer(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
         }
     });
     ui.add_space(space::SM);
-    let families: [(MixerView, fn(ColorBand) -> Adj, &str); 3] = [
-        (MixerView::Hue, Adj::MixHue, "Hue"),
-        (MixerView::Saturation, Adj::MixSaturation, "Saturation"),
-        (MixerView::Luminance, Adj::MixLuminance, "Luminance"),
-    ];
     let shown = cx.ui.develop.mixer;
-    for (view, family, name) in families {
+    for (view, family, name) in FAMILIES {
         if shown == MixerView::All {
             heading(ui, name);
         }
@@ -65,13 +69,7 @@ pub(super) fn mixer(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
 }
 
 /// One slider per band of `family`, named after `prefix` and the band.
-fn band_sliders(
-    ui: &mut Ui,
-    cx: &mut Cx<'_>,
-    editing: &Editing,
-    family: fn(ColorBand) -> Adj,
-    prefix: &str,
-) {
+fn band_sliders(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing, family: Family, prefix: &str) {
     for band in ColorBand::ALL {
         slider(ui, cx, editing, family(band), Some(prefix));
     }
@@ -91,11 +89,20 @@ pub(super) fn grading(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
             let diameter = (column.x - 12.0).clamp(56.0, 96.0);
             for (name, wheel, luminance) in [
                 ("Shadows", &mut grading.shadows, Adj::GradeShadowsLuminance),
-                ("Midtones", &mut grading.midtones, Adj::GradeMidtonesLuminance),
-                ("Highlights", &mut grading.highlights, Adj::GradeHighlightsLuminance),
+                (
+                    "Midtones",
+                    &mut grading.midtones,
+                    Adj::GradeMidtonesLuminance,
+                ),
+                (
+                    "Highlights",
+                    &mut grading.highlights,
+                    Adj::GradeHighlightsLuminance,
+                ),
             ] {
                 ui.allocate_ui_with_layout(column, Layout::top_down(Align::Min), |ui| {
-                    let (now_changed, now_finished) = wheel_ui(ui, name, wheel, luminance, diameter);
+                    let (now_changed, now_finished) =
+                        wheel_ui(ui, name, wheel, luminance, diameter);
                     changed |= now_changed;
                     finished |= now_finished;
                 });
@@ -118,14 +125,16 @@ pub(super) fn grading(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
             });
         });
     }
-    if changed {
-        cx.act(Action::Develop(DevelopAction::Edit(Box::new(settings))));
-    }
-    if finished {
-        cx.act(Action::Develop(DevelopAction::Commit));
-    }
+    let draft = changed.then(|| Pending::Settings(Box::new(settings)));
+    edited(cx, draft, finished);
     ui.add_space(space::SM);
-    sliders(ui, cx, editing, &[Adj::GradeBlending, Adj::GradeBalance], None);
+    sliders(
+        ui,
+        cx,
+        editing,
+        &[Adj::GradeBlending, Adj::GradeBalance],
+        None,
+    );
 }
 
 /// One wheel. Returns whether it changed and whether an edit finished.

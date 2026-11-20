@@ -97,7 +97,11 @@ impl Uploaded {
 
     /// The clipping overlay for `toggles`, made on first use; `None` when
     /// both are off.
-    pub(crate) fn overlay(&mut self, ctx: &egui::Context, toggles: ClippingToggles) -> Option<TextureId> {
+    pub(crate) fn overlay(
+        &mut self,
+        ctx: &egui::Context,
+        toggles: ClippingToggles,
+    ) -> Option<TextureId> {
         if !toggles.shadows && !toggles.highlights {
             return None;
         }
@@ -140,7 +144,10 @@ impl Frames {
             self.photo = Some(session.photo());
         }
         if let Some(frame) = session.frame()
-            && !self.main.as_ref().is_some_and(|main| main.is(frame.image()))
+            && !self
+                .main
+                .as_ref()
+                .is_some_and(|main| main.is(frame.image()))
         {
             self.main = Uploaded::of_frame(ctx, "develop-frame", frame);
             if covers_whole(frame, session.output_size()) {
@@ -153,7 +160,12 @@ impl Frames {
             self.whole = Uploaded::of_image(ctx, "develop-embedded", embedded);
         }
         match session.before_frame() {
-            Some(frame) if !self.before.as_ref().is_some_and(|before| before.is(frame.image())) => {
+            Some(frame)
+                if !self
+                    .before
+                    .as_ref()
+                    .is_some_and(|before| before.is(frame.image())) =>
+            {
                 self.before = Uploaded::of_frame(ctx, "develop-before", frame);
             }
             Some(_) => {}
@@ -173,7 +185,9 @@ impl Frames {
         }
     }
 
-    fn forget(&mut self) {
+    /// Let every texture go (the module is left), keeping only the record
+    /// of what was shown.
+    pub(crate) fn forget(&mut self) {
         let shows = self.shows;
         *self = Self::default();
         self.shows = shows;
@@ -186,10 +200,7 @@ fn covers_whole(frame: &DevelopFrame, output: Option<(u32, u32)>) -> bool {
         return false;
     };
     let roi = frame.view().roi();
-    roi.x0 <= 0.5
-        && roi.y0 <= 0.5
-        && roi.x1 >= width as f32 - 0.5
-        && roi.y1 >= height as f32 - 0.5
+    roi.x0 <= 0.5 && roi.y0 <= 0.5 && roi.x1 >= width as f32 - 0.5 && roi.y1 >= height as f32 - 0.5
 }
 
 /// The pixels as egui takes them; `None` when they do not match their size.
@@ -245,7 +256,10 @@ mod tests {
 
     #[test]
     fn a_channel_at_either_end_is_marked_and_the_rest_shows_through() {
-        assert_eq!(clipping_color([255, 40, 30], BOTH), palette::CLIP_HIGHLIGHTS);
+        assert_eq!(
+            clipping_color([255, 40, 30], BOTH),
+            palette::CLIP_HIGHLIGHTS
+        );
         assert_eq!(clipping_color([0, 0, 0], BOTH), palette::CLIP_SHADOWS);
         assert_eq!(clipping_color([12, 0, 200], BOTH), palette::CLIP_SHADOWS);
         assert_eq!(clipping_color([128, 128, 128], BOTH), Color32::TRANSPARENT);

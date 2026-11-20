@@ -57,7 +57,8 @@ fn before_after(ui: &mut Ui, cx: &mut Cx<'_>) {
     if ui.add(edit).clicked() {
         cx.ui.develop.before_after = BeforeAfter::Off;
     }
-    let before = Button::selectable(mode == BeforeAfter::Before, "Before").min_size(vec2(0.0, size::ROW));
+    let before =
+        Button::selectable(mode == BeforeAfter::Before, "Before").min_size(vec2(0.0, size::ROW));
     if ui
         .add(before)
         .on_hover_text("Show the photo as it was imported (\\)")
@@ -66,10 +67,21 @@ fn before_after(ui: &mut Ui, cx: &mut Cx<'_>) {
         cx.ui.develop.toggle_before_after(BeforeAfter::Before);
     }
     for (choice, icon, name) in [
-        (BeforeAfter::SideBySide, Icon::Compare, "Before and after side by side"),
-        (BeforeAfter::Split, Icon::BeforeAfter, "Before and after split"),
+        (
+            BeforeAfter::SideBySide,
+            Icon::Compare,
+            "Before and after side by side",
+        ),
+        (
+            BeforeAfter::Split,
+            Icon::BeforeAfter,
+            "Before and after split",
+        ),
     ] {
-        if ui.add(IconButton::new(icon, name).selected(mode == choice)).clicked() {
+        if ui
+            .add(IconButton::new(icon, name).selected(mode == choice))
+            .clicked()
+        {
             cx.ui.develop.toggle_before_after(choice);
         }
     }

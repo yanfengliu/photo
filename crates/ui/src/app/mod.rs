@@ -24,7 +24,7 @@ use std::time::Duration;
 use photo_engine::Engine;
 
 use self::actions::Action;
-pub use self::develop::{BeforeAfter, CanvasImage, CanvasShows, CanvasZoom};
+pub use self::develop::{BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Lights};
 use self::develop::{DevelopState, Frames};
 use self::state::UiState;
 pub use self::state::{Layout, Module, View, Zoom};
@@ -157,9 +157,32 @@ impl PhotoApp {
         self.ui.develop.picker
     }
 
+    /// How much of the window around the photo is darkened in Develop.
+    pub fn lights(&self) -> Lights {
+        self.ui.develop.lights
+    }
+
     /// What the Develop canvas showed in the last frame drawn.
     pub fn canvas_shows(&self) -> CanvasShows {
         self.frames.shows
+    }
+
+    /// Where the whole photo is on the Develop canvas (in points, part of
+    /// it maybe out of view), as of the last frame drawn: a point of the
+    /// photo at fractions `(u, v)` of its size is at
+    /// `rect.min + (u * width, v * height)`.
+    pub fn canvas_photo_rect(&self) -> Option<egui::Rect> {
+        self.ui.develop.photo_rect
+    }
+
+    /// The develop version and origin of the preview the screen holds for
+    /// `photo` at `size` (a grid or filmstrip cell, the loupe), if any.
+    pub fn preview_shown(
+        &self,
+        photo: photo_core::meta::PhotoId,
+        size: photo_engine::PreviewSize,
+    ) -> Option<(u64, photo_engine::PreviewOrigin)> {
+        self.textures.shown(photo, size)
     }
 
     /// Which edges of the window and the toolbar are shown.

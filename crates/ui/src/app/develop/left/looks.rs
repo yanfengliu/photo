@@ -48,8 +48,12 @@ fn add_button(ui: &mut Ui, name: &str, enabled: bool) -> bool {
     .inner
 }
 
-/// The Presets panel.
-pub(super) fn presets(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
+/// The Presets panel. Returns the preset under the pointer.
+pub(super) fn presets(
+    ui: &mut Ui,
+    cx: &mut Cx<'_>,
+    editing: Option<&Editing>,
+) -> Option<PresetKey> {
     let editable = editing.is_some_and(Editing::editable);
     if add_button(ui, "New preset", editable) {
         dialogs::open_new_preset(cx);
@@ -80,15 +84,24 @@ pub(super) fn presets(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
         if !open {
             continue;
         }
-        for (preset, name) in presets.iter().zip(&names).filter(|(preset, _)| preset.group == group) {
+        for (preset, name) in presets
+            .iter()
+            .zip(&names)
+            .filter(|(preset, _)| preset.group == group)
+        {
             let row = ui
-                .add_enabled_ui(editable, |ui| ListRow::new(name, &preset.name).depth(1).show(ui))
+                .add_enabled_ui(editable, |ui| {
+                    ListRow::new(name, &preset.name).depth(1).show(ui)
+                })
                 .inner;
             if row.response.hovered() {
                 hovered = Some(preset.key);
             }
             if row.clicked {
-                cx.act(Action::Develop(DevelopAction::ApplyPreset(preset.key, Target::Active)));
+                cx.act(Action::Develop(DevelopAction::ApplyPreset(
+                    preset.key,
+                    Target::Active,
+                )));
             }
             if let PresetKey::User(id) = preset.key {
                 egui::Popup::context_menu(&row.response).show(|ui| {
@@ -102,7 +115,6 @@ pub(super) fn presets(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
             }
         }
     }
-    cx.ui.develop.hovered_preset = hovered;
     if presets.iter().all(|preset| preset.group == BUILT_IN_GROUP) {
         ui.add_space(space::XS);
         ui.label(
@@ -111,6 +123,7 @@ pub(super) fn presets(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
                 .small(),
         );
     }
+    hovered
 }
 
 /// The Snapshots panel.
@@ -144,7 +157,10 @@ pub(super) fn snapshots(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>)
             .add_enabled_ui(editable, |ui| ListRow::new(&name, &snapshot.name).show(ui))
             .inner;
         if row.clicked {
-            cx.act(Action::Develop(DevelopAction::ApplySnapshot(editing.photo, snapshot.id)));
+            cx.act(Action::Develop(DevelopAction::ApplySnapshot(
+                editing.photo,
+                snapshot.id,
+            )));
         }
         egui::Popup::context_menu(&row.response).show(|ui| {
             if ui.button("Show as Before").clicked() {
@@ -195,7 +211,11 @@ mod tests {
         ]);
         assert_eq!(
             names,
-            ["Preset Vivid Colour", "Preset Warm (Mine)", "Preset Warm (Travel)"]
+            [
+                "Preset Vivid Colour",
+                "Preset Warm (Mine)",
+                "Preset Warm (Travel)"
+            ]
         );
     }
 }

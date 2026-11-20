@@ -66,9 +66,16 @@ pub(crate) fn shortcut(cx: &mut Cx<'_>, ctx: &egui::Context, shortcut: Shortcut)
         Shortcut::Split => cx.ui.develop.toggle_before_after(BeforeAfter::Split),
         Shortcut::Clipping => cx.ui.develop.toggle_clipping(),
         Shortcut::WhiteBalancePicker => toggle_picker(cx),
+        Shortcut::FullScreen => {
+            let full = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+        }
+        Shortcut::LightsOut => cx.ui.develop.lights = cx.ui.develop.lights.next(),
         Shortcut::CopySettings => dialogs::open_copy_settings(cx),
         Shortcut::PasteSettings => {
-            cx.act(Action::Develop(DevelopAction::PasteSettings(Target::Selected)));
+            cx.act(Action::Develop(DevelopAction::PasteSettings(
+                Target::Selected,
+            )));
         }
         Shortcut::ResetSettings => {
             let reset = if in_develop { Target::Active } else { target };

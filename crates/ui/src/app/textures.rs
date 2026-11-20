@@ -1,9 +1,11 @@
 //! Textures of the previews on screen.
 //!
-//! A texture is valid for exactly one photo, preview size and develop
-//! version. The cache keeps one per photo and size: when the engine has
-//! pixels for a newer version, they replace the old texture, and until they
-//! do the old one is still shown, so an edit never blanks a cell.
+//! A texture is valid for exactly one photo, preview size, develop version
+//! and origin. The cache keeps one per photo and size: when the engine has
+//! other pixels (a newer version, or the render of a RAW photo after the
+//! camera preview it showed while rendering), they replace the old texture,
+//! and until they do the old one is still shown, so an edit never blanks a
+//! cell.
 //!
 //! Uploads are rationed: at most [`UPLOAD_BUDGET`] bytes of pixels a frame
 //! (but always at least one preview), so a scroll that brings fifty new
@@ -17,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{ColorImage, TextureHandle, TextureId, TextureOptions, Vec2, vec2};
 use photo_core::meta::PhotoId;
-use photo_engine::{Engine, Preview, PreviewSize, PreviewState};
+use photo_engine::{Engine, Preview, PreviewOrigin, PreviewSize, PreviewState};
 
 /// Bytes of pixels uploaded per frame, beyond the first preview.
 const UPLOAD_BUDGET: usize = 6 << 20;
@@ -41,6 +43,9 @@ pub(crate) struct Shown {
 
 struct Slot {
     version: u64,
+    /// Where the pixels came from: a RAW photo's camera preview is shown
+    /// under the same version while its render is made.
+    origin: PreviewOrigin,
     handle: TextureHandle,
     pixels: Vec2,
     bytes: usize,
@@ -48,6 +53,11 @@ struct Slot {
 }
 
 impl Slot {
+    /// Whether the slot shows exactly `preview`'s pixels.
+    fn holds(&self, preview: &Preview) -> bool {
+        preview.version() == self.version && preview.origin() == self.origin
+    }
+
     fn shown(&self) -> Shown {
         Shown {
             id: self.handle.id(),
@@ -168,7 +178,7 @@ impl Textures {
         let ready = state.ready();
         if let Some(slot) = shelf.slots.get_mut(&photo) {
             slot.used = frame;
-            if ready.is_none_or(|preview| preview.version() == slot.version) {
+            if ready.is_none_or(|preview| slot.holds(preview)) {
                 return Some(slot.shown());
             }
         }
@@ -183,6 +193,19 @@ impl Textures {
         let shown = slot.shown();
         shelf.insert(photo, slot);
         Some(shown)
+    }
+
+    /// The develop version and origin of the texture shown for `photo` at
+    /// `size`, if one was uploaded.
+    pub(crate) fn shown(&self, photo: PhotoId, size: PreviewSize) -> Option<(u64, PreviewOrigin)> {
+        let shelf = match size {
+            PreviewSize::Thumbnail => &self.thumbnails,
+            PreviewSize::Standard => &self.standard,
+        };
+        shelf
+            .slots
+            .get(&photo)
+            .map(|slot| (slot.version, slot.origin))
     }
 
     /// The thumbnail of a file offered for import.
@@ -240,6 +263,7 @@ fn upload(ctx: &egui::Context, name: &str, preview: &Preview, frame: u64) -> Opt
     let handle = ctx.load_texture(name, color, TextureOptions::LINEAR);
     Some(Slot {
         version: preview.version(),
+        origin: preview.origin(),
         handle,
         pixels: vec2(width as f32, height as f32),
         bytes: expected,
@@ -256,6 +280,7 @@ mod tests {
         let image = ColorImage::filled([1, 1], egui::Color32::GRAY);
         Slot {
             version: 1,
+            origin: PreviewOrigin::Rendered,
             handle: ctx.load_texture("test", image, TextureOptions::LINEAR),
             pixels: vec2(1.0, 1.0),
             bytes,

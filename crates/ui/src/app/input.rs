@@ -34,7 +34,10 @@ pub(crate) enum Shortcut {
     Flag(Flag),
     Label(ColorLabel),
     QuickCollection,
-    Arrow { arrow: Arrow, extend: bool },
+    Arrow {
+        arrow: Arrow,
+        extend: bool,
+    },
     First,
     Last,
     Undo,
@@ -62,6 +65,10 @@ pub(crate) enum Shortcut {
     Clipping,
     /// W: the white-balance picker.
     WhiteBalancePicker,
+    /// F: the window full screen, or back.
+    FullScreen,
+    /// L: everything but the photo dimmed, then black, then lit again.
+    LightsOut,
     CopySettings,
     PasteSettings,
     ResetSettings,
@@ -129,6 +136,8 @@ pub(crate) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
         (false, true, Key::Y) => Shortcut::Split,
         (false, false, Key::J) => Shortcut::Clipping,
         (false, false, Key::W) => Shortcut::WhiteBalancePicker,
+        (false, false, Key::F) => Shortcut::FullScreen,
+        (false, false, Key::L) => Shortcut::LightsOut,
         (true, false, Key::Z) => Shortcut::Undo,
         (true, true, Key::Z) => Shortcut::Redo,
         (true, false, Key::A) => Shortcut::SelectAll,
@@ -157,6 +166,7 @@ fn applies(shortcut: Shortcut, module: Module) -> bool {
             | Shortcut::Split
             | Shortcut::Clipping
             | Shortcut::WhiteBalancePicker
+            | Shortcut::LightsOut
     );
     module == Module::Develop || !develop_only
 }
@@ -185,7 +195,8 @@ pub(crate) fn take_shortcuts(ctx: &egui::Context, module: Module) -> Vec<Shortcu
             let Some(shortcut) = shortcut(*key, *modifiers) else {
                 return true;
             };
-            if !applies(shortcut, module) || (focused && matches!(shortcut, Shortcut::Arrow { .. })) {
+            if !applies(shortcut, module) || (focused && matches!(shortcut, Shortcut::Arrow { .. }))
+            {
                 return true;
             }
             if *pressed && (!*repeat || shortcut.repeats()) {
@@ -266,10 +277,29 @@ mod tests {
         assert_eq!(shortcut(Key::Y, Modifiers::SHIFT), Some(Shortcut::Split));
         assert_eq!(plain(Key::J), Some(Shortcut::Clipping));
         assert_eq!(plain(Key::W), Some(Shortcut::WhiteBalancePicker));
-        assert_eq!(shortcut(Key::C, SHIFT_COMMAND), Some(Shortcut::CopySettings));
-        assert_eq!(shortcut(Key::V, SHIFT_COMMAND), Some(Shortcut::PasteSettings));
-        assert_eq!(shortcut(Key::R, SHIFT_COMMAND), Some(Shortcut::ResetSettings));
-        assert_eq!(shortcut(Key::C, Modifiers::COMMAND), None, "the clipboard's own");
+        assert_eq!(plain(Key::F), Some(Shortcut::FullScreen));
+        assert_eq!(plain(Key::L), Some(Shortcut::LightsOut));
+        assert_eq!(
+            shortcut(Key::F, Modifiers::COMMAND),
+            Some(Shortcut::FindText)
+        );
+        assert_eq!(
+            shortcut(Key::C, SHIFT_COMMAND),
+            Some(Shortcut::CopySettings)
+        );
+        assert_eq!(
+            shortcut(Key::V, SHIFT_COMMAND),
+            Some(Shortcut::PasteSettings)
+        );
+        assert_eq!(
+            shortcut(Key::R, SHIFT_COMMAND),
+            Some(Shortcut::ResetSettings)
+        );
+        assert_eq!(
+            shortcut(Key::C, Modifiers::COMMAND),
+            None,
+            "the clipboard's own"
+        );
         assert_eq!(plain(Key::R), None, "the crop tool comes with part 2");
         assert!(applies(Shortcut::Clipping, Module::Develop));
         assert!(!applies(Shortcut::Clipping, Module::Library));

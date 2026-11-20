@@ -7,10 +7,9 @@ use egui::{Button, Color32, CornerRadius, Pos2, Rect, RichText, Stroke, Ui, lerp
 use photo_core::develop::{Adj, CurvePoint, PointCurve};
 
 use super::curve_math::{Parametric, point_curve};
-use super::{Editing, WIDE_LABEL, heading, sliders, sliders_in};
+use super::{Editing, WIDE_LABEL, edited, heading, sliders_in};
 use crate::app::Cx;
-use crate::app::actions::Action;
-use crate::app::develop::actions::DevelopAction;
+use crate::app::develop::drafts::Pending;
 use crate::app::develop::state::CurveChannel;
 use crate::theme::{self, palette, radius, space};
 use crate::widgets::histogram::{BINS, area_mesh, grid_color};
@@ -96,9 +95,9 @@ fn parametric(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing, backdrop: Option<
     }
     ui.add_space(space::SM);
     heading(ui, "Regions");
-    sliders(ui, cx, editing, &REGIONS, Some("Curve"));
+    sliders_in(ui, cx, editing, &REGIONS, Some("Curve"), WIDE_LABEL);
     heading(ui, "Splits");
-    sliders_in(ui, cx, editing, &SPLITS, WIDE_LABEL);
+    sliders_in(ui, cx, editing, &SPLITS, None, WIDE_LABEL);
 }
 
 fn point(
@@ -147,17 +146,17 @@ fn point(
         editor = editor.backdrop(counts);
     }
     let response = editor.show(ui);
-    if response.changed {
-        cx.act(Action::Develop(DevelopAction::Edit(Box::new(settings))));
-    }
-    if response.finished {
-        cx.act(Action::Develop(DevelopAction::Commit));
-    }
+    let draft = response
+        .changed
+        .then(|| Pending::Settings(Box::new(settings)));
+    edited(cx, draft, response.finished);
     ui.add_space(space::XS);
     ui.label(
-        RichText::new("Press the curve to add a point and drag it; double-click a point to remove it.")
-            .color(palette::TEXT_DIM)
-            .small(),
+        RichText::new(
+            "Press the curve to add a point and drag it; double-click a point to remove it.",
+        )
+        .color(palette::TEXT_DIM)
+        .small(),
     );
 }
 

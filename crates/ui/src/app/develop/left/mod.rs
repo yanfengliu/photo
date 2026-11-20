@@ -6,11 +6,11 @@
 mod history;
 mod looks;
 
-use egui::{Button, Color32, CornerRadius, Margin, Rect, RichText, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Color32, CornerRadius, Margin, Rect, RichText, Stroke, StrokeKind, Ui, pos2, vec2};
 use photo_engine::{PreviewSize, Target};
 
 use super::actions::DevelopAction;
-use super::right::Editing;
+use super::right::{Editing, wide_button};
 use crate::app::actions::Action;
 use crate::app::{Cx, dialogs, text};
 use crate::theme::{self, palette, radius, space};
@@ -23,12 +23,12 @@ const NAVIGATOR: f32 = 168.0;
 
 /// Show the left column.
 pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
+    let pending = cx.ui.develop.pending.as_ref();
     let editing = cx
         .engine
         .develop()
         .filter(|session| Some(session.photo()) == cx.engine.active_photo())
-        .map(Editing::of);
-    cx.ui.develop.hovered_preset = None;
+        .map(|session| Editing::of(session, pending));
     egui::Panel::left("develop-left-column")
         .resizable(true)
         .size_range(220.0..=420.0)
@@ -37,14 +37,25 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         .show(ui, |ui| {
             bottom(ui, cx, editing.as_ref());
             let mut panels = std::mem::take(&mut cx.ui.develop.left_panels);
+            // The Navigator shows the preset that was under the pointer in
+            // the frame before: the Presets panel is drawn after it.
+            let mut hovered = None;
             panel_column(ui, "develop-left-panels", |ui| {
                 Panel::new("Navigator").show(ui, &mut panels, |ui| navigator(ui, cx));
-                Panel::new("Presets").show(ui, &mut panels, |ui| looks::presets(ui, cx, editing.as_ref()));
-                Panel::new("Snapshots")
-                    .show(ui, &mut panels, |ui| looks::snapshots(ui, cx, editing.as_ref()));
-                Panel::new("History")
-                    .show(ui, &mut panels, |ui| history::show(ui, cx, editing.as_ref()));
+                hovered = Panel::new("Presets")
+                    .show(ui, &mut panels, |ui| {
+                        looks::presets(ui, cx, editing.as_ref())
+                    })
+                    .body
+                    .flatten();
+                Panel::new("Snapshots").show(ui, &mut panels, |ui| {
+                    looks::snapshots(ui, cx, editing.as_ref())
+                });
+                Panel::new("History").show(ui, &mut panels, |ui| {
+                    history::show(ui, cx, editing.as_ref())
+                });
             });
+            cx.ui.develop.hovered_preset = hovered;
             cx.ui.develop.left_panels = panels;
         });
 }
@@ -62,20 +73,19 @@ fn bottom(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
         .show(ui, |ui| {
             ui.columns(2, |columns| {
                 let width = columns[0].available_width();
-                let button = |text: &str| Button::new(text).min_size(vec2(width, 26.0));
-                if columns[0]
-                    .add_enabled(can_copy, button("Copy…"))
+                if wide_button(&mut columns[0], can_copy, "Copy…", width)
                     .on_hover_text("Choose settings of this photo to paste onto others")
                     .clicked()
                 {
                     dialogs::open_copy_settings(cx);
                 }
-                if columns[1]
-                    .add_enabled(can_paste, button("Paste"))
+                if wide_button(&mut columns[1], can_paste, "Paste", width)
                     .on_hover_text("Paste the copied settings onto the selected photos")
                     .clicked()
                 {
-                    cx.act(Action::Develop(DevelopAction::PasteSettings(Target::Selected)));
+                    cx.act(Action::Develop(DevelopAction::PasteSettings(
+                        Target::Selected,
+                    )));
                 }
             });
         });
@@ -134,7 +144,12 @@ fn navigator(ui: &mut Ui, cx: &mut Cx<'_>) {
         Some(look) => Some((look, None)),
         None => {
             let whole = ours
-                .then(|| cx.frames.whole.as_ref().map(|whole| (whole.id(), whole.size())))
+                .then(|| {
+                    cx.frames
+                        .whole
+                        .as_ref()
+                        .map(|whole| (whole.id(), whole.size()))
+                })
                 .flatten();
             let image = whole.or_else(|| {
                 cx.textures

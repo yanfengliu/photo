@@ -21,20 +21,21 @@
 
 pub(crate) mod actions;
 pub(crate) mod canvas;
+pub(crate) mod drafts;
 pub(crate) mod frames;
 mod left;
 pub(crate) mod right;
 pub(crate) mod state;
 mod toolbar;
 
-use egui::{Key, Rect, Ui};
+use egui::{Color32, Id, Key, Order, Rect, Sense, Ui, pos2};
 
-pub use self::canvas::CanvasZoom;
 use self::actions::DevelopAction;
-pub use self::frames::{CanvasImage, CanvasShows};
+pub use self::canvas::CanvasZoom;
 pub(crate) use self::frames::Frames;
-pub use self::state::BeforeAfter;
+pub use self::frames::{CanvasImage, CanvasShows};
 pub(crate) use self::state::DevelopState;
+pub use self::state::{BeforeAfter, Lights};
 use self::state::{LEFT_KEY, RIGHT_KEY, Told, encode_panels};
 use super::Cx;
 use super::actions::Action;
@@ -80,9 +81,58 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) -> Rect {
         })
         .inner;
     cx.ui.grid.reveal_active = false;
+    lights_out(ui.ctx(), cx);
+    drafts::pace(cx);
     tell(cx);
     store_panels(cx);
     work_area
+}
+
+/// L: everything but the photo dimmed or black. The dark takes the
+/// pointer, and a click on it turns the lights back on.
+fn lights_out(ctx: &egui::Context, cx: &mut Cx<'_>) {
+    let alpha = match cx.ui.develop.lights {
+        Lights::On => return,
+        Lights::Dim => 215,
+        Lights::Out => 255,
+    };
+    let screen = ctx.content_rect();
+    let hole = match (cx.ui.develop.photo_rect, cx.ui.develop.stage) {
+        (Some(photo), Some(stage)) => photo.intersect(stage),
+        _ => Rect::NOTHING,
+    };
+    let parts = if hole.is_positive() {
+        vec![
+            Rect::from_min_max(screen.min, pos2(screen.right(), hole.top())),
+            Rect::from_min_max(pos2(screen.left(), hole.bottom()), screen.max),
+            Rect::from_min_max(
+                pos2(screen.left(), hole.top()),
+                pos2(hole.left(), hole.bottom()),
+            ),
+            Rect::from_min_max(
+                pos2(hole.right(), hole.top()),
+                pos2(screen.right(), hole.bottom()),
+            ),
+        ]
+    } else {
+        vec![screen]
+    };
+    let dark = Color32::from_black_alpha(alpha);
+    egui::Area::new(Id::unique("develop-lights-out"))
+        .order(Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            for (index, part) in parts.into_iter().enumerate() {
+                if !part.is_positive() {
+                    continue;
+                }
+                ui.painter().rect_filled(part, 0.0, dark);
+                let id = Id::unique(("develop-lights-out", index));
+                if ui.interact(part, id, Sense::click()).clicked() {
+                    cx.ui.develop.lights = Lights::On;
+                }
+            }
+        });
 }
 
 /// Open the active photo if it is not the one open, or close the session
@@ -103,6 +153,9 @@ pub(crate) fn follow_active(cx: &mut Cx<'_>) {
         // Asked already (and refused, or not applied yet).
         return;
     }
+    // A value still waiting belongs to the photo open now, which commits
+    // it when the next one opens.
+    drafts::flush(cx);
     cx.ui.develop.photo_changed();
     cx.ui.develop.told = Told::fresh(active);
     match active {
@@ -113,6 +166,9 @@ pub(crate) fn follow_active(cx: &mut Cx<'_>) {
 
 /// Close the session, for leaving the module.
 pub(crate) fn close(cx: &mut Cx<'_>) {
+    drafts::flush(cx);
+    cx.frames.forget();
+    cx.ui.develop.lights = Lights::On;
     cx.ui.develop.photo_changed();
     cx.ui.develop.told = Told::default();
     if cx.engine.develop().is_some() {

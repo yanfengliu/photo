@@ -8,9 +8,9 @@
 //! edited, every editing control is disabled and the reason is shown.
 
 mod basic;
-pub(crate) mod curve_math;
 mod color;
 mod curve;
+pub(crate) mod curve_math;
 mod detail;
 
 use egui::{Align, Button, Layout, Margin, RichText, Ui, vec2};
@@ -19,6 +19,7 @@ use photo_core::meta::{FileKind, PhotoId};
 use photo_engine::{DevelopSession, Target};
 
 use super::actions::DevelopAction;
+use super::drafts::{self, Pending};
 use crate::app::actions::Action;
 use crate::app::{Cx, text};
 use crate::theme::{self, palette, space};
@@ -47,16 +48,19 @@ pub(crate) struct Editing {
 }
 
 impl Editing {
-    /// What the panels edit in `session`.
-    pub(crate) fn of(session: &DevelopSession) -> Self {
+    /// What the panels edit in `session`, with the draft edit that waits
+    /// for its turn (see `drafts`) already in place.
+    pub(crate) fn of(session: &DevelopSession, pending: Option<&Pending>) -> Self {
         let as_shot = match session.kind() {
             FileKind::Raster => Some((0.0, 0.0)),
             FileKind::Raw => session.as_shot_white_balance(),
         };
+        let mut settings = session.settings().clone();
+        drafts::overlay(&mut settings, session.kind(), pending);
         Self {
             photo: session.photo(),
             kind: session.kind(),
-            settings: session.settings().clone(),
+            settings,
             shown_white_balance: session.shown_white_balance(),
             as_shot,
             read_only: session.read_only_reason().map(str::to_owned),
@@ -71,11 +75,12 @@ impl Editing {
 
 /// Show the right column.
 pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
+    let pending = cx.ui.develop.pending.as_ref();
     let editing = cx
         .engine
         .develop()
         .filter(|session| Some(session.photo()) == cx.engine.active_photo())
-        .map(Editing::of);
+        .map(|session| Editing::of(session, pending));
     egui::Panel::right("develop-right-column")
         .resizable(true)
         .size_range(260.0..=460.0)
@@ -83,7 +88,10 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         .frame(theme::panel_frame())
         .show(ui, |ui| {
             bottom(ui, cx, editing.as_ref());
-            if let Some(reason) = editing.as_ref().and_then(|editing| editing.read_only.as_deref()) {
+            if let Some(reason) = editing
+                .as_ref()
+                .and_then(|editing| editing.read_only.as_deref())
+            {
                 read_only_banner(ui, reason);
             }
             let mut panels = std::mem::take(&mut cx.ui.develop.right_panels);
@@ -96,24 +104,37 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
                     ui.label(RichText::new("Open a photo to edit it.").color(palette::TEXT_DIM));
                     return;
                 };
-                ui.add_enabled_ui(editing.editable(), |ui| {
-                    Panel::new("Basic").show(ui, &mut panels, |ui| basic::show(ui, cx, editing));
-                    Panel::new("Tone Curve").show(ui, &mut panels, |ui| curve::show(ui, cx, editing));
-                    Panel::new("Color Mixer").show(ui, &mut panels, |ui| color::mixer(ui, cx, editing));
-                    Panel::new("Color Grading")
-                        .show(ui, &mut panels, |ui| color::grading(ui, cx, editing));
-                    Panel::new("Detail").show(ui, &mut panels, |ui| detail::detail(ui, cx, editing));
-                    Panel::new("Lens Corrections")
-                        .show(ui, &mut panels, |ui| detail::lens(ui, cx, editing));
-                    Panel::new("Transform")
-                        .show(ui, &mut panels, |ui| detail::transform(ui, cx, editing));
-                    Panel::new("Effects").show(ui, &mut panels, |ui| detail::effects(ui, cx, editing));
-                    Panel::new("Calibration")
-                        .show(ui, &mut panels, |ui| detail::calibration(ui, cx, editing));
-                });
+                let panels = &mut panels;
+                let mut panel = |ui: &mut Ui, title: &str, body: EditingPanel| {
+                    // A photo that cannot be edited can still be looked at:
+                    // the headers work, the controls under them do not.
+                    Panel::new(title).show(ui, panels, |ui| {
+                        ui.add_enabled_ui(editing.editable(), |ui| body(ui, cx, editing));
+                    });
+                };
+                panel(ui, "Basic", basic::show);
+                panel(ui, "Tone Curve", curve::show);
+                panel(ui, "Color Mixer", color::mixer);
+                panel(ui, "Color Grading", color::grading);
+                panel(ui, "Detail", detail::detail);
+                panel(ui, "Lens Corrections", detail::lens);
+                panel(ui, "Transform", detail::transform);
+                panel(ui, "Effects", detail::effects);
+                panel(ui, "Calibration", detail::calibration);
             });
             cx.ui.develop.right_panels = panels;
         });
+}
+
+/// The body of an editing panel.
+type EditingPanel = fn(&mut Ui, &mut Cx<'_>, &Editing);
+
+/// A button as wide as `width` with its label in the middle.
+pub(crate) fn wide_button(ui: &mut Ui, enabled: bool, text: &str, width: f32) -> egui::Response {
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        ui.add_enabled(enabled, Button::new(text).min_size(vec2(width, 26.0)))
+    })
+    .inner
 }
 
 /// Previous (or Sync with several photos selected) and Reset.
@@ -129,29 +150,29 @@ fn bottom(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
         .show(ui, |ui| {
             ui.columns(2, |columns| {
                 let width = columns[0].available_width();
-                let button = |text: &str| Button::new(text).min_size(vec2(width, 26.0));
-                columns[0].add_enabled_ui(editable, |ui| {
-                    if several {
-                        if ui.add(button("Sync…")).clicked() {
-                            crate::app::dialogs::open_sync(cx);
-                        }
-                    } else if ui
-                        .add_enabled(previous, button("Previous"))
-                        .on_hover_text("Give this photo all the settings of the photo before it")
+                if several {
+                    if wide_button(&mut columns[0], editable, "Sync…", width)
+                        .on_hover_text("Give the other selected photos settings of this one")
                         .clicked()
                     {
-                        cx.act(Action::Develop(DevelopAction::PasteFromPrevious(Target::Active)));
+                        crate::app::dialogs::open_sync(cx);
                     }
-                });
-                columns[1].add_enabled_ui(editable, |ui| {
-                    if ui
-                        .add(button("Reset"))
-                        .on_hover_text("Put every setting of this photo back to how it was imported")
-                        .clicked()
-                    {
-                        cx.act(Action::Develop(DevelopAction::ResetSettings(Target::Active)));
-                    }
-                });
+                } else if wide_button(&mut columns[0], editable && previous, "Previous", width)
+                    .on_hover_text("Give this photo all the settings of the photo before it")
+                    .clicked()
+                {
+                    cx.act(Action::Develop(DevelopAction::PasteFromPrevious(
+                        Target::Active,
+                    )));
+                }
+                if wide_button(&mut columns[1], editable, "Reset", width)
+                    .on_hover_text("Put every setting of this photo back to how it was imported")
+                    .clicked()
+                {
+                    cx.act(Action::Develop(DevelopAction::ResetSettings(
+                        Target::Active,
+                    )));
+                }
             });
         });
 }
@@ -273,10 +294,18 @@ pub(crate) fn slider_in(
         widget = widget.label_width(width);
     }
     let response = widget.show(ui);
-    if response.changed {
-        cx.act(Action::Develop(DevelopAction::Adjust(adj, value)));
+    let draft = response.changed.then_some(Pending::Adjust(adj, value));
+    edited(cx, draft, response.finished);
+}
+
+/// What a control reported: `draft` while it moves, `finished` when it is
+/// let go (or made a one-step edit), which commits.
+pub(crate) fn edited(cx: &mut Cx<'_>, draft: Option<Pending>, finished: bool) {
+    if let Some(draft) = draft {
+        drafts::draft(cx, draft);
     }
-    if response.finished {
+    if finished {
+        drafts::flush(cx);
         cx.act(Action::Develop(DevelopAction::Commit));
     }
 }
@@ -300,10 +329,11 @@ pub(crate) fn sliders_in(
     cx: &mut Cx<'_>,
     editing: &Editing,
     adjs: &[Adj],
+    prefix: Option<&str>,
     label_width: f32,
 ) {
     for adj in adjs {
-        slider_in(ui, cx, editing, *adj, None, Some(label_width));
+        slider_in(ui, cx, editing, *adj, prefix, Some(label_width));
     }
 }
 

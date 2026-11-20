@@ -12,6 +12,7 @@ use photo_engine::Target;
 use crate::app::Cx;
 use crate::app::actions::Action;
 use crate::app::develop::actions::DevelopAction;
+use crate::app::develop::right::wide_button;
 use crate::theme::{palette, size, space};
 use crate::widgets::{Icon, IconButton};
 
@@ -62,8 +63,13 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         white_balance(ui, cx, active);
         ui.horizontal(|ui| {
             label(ui, "Tone Control");
-            if ui.add(Button::new("Auto Tone").min_size(vec2(0.0, size::ROW))).clicked() {
-                cx.act(Action::Develop(DevelopAction::QuickAutoTone(target.clone())));
+            if ui
+                .add(Button::new("Auto Tone").min_size(vec2(0.0, size::ROW)))
+                .clicked()
+            {
+                cx.act(Action::Develop(DevelopAction::QuickAutoTone(
+                    target.clone(),
+                )));
             }
         });
         ui.add_space(space::SM);
@@ -85,13 +91,16 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
             });
         }
         ui.add_space(space::MD);
-        let reset = Button::new("Reset All").min_size(vec2(ui.available_width(), 24.0));
-        if ui
-            .add(reset)
-            .on_hover_text("Put every setting of the selected photos back to how they were imported")
+        let width = ui.available_width();
+        if wide_button(ui, true, "Reset All", width)
+            .on_hover_text(
+                "Put every setting of the selected photos back to how they were imported",
+            )
             .clicked()
         {
-            cx.act(Action::Develop(DevelopAction::ResetSettings(target.clone())));
+            cx.act(Action::Develop(DevelopAction::ResetSettings(
+                target.clone(),
+            )));
         }
     });
     if count > 1 {
@@ -132,8 +141,14 @@ fn white_balance(ui: &mut Ui, cx: &mut Cx<'_>, active: PhotoId) {
             .selected_text(shown)
             .width(ui.available_width() - 4.0)
             .show_ui(ui, |ui| {
-                for preset in WbPreset::ALL.into_iter().filter(|preset| *preset != WbPreset::Custom) {
-                    if ui.selectable_label(quick_shows(shown, preset), preset.label()).clicked() {
+                for preset in WbPreset::ALL
+                    .into_iter()
+                    .filter(|preset| *preset != WbPreset::Custom)
+                {
+                    if ui
+                        .selectable_label(shown == preset.label(), preset.label())
+                        .clicked()
+                    {
                         chosen = Some(preset);
                     }
                 }
@@ -142,12 +157,11 @@ fn white_balance(ui: &mut Ui, cx: &mut Cx<'_>, active: PhotoId) {
             .accessible_name("Quick white balance");
     });
     if let Some(preset) = chosen {
-        cx.act(Action::Develop(DevelopAction::QuickWhiteBalance(Target::Selected, preset)));
+        cx.act(Action::Develop(DevelopAction::QuickWhiteBalance(
+            Target::Selected,
+            preset,
+        )));
     }
-}
-
-fn quick_shows(shown: &str, preset: WbPreset) -> bool {
-    shown == preset.label()
 }
 
 #[cfg(test)]
