@@ -7,6 +7,7 @@ mod attributes;
 mod collections;
 mod import;
 mod keywords;
+mod narrow;
 mod performance;
 mod selection;
 mod shell;
@@ -39,8 +40,8 @@ pub struct Studio {
     pub options: AppOptions,
 }
 
-impl Studio {
-    pub fn new() -> Self {
+impl Default for Studio {
+    fn default() -> Self {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let options = AppOptions {
             catalog_path: dir.path().join("Test.photocat"),
@@ -48,6 +49,12 @@ impl Studio {
             export_dir: dir.path().join("exports"),
         };
         Self { _dir: dir, options }
+    }
+}
+
+impl Studio {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// The app on this studio's catalog, as it is now.
@@ -73,6 +80,32 @@ impl Studio {
         self.harness(engine, pixels_per_point)
     }
 
+    /// The app after `files` were imported, in a window of `size` points.
+    pub fn app_with_size(&self, files: Vec<PathBuf>, size: [f32; 2]) -> Harness<PhotoApp> {
+        let mut engine = self.options.open_engine().expect("the catalog opens");
+        import(&mut engine, files);
+        let options = self.options.clone();
+        HarnessBuilder::new()
+            .size(size)
+            .strict_glyphs(true)
+            .max_steps(240)
+            .build(move |cc| PhotoApp::new(cc, engine, options))
+    }
+
+    /// The app in a harness that does not wait for the UI to come to rest:
+    /// each action runs at most two frames after its input. For watching
+    /// background work, during which the UI keeps changing; actions then
+    /// report [`HarnessError::NotSettled`], which [`restless`] accepts.
+    pub fn app_restless(&self) -> Harness<PhotoApp> {
+        let engine = self.options.open_engine().expect("the catalog opens");
+        let options = self.options.clone();
+        HarnessBuilder::new()
+            .size(WINDOW)
+            .strict_glyphs(true)
+            .max_steps(2)
+            .build(move |cc| PhotoApp::new(cc, engine, options))
+    }
+
     fn harness(&self, engine: Engine, pixels_per_point: f32) -> Harness<PhotoApp> {
         let options = self.options.clone();
         HarnessBuilder::new()
@@ -81,6 +114,15 @@ impl Studio {
             .strict_glyphs(true)
             .max_steps(240)
             .build(move |cc| PhotoApp::new(cc, engine, options))
+    }
+}
+
+/// An action's result in a harness from [`Studio::app_restless`]: done,
+/// whether or not the UI came to rest after it.
+pub fn restless(result: Result<(), HarnessError>) -> Result<(), HarnessError> {
+    match result {
+        Err(HarnessError::NotSettled(_)) => Ok(()),
+        other => other,
     }
 }
 
@@ -112,14 +154,18 @@ pub fn files(library: &TempLibrary) -> Vec<PathBuf> {
 pub fn settle(harness: &mut Harness<PhotoApp>) -> Result<(), HarnessError> {
     for _ in 0..40 {
         if !harness.app_mut().wait_idle(PATIENCE) {
-            return Err(HarnessError::NotSettled("the engine never became idle".into()));
+            return Err(HarnessError::NotSettled(
+                "the engine never became idle".into(),
+            ));
         }
         harness.run()?;
         if harness.app().engine().is_idle() {
             return Ok(());
         }
     }
-    Err(HarnessError::NotSettled("previews kept being asked for".into()))
+    Err(HarnessError::NotSettled(
+        "previews kept being asked for".into(),
+    ))
 }
 
 /// The photo in the list whose file is called `name`.
@@ -161,7 +207,9 @@ pub fn selected(harness: &Harness<PhotoApp>) -> Vec<String> {
 pub fn active(harness: &Harness<PhotoApp>) -> Option<String> {
     let engine = harness.app().engine();
     let active = engine.active_photo()?;
-    engine.summary(active).map(|summary| summary.file_name.clone())
+    engine
+        .summary(active)
+        .map(|summary| summary.file_name.clone())
 }
 
 /// What the grid cell of the photo called `name` says about it.

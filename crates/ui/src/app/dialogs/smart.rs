@@ -57,7 +57,11 @@ fn op_name(op: SmartOp) -> &'static str {
 /// each is shown.
 fn choices(kind: SmartValueKind) -> &'static [(&'static str, &'static str)] {
     match kind {
-        SmartValueKind::Flag => &[("picked", "Picked"), ("unflagged", "Unflagged"), ("rejected", "Rejected")],
+        SmartValueKind::Flag => &[
+            ("picked", "Picked"),
+            ("unflagged", "Unflagged"),
+            ("rejected", "Rejected"),
+        ],
         SmartValueKind::Label => &[
             ("none", "None"),
             ("red", "Red"),
@@ -173,7 +177,11 @@ impl SmartDialog {
 
     /// The rules as edited, or `None` while one cannot be built.
     fn smart_rules(&self) -> Option<SmartRules> {
-        let rules = self.rules.iter().map(RuleDraft::rule).collect::<Option<Vec<_>>>()?;
+        let rules = self
+            .rules
+            .iter()
+            .map(RuleDraft::rule)
+            .collect::<Option<Vec<_>>>()?;
         Some(SmartRules {
             match_all: self.match_all,
             rules,
@@ -259,9 +267,7 @@ impl SmartDialog {
             self.rules.push(RuleDraft::on(SmartField::Keyword));
         }
         if self.rules.is_empty() {
-            ui.label(
-                RichText::new("With no rules, every photo matches.").color(palette::TEXT_DIM),
-            );
+            ui.label(RichText::new("With no rules, every photo matches.").color(palette::TEXT_DIM));
         }
     }
 }
@@ -301,8 +307,11 @@ fn rule_row(ui: &mut Ui, number: usize, rule: &mut RuleDraft) -> bool {
         if !matches!(rule.op, SmartOp::IsEmpty | SmartOp::IsNotEmpty) {
             value_editor(ui, number, rule);
         }
-        ui.add(IconButton::new(Icon::Minus, &format!("Remove rule {number}")))
-            .clicked()
+        ui.add(IconButton::new(
+            Icon::Minus,
+            &format!("Remove rule {number}"),
+        ))
+        .clicked()
     })
     .inner
 }
@@ -312,7 +321,12 @@ fn value_editor(ui: &mut Ui, number: usize, rule: &mut RuleDraft) {
     let name = format!("Rule {number} value");
     let kind = rule.field.value_kind();
     if rule.field == SmartField::Rating {
-        let stars = rule.value.trim().parse::<f64>().unwrap_or(0.0).clamp(0.0, 5.0) as u8;
+        let stars = rule
+            .value
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(0.0)
+            .clamp(0.0, 5.0) as u8;
         let mut rating = Rating::new(stars);
         if rating_stars(ui, &format!("Rule {number} rating"), &mut rating).changed() {
             rule.value = rating.stars().to_string();

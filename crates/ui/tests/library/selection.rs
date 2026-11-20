@@ -18,7 +18,9 @@ fn clicks_select_like_a_file_browser_and_arrows_move_the_active_photo() -> TestR
     click_cell(&mut harness, "meadow.tif", Modifiers::NONE)?;
     assert_eq!(selected(&harness), ["meadow.tif"]);
     assert_eq!(
-        harness.control(egui::Role::ListBoxOption, "meadow.tif")?.selected,
+        harness
+            .control(egui::Role::ListBoxOption, "meadow.tif")?
+            .selected,
         Some(true)
     );
 
@@ -31,7 +33,10 @@ fn clicks_select_like_a_file_browser_and_arrows_move_the_active_photo() -> TestR
     assert!(crate::shows(&harness, "6 of 6 photos, 4 selected"));
 
     click_cell(&mut harness, "ridge.jpg", Modifiers::COMMAND)?;
-    assert_eq!(selected(&harness), ["meadow.tif", "dawn.jpg", "harbour.dng"]);
+    assert_eq!(
+        selected(&harness),
+        ["meadow.tif", "dawn.jpg", "harbour.dng"]
+    );
     assert_eq!(active(&harness).as_deref(), Some("harbour.dng"));
     click_cell(&mut harness, "ridge.jpg", Modifiers::COMMAND)?;
     assert_eq!(selected(&harness).len(), 4);
@@ -94,13 +99,24 @@ fn survey_tiles_the_selection_and_takes_photos_out_of_it() -> TestResult {
     assert_eq!(harness.app().view(), View::Survey);
     settle(&mut harness)?;
     for name in ["lake.png", "dawn.jpg", "ridge.jpg", "harbour.dng"] {
-        assert_eq!(harness.count(Role::ListBoxOption, &format!("Survey {name}")), 1, "{name}");
+        assert_eq!(
+            harness.count(Role::ListBoxOption, &format!("Survey {name}")),
+            1,
+            "{name}"
+        );
     }
-    assert_eq!(harness.count(Role::ListBoxOption, "Survey fireworks.jpg"), 0);
+    assert_eq!(
+        harness.count(Role::ListBoxOption, "Survey fireworks.jpg"),
+        0
+    );
 
     harness.click(Role::ListBoxOption, "Survey ridge.jpg")?;
     assert_eq!(active(&harness).as_deref(), Some("ridge.jpg"));
-    assert_eq!(selected(&harness).len(), 4, "a click in the survey keeps it");
+    assert_eq!(
+        selected(&harness).len(),
+        4,
+        "a click in the survey keeps it"
+    );
     harness.click(Role::Button, "Remove dawn.jpg from the survey")?;
     assert_eq!(selected(&harness), ["lake.png", "ridge.jpg", "harbour.dng"]);
     assert_eq!(harness.count(Role::ListBoxOption, "Survey dawn.jpg"), 0);
@@ -123,7 +139,10 @@ fn compare_shows_the_select_and_a_candidate_and_swaps_them() -> TestResult {
     assert_eq!(harness.app().view(), View::Compare);
     settle(&mut harness)?;
     assert_eq!(harness.count(Role::ListBoxOption, "Select dawn.jpg"), 1);
-    assert_eq!(harness.count(Role::ListBoxOption, "Candidate harbour.dng"), 1);
+    assert_eq!(
+        harness.count(Role::ListBoxOption, "Candidate harbour.dng"),
+        1
+    );
 
     harness.click(Role::Button, "Swap")?;
     assert_eq!(harness.count(Role::ListBoxOption, "Select harbour.dng"), 1);
@@ -138,7 +157,10 @@ fn compare_shows_the_select_and_a_candidate_and_swaps_them() -> TestResult {
     harness.click(Role::Button, "Make Select")?;
     settle(&mut harness)?;
     assert_eq!(harness.count(Role::ListBoxOption, "Select ridge.jpg"), 1);
-    assert_eq!(harness.count(Role::ListBoxOption, "Candidate harbour.dng"), 1);
+    assert_eq!(
+        harness.count(Role::ListBoxOption, "Candidate harbour.dng"),
+        1
+    );
     assert_eq!(active(&harness).as_deref(), Some("ridge.jpg"));
 
     harness.click(Role::ListBoxOption, "Candidate harbour.dng")?;
@@ -151,6 +173,10 @@ fn compare_shows_the_select_and_a_candidate_and_swaps_them() -> TestResult {
         .filter(|photo| photo.rating.stars() == 2)
         .map(|photo| photo.file_name.as_str())
         .collect();
-    assert_eq!(rated, ["harbour.dng"], "keys in Compare apply to the active photo only");
+    assert_eq!(
+        rated,
+        ["harbour.dng"],
+        "keys in Compare apply to the active photo only"
+    );
     Ok(())
 }

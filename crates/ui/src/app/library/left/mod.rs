@@ -137,8 +137,16 @@ fn catalog(ui: &mut Ui, cx: &mut Cx<'_>) {
     let current = *cx.engine.source();
     for (source, name, count) in [
         (Source::AllPhotos, "All Photographs", counts.all_photos),
-        (Source::QuickCollection, "Quick Collection", counts.quick_collection),
-        (Source::PreviousImport, "Previous Import", counts.previous_import),
+        (
+            Source::QuickCollection,
+            "Quick Collection",
+            counts.quick_collection,
+        ),
+        (
+            Source::PreviousImport,
+            "Previous Import",
+            counts.previous_import,
+        ),
     ] {
         let quick = source == Source::QuickCollection;
         let row = ListRow::new(name, name)
@@ -149,7 +157,10 @@ fn catalog(ui: &mut Ui, cx: &mut Cx<'_>) {
             .show(ui);
         if quick && let Some(dragged) = row.response.dnd_release_payload::<DraggedPhotos>() {
             let quick = cx.engine.quick_collection();
-            cx.act(Action::AddToCollection(quick, Target::Photos(dragged.0.clone())));
+            cx.act(Action::AddToCollection(
+                quick,
+                Target::Photos(dragged.0.clone()),
+            ));
         } else if row.clicked {
             cx.act(Action::SetSource(source));
         }

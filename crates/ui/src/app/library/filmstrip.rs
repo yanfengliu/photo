@@ -39,7 +39,11 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
 /// the button that hides the filmstrip.
 fn source_line(ui: &mut Ui, cx: &mut Cx<'_>) {
     let (_, rect) = ui.allocate_space(vec2(ui.available_width(), LINE));
-    let mut line = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)));
+    let mut line = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
     line.label(RichText::new(text::source_name(cx.engine)).color(palette::TEXT));
     line.add_space(space::MD);
     let summary = counts(cx.engine);
@@ -78,7 +82,11 @@ pub(super) fn counts(engine: &Engine) -> String {
         source_total(engine).unwrap_or(shown as u64)
     };
     let selected = engine.selection().selected().len();
-    let total = text::count(usize::try_from(total).unwrap_or(usize::MAX), "photo", "photos");
+    let total = text::count(
+        usize::try_from(total).unwrap_or(usize::MAX),
+        "photo",
+        "photos",
+    );
     format!("{shown} of {total}, {selected} selected")
 }
 
@@ -119,7 +127,10 @@ fn source_total(engine: &Engine) -> Option<u64> {
 fn strip(ui: &mut Ui, cx: &mut Cx<'_>) {
     let count = cx.engine.photo_count();
     let reveal = cx.ui.grid.reveal_active;
-    let active = cx.engine.active_photo().and_then(|photo| cx.engine.index_of(photo));
+    let active = cx
+        .engine
+        .active_photo()
+        .and_then(|photo| cx.engine.index_of(photo));
     let output = ScrollArea::horizontal()
         .id_salt("filmstrip")
         .auto_shrink([false, false])

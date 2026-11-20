@@ -233,7 +233,9 @@ fn indicator(
         (response, state)
     });
     let state = response.as_ref().is_some_and(|(_, state)| *state);
-    let hovered = response.as_ref().is_some_and(|(response, _)| response.hovered());
+    let hovered = response
+        .as_ref()
+        .is_some_and(|(response, _)| response.hovered());
     let focused = response
         .as_ref()
         .is_some_and(|(response, _)| response.has_focus());

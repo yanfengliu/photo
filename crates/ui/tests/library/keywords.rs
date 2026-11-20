@@ -32,7 +32,10 @@ fn keywording_puts_typed_keywords_on_the_selection_and_takes_them_off() -> TestR
 
     harness.click(Role::TextInput, "Add keywords")?;
     harness.type_text("sunrise, coast")?;
-    assert!(keywords(&harness, "dawn.jpg").is_empty(), "nothing until Enter");
+    assert!(
+        keywords(&harness, "dawn.jpg").is_empty(),
+        "nothing until Enter"
+    );
     harness.press_key(Key::Enter, Modifiers::NONE)?;
     for name in ["dawn.jpg", "ridge.jpg"] {
         assert_eq!(keywords(&harness, name), ["coast", "sunrise"], "{name}");
@@ -52,7 +55,7 @@ fn keywording_puts_typed_keywords_on_the_selection_and_takes_them_off() -> TestR
 }
 
 #[test]
-fn a_tick_in_the_keyword_list_follows_the_active_photo_and_toggles_the_keyword() -> TestResult {
+fn a_tick_in_the_keyword_list_follows_the_selection_and_toggles_the_keyword() -> TestResult {
     let library = TempLibrary::new();
     let studio = Studio::new();
     let mut harness = studio.app_with(files(&library));
@@ -79,6 +82,22 @@ fn a_tick_in_the_keyword_list_follows_the_active_photo_and_toggles_the_keyword()
     harness.click(Role::CheckBox, "Keyword harbour")?;
     assert!(keywords(&harness, "fireworks.jpg").is_empty());
     assert_eq!(keywords(&harness, "dawn.jpg"), ["harbour"]);
+
+    // The active photo carries it but another selected photo does not: the
+    // tick is not set, and a click puts the keyword on both.
+    click_cell(&mut harness, "dawn.jpg", Modifiers::COMMAND)?;
+    assert_eq!(crate::active(&harness).as_deref(), Some("dawn.jpg"));
+    assert_eq!(
+        harness.control(Role::CheckBox, "Keyword harbour")?.toggled,
+        Some(false)
+    );
+    harness.click(Role::CheckBox, "Keyword harbour")?;
+    assert_eq!(keywords(&harness, "fireworks.jpg"), ["harbour"]);
+    assert_eq!(keywords(&harness, "dawn.jpg"), ["harbour"]);
+    assert_eq!(
+        harness.control(Role::CheckBox, "Keyword harbour")?.toggled,
+        Some(true)
+    );
     Ok(())
 }
 

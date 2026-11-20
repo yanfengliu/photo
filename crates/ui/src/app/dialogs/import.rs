@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use egui::{Key, Modifiers, RichText, TextEdit, Ui};
 use photo_core::time::DateTime;
-use photo_engine::{CopyLayout, DatePattern, ImportCandidate, ImportMode, ImportRequest, ImportScan};
+use photo_engine::{
+    CopyLayout, DatePattern, ImportCandidate, ImportMode, ImportRequest, ImportScan,
+};
 
 use super::import_grid;
 use crate::app::Cx;
@@ -303,7 +305,10 @@ impl ImportDialog {
             caption(ui, "Options");
             ui.checkbox(&mut settings.skip_duplicates, "Skip suspected duplicates");
             ui.add_space(space::LG);
-            ui.checkbox(&mut settings.read_sidecars, "Read metadata from XMP sidecars");
+            ui.checkbox(
+                &mut settings.read_sidecars,
+                "Read metadata from XMP sidecars",
+            );
         });
         ui.horizontal(|ui| {
             caption(ui, "Keywords");
@@ -319,7 +324,13 @@ impl ImportDialog {
 
     /// "Scanning… 12 found" or "6 photos found, 6 ticked", and the buttons
     /// that tick and untick them all.
-    fn candidate_header(&mut self, ui: &mut Ui, cx: &Cx<'_>, candidates: &[ImportCandidate], ticked: usize) {
+    fn candidate_header(
+        &mut self,
+        ui: &mut Ui,
+        cx: &Cx<'_>,
+        candidates: &[ImportCandidate],
+        ticked: usize,
+    ) {
         let scanning = self.scan_result(cx).is_some_and(|scan| !scan.finished);
         ui.horizontal(|ui| {
             let found = text::count(candidates.len(), "photo", "photos");
@@ -407,12 +418,32 @@ mod tests {
     #[test]
     fn everything_new_is_ticked_unless_the_user_unticks_it() {
         let mut unchecked = HashSet::new();
-        assert!(candidate_ticked(&candidate("/a.jpg", false, false), &unchecked, true));
-        assert!(!candidate_ticked(&candidate("/b.jpg", true, false), &unchecked, false));
-        assert!(!candidate_ticked(&candidate("/c.jpg", false, true), &unchecked, true));
-        assert!(candidate_ticked(&candidate("/c.jpg", false, true), &unchecked, false));
+        assert!(candidate_ticked(
+            &candidate("/a.jpg", false, false),
+            &unchecked,
+            true
+        ));
+        assert!(!candidate_ticked(
+            &candidate("/b.jpg", true, false),
+            &unchecked,
+            false
+        ));
+        assert!(!candidate_ticked(
+            &candidate("/c.jpg", false, true),
+            &unchecked,
+            true
+        ));
+        assert!(candidate_ticked(
+            &candidate("/c.jpg", false, true),
+            &unchecked,
+            false
+        ));
         unchecked.insert(PathBuf::from("/a.jpg"));
-        assert!(!candidate_ticked(&candidate("/a.jpg", false, false), &unchecked, true));
+        assert!(!candidate_ticked(
+            &candidate("/a.jpg", false, false),
+            &unchecked,
+            true
+        ));
     }
 
     #[test]

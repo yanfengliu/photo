@@ -202,12 +202,21 @@ fn pane(ui: &mut Ui, cx: &mut Cx<'_>, rect: Rect, role: &str, photo: PhotoId) {
     );
     let cell_rect = rect.with_min_y(rect.top() + CAPTION);
     let name = prefixed(role, &summary);
-    let builder = UiBuilder::new().max_rect(cell_rect).id_salt(("compare", role));
+    let builder = UiBuilder::new()
+        .max_rect(cell_rect)
+        .id_salt(("compare", role));
     let response = ui
         .scope_builder(builder, |ui| {
-            cell(ui, cx, &summary, &name, cell_rect.size(), PreviewSize::Standard)
-                .loose(true)
-                .show(ui)
+            cell(
+                ui,
+                cx,
+                &summary,
+                &name,
+                cell_rect.size(),
+                PreviewSize::Standard,
+            )
+            .loose(true)
+            .show(ui)
         })
         .inner;
     if response.clicked {

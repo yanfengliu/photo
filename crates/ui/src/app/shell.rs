@@ -62,7 +62,10 @@ pub(crate) fn edge_strip(ui: &mut Ui, edge: Edge, shown: &mut bool) {
         .show(ui, |ui| {
             let (icon, name) = edge.button(*shown);
             let button = Rect::from_center_size(ui.max_rect().center(), Vec2::splat(EDGE));
-            if ui.put(button, IconButton::new(icon, name).side(EDGE)).clicked() {
+            if ui
+                .put(button, IconButton::new(icon, name).side(EDGE))
+                .clicked()
+            {
                 *shown = !*shown;
             }
         });
@@ -102,8 +105,11 @@ pub(crate) fn top_bar(ui: &mut Ui, cx: &mut Cx<'_>) {
 fn module_picker(ui: &mut Ui) {
     ui.spacing_mut().item_spacing.x = space::SM;
     // Right to left: the last module is added first.
-    ui.add_enabled(false, Button::selectable(false, "Develop").min_size(vec2(64.0, 22.0)))
-        .on_disabled_hover_text("Develop is the next module to be built.");
+    ui.add_enabled(
+        false,
+        Button::selectable(false, "Develop").min_size(vec2(64.0, 22.0)),
+    )
+    .on_disabled_hover_text("Develop is the next module to be built.");
     let library = RichText::new("Library").color(palette::TEXT_STRONG);
     ui.add(Button::selectable(true, library).min_size(vec2(64.0, 22.0)));
 }
@@ -133,7 +139,10 @@ fn activity(ui: &mut Ui, cx: &mut Cx<'_>) {
                 .text(RichText::new(text).small()),
         );
         let cancel = format!("Cancel {}", task.label);
-        if ui.add(IconButton::new(Icon::Close, &cancel).side(18.0)).clicked() {
+        if ui
+            .add(IconButton::new(Icon::Close, &cancel).side(18.0))
+            .clicked()
+        {
             cx.act(Action::CancelTask(task.id));
         }
         ui.add_space(space::LG);

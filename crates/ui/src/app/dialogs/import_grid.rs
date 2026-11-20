@@ -114,8 +114,15 @@ fn cell(
     } else {
         palette::TEXT_DIM
     };
-    let galley = text::fitted(painter, &file, theme::small_font(), ink, rect.width() - 12.0);
-    let at = Align2::CENTER_BOTTOM.anchor_size(rect.center_bottom() - vec2(0.0, 4.0), galley.size());
+    let galley = text::fitted(
+        painter,
+        &file,
+        theme::small_font(),
+        ink,
+        rect.width() - 12.0,
+    );
+    let at =
+        Align2::CENTER_BOTTOM.anchor_size(rect.center_bottom() - vec2(0.0, 4.0), galley.size());
     painter.galley(at.min, galley, ink);
     let note = if candidate.already_in_catalog {
         Some("In catalog")

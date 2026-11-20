@@ -14,9 +14,9 @@
 
 pub(crate) mod compare;
 mod drag;
+mod filmstrip;
 pub(crate) mod filter_bar;
 mod filter_metadata;
-mod filmstrip;
 mod grid;
 mod left;
 mod loupe;
@@ -41,6 +41,10 @@ use crate::widgets::{Badges, SelectionTier, ThumbImage, Thumbnail};
 /// Lay the Library out in what the top bar left of `ui`. Returns the work
 /// area's rect, which toasts are shown over.
 pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) -> Rect {
+    // Only the loupe shows part of a photo for the navigator to outline.
+    if cx.ui.view != View::Loupe {
+        cx.ui.loupe_region = None;
+    }
     // The filmstrip spans the whole width, under the columns.
     if cx.ui.layout.filmstrip {
         filmstrip::show(ui, cx);

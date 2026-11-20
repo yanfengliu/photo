@@ -1,8 +1,16 @@
 //! The toolbar under the work area: the view buttons, then what the view
 //! offers (sort order, the marks of the photos keys apply to, rotation,
 //! the thumbnail size, the loupe's zoom, Compare's swap).
+//!
+//! The view's own controls are laid out first, from the right edge; the
+//! rest fill what is left from the left edge, and the groups that matter
+//! least (sort order, then rotation, then the colour labels, which keys
+//! also set) give way in a narrow window, so no control ever lies on
+//! another.
 
-use egui::{Align, Button, ComboBox, Layout, Margin, RichText, Slider, Stroke, Ui, vec2};
+use egui::{
+    Align, Button, ComboBox, Label, Layout, Margin, RichText, Slider, Stroke, Ui, UiBuilder, vec2,
+};
 use photo_core::meta::{ColorLabel, Flag, Rating};
 use photo_engine::{Sort, SortDirection, SortKey};
 
@@ -15,6 +23,18 @@ use crate::widgets::{Icon, IconButton, color_labels, flag_toggle, rating_stars};
 
 /// Height of the toolbar.
 const TOOLBAR: f32 = 36.0;
+/// Below this width the view's controls drop their words.
+const ROOMY: f32 = 760.0;
+/// Width of the views, flag and stars, which are always shown.
+const ALWAYS: f32 = 264.0;
+/// Width the colour labels add.
+const LABELS: f32 = 96.0;
+/// Width the rotate buttons add.
+const ROTATE: f32 = 64.0;
+/// Width the sort menu adds.
+const SORT: f32 = 196.0;
+/// Widest the names of the two photos in Compare are shown.
+const NAMES: f32 = 320.0;
 
 /// The sort keys, as the sort menu lists them.
 const SORT_KEYS: [(SortKey, &str); 9] = [
@@ -37,25 +57,40 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         .resizable(false)
         .frame(frame)
         .show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = space::XS;
-                views(ui, cx);
-                divider(ui);
-                if cx.ui.view == View::Grid {
-                    sort(ui, cx);
-                    divider(ui);
-                }
-                marks(ui, cx);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = space::SM;
-                    match cx.ui.view {
-                        View::Grid => thumbnail_size(ui, cx),
-                        View::Loupe => zoom(ui, cx),
-                        View::Compare => compare_controls(ui, cx),
-                        View::Survey => survey_note(ui, cx),
-                    }
-                });
-            });
+            let bar = ui.max_rect();
+            let roomy = bar.width() >= ROOMY;
+            let mut right = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(bar)
+                    .layout(Layout::right_to_left(Align::Center)),
+            );
+            right.spacing_mut().item_spacing.x = space::SM;
+            match cx.ui.view {
+                View::Grid => thumbnail_size(&mut right, cx, roomy),
+                View::Loupe => zoom(&mut right, cx),
+                View::Compare => compare_controls(&mut right, cx, roomy),
+                View::Survey if roomy => survey_note(&mut right, cx),
+                View::Survey => {}
+            }
+            let taken = right.min_rect().width();
+            let rest = bar.with_max_x(bar.right() - taken - space::LG);
+            let mut left = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(rest)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            // Whatever does not fit is cut off rather than drawn on the
+            // view's controls.
+            left.set_clip_rect(rest.intersect(ui.clip_rect()));
+            left.spacing_mut().item_spacing.x = space::XS;
+            views(&mut left, cx);
+            divider(&mut left);
+            let room = rest.width();
+            if cx.ui.view == View::Grid && room >= ALWAYS + LABELS + ROTATE + SORT {
+                sort(&mut left, cx);
+                divider(&mut left);
+            }
+            marks(&mut left, cx, room);
         });
 }
 
@@ -94,7 +129,11 @@ fn sort(ui: &mut Ui, cx: &mut Cx<'_>) {
         .accessible_name("Sort order");
     let (icon, label, flipped) = match current.direction {
         SortDirection::Ascending => (Icon::ChevronUp, "Sort ascending", SortDirection::Descending),
-        SortDirection::Descending => (Icon::ChevronDown, "Sort descending", SortDirection::Ascending),
+        SortDirection::Descending => (
+            Icon::ChevronDown,
+            "Sort descending",
+            SortDirection::Ascending,
+        ),
     };
     let mut direction = current.direction;
     if ui.add(IconButton::new(icon, label)).clicked() {
@@ -109,8 +148,9 @@ fn sort(ui: &mut Ui, cx: &mut Cx<'_>) {
     }
 }
 
-/// Flag, rating and label of the photos keys apply to, and rotation.
-fn marks(ui: &mut Ui, cx: &mut Cx<'_>) {
+/// Flag, rating and label of the photos keys apply to, and rotation, as
+/// far as `room` (the width left of the view's controls) allows.
+fn marks(ui: &mut Ui, cx: &mut Cx<'_>, room: f32) {
     let target = cx.ui.view.target();
     let marks = active_marks(cx);
     let (mut rating, mut flag, mut label) =
@@ -123,34 +163,52 @@ fn marks(ui: &mut Ui, cx: &mut Cx<'_>) {
         if rating_stars(ui, "Rating", &mut rating).changed() {
             cx.act(Action::SetRating(target.clone(), rating));
         }
+        if room < ALWAYS + LABELS {
+            return;
+        }
         divider(ui);
         if color_labels(ui, "Label", &mut label).changed() {
             // A swatch clicked off clears the label; clicked on, sets it.
             cx.act(Action::ToggleLabel(target.clone(), label));
         }
+        if room < ALWAYS + LABELS + ROTATE {
+            return;
+        }
         divider(ui);
-        if ui.add(IconButton::new(Icon::RotateCcw, "Rotate left")).clicked() {
+        if ui
+            .add(IconButton::new(Icon::RotateCcw, "Rotate left"))
+            .clicked()
+        {
             cx.act(Action::RotateLeft(target.clone()));
         }
-        if ui.add(IconButton::new(Icon::RotateCw, "Rotate right")).clicked() {
+        if ui
+            .add(IconButton::new(Icon::RotateCw, "Rotate right"))
+            .clicked()
+        {
             cx.act(Action::RotateRight(target.clone()));
         }
     });
 }
 
-fn thumbnail_size(ui: &mut Ui, cx: &mut Cx<'_>) {
+fn thumbnail_size(ui: &mut Ui, cx: &mut Cx<'_>, roomy: bool) {
     ui.add(
         Slider::new(&mut cx.ui.thumb_size, THUMB_SIZES)
             .show_value(false)
             .trailing_fill(true),
     )
     .accessible_name("Thumbnail size");
-    ui.label(RichText::new("Thumbnails").color(palette::TEXT_DIM));
+    if roomy {
+        ui.label(RichText::new("Thumbnails").color(palette::TEXT_DIM));
+    }
 }
 
 fn zoom(ui: &mut Ui, cx: &mut Cx<'_>) {
     // Right to left: the last choice is added first.
-    for (zoom, label) in [(Zoom::OneToOne, "1:1"), (Zoom::Fill, "Fill"), (Zoom::Fit, "Fit")] {
+    for (zoom, label) in [
+        (Zoom::OneToOne, "1:1"),
+        (Zoom::Fill, "Fill"),
+        (Zoom::Fit, "Fit"),
+    ] {
         let selected = cx.ui.loupe.zoom == zoom;
         if ui
             .add(Button::selectable(selected, label).min_size(vec2(36.0, size::ROW)))
@@ -161,12 +219,15 @@ fn zoom(ui: &mut Ui, cx: &mut Cx<'_>) {
     }
 }
 
-fn compare_controls(ui: &mut Ui, cx: &mut Cx<'_>) {
+fn compare_controls(ui: &mut Ui, cx: &mut Cx<'_>, roomy: bool) {
     if ui.button("Make Select").clicked() {
         compare::make_select(cx);
     }
     if ui.button("Swap").clicked() {
         compare::swap(cx);
+    }
+    if !roomy {
+        return;
     }
     let (select, candidate) = compare::names(cx);
     let names = match (select, candidate) {
@@ -174,7 +235,10 @@ fn compare_controls(ui: &mut Ui, cx: &mut Cx<'_>) {
         (Some(select), None) => select,
         _ => String::new(),
     };
-    ui.label(RichText::new(names).color(palette::TEXT_DIM));
+    // Long file names are cut short rather than crowd out the marks.
+    ui.allocate_ui(vec2(NAMES, size::ROW), |ui| {
+        ui.add(Label::new(RichText::new(names).color(palette::TEXT_DIM)).truncate());
+    });
 }
 
 fn survey_note(ui: &mut Ui, cx: &Cx<'_>) {

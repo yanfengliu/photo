@@ -19,7 +19,10 @@ pub(crate) enum Action {
     ExtendSelection(PhotoId),
     SelectAll,
     SelectNone,
-    MoveActive { movement: Movement, extend: bool },
+    MoveActive {
+        movement: Movement,
+        extend: bool,
+    },
     /// Make a photo the active one and keep the rest of the selection.
     MakeActive(PhotoId),
     SetSource(Source),

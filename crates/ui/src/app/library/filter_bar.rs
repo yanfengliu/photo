@@ -19,6 +19,8 @@ use crate::widgets::{Icon, IconButton, color_label_set, rating_stars};
 const TABS: f32 = 28.0;
 /// Height of a row of conditions.
 const ROW: f32 = 34.0;
+/// Below this width the attribute conditions take two rows.
+const ATTRIBUTES_IN_ONE_ROW: f32 = 960.0;
 
 /// The filter bar's tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,10 +49,13 @@ pub(crate) fn focus_text(ui: &mut UiState) {
 
 /// Show the filter bar.
 pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
+    let one_row = ui.available_width() >= ATTRIBUTES_IN_ONE_ROW;
     let height = TABS
         + match cx.ui.filter_bar.tab {
             None => 0.0,
-            Some(FilterTab::Text | FilterTab::Attribute) => ROW,
+            Some(FilterTab::Text) => ROW,
+            Some(FilterTab::Attribute) if one_row => ROW,
+            Some(FilterTab::Attribute) => 2.0 * ROW,
             Some(FilterTab::Metadata) => filter_metadata::HEIGHT,
         };
     let frame = theme::panel_frame().inner_margin(Margin::symmetric(10, 0));
@@ -64,7 +69,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
             match cx.ui.filter_bar.tab {
                 None => {}
                 Some(FilterTab::Text) => text(ui, cx, &mut filter),
-                Some(FilterTab::Attribute) => attributes(ui, &mut filter),
+                Some(FilterTab::Attribute) => attributes(ui, &mut filter, one_row),
                 Some(FilterTab::Metadata) => filter_metadata::show(ui, cx, &mut filter),
             }
             if &filter != cx.engine.filter() {
@@ -170,60 +175,82 @@ fn text(ui: &mut Ui, cx: &mut Cx<'_>, filter: &mut Filter) {
     });
 }
 
-/// Flag, rating, colour label, file kind, copies and edits.
-fn attributes(ui: &mut Ui, filter: &mut Filter) {
-    ui.horizontal_centered(|ui| {
-        ui.label(RichText::new("Flag").color(palette::TEXT_DIM));
-        for (flag, icon, name) in [
-            (Flag::Picked, Icon::FlagPick, "Show picked"),
-            (Flag::Unflagged, Icon::FlagNone, "Show unflagged"),
-            (Flag::Rejected, Icon::FlagReject, "Show rejected"),
-        ] {
-            let on = filter.flags.contains(&flag);
-            if ui.add(IconButton::new(icon, name).selected(on)).clicked() {
-                if on {
-                    filter.flags.retain(|other| *other != flag);
-                } else {
-                    filter.flags.push(flag);
-                }
+/// Flag, rating, colour label, file kind, copies and edits: in one row, or
+/// in a narrow window, the marks in one row and the kinds in another.
+fn attributes(ui: &mut Ui, filter: &mut Filter, one_row: bool) {
+    if one_row {
+        ui.horizontal_centered(|ui| {
+            marks(ui, filter);
+            ui.add_space(space::XL);
+            kinds(ui, filter);
+        });
+        return;
+    }
+    let row = vec2(ui.available_width(), ROW);
+    let layout = Layout::left_to_right(Align::Center);
+    ui.allocate_ui_with_layout(row, layout, |ui| marks(ui, filter));
+    ui.allocate_ui_with_layout(row, layout, |ui| kinds(ui, filter));
+}
+
+/// The flag, rating and colour-label conditions.
+fn marks(ui: &mut Ui, filter: &mut Filter) {
+    ui.label(RichText::new("Flag").color(palette::TEXT_DIM));
+    for (flag, icon, name) in [
+        (Flag::Picked, Icon::FlagPick, "Show picked"),
+        (Flag::Unflagged, Icon::FlagNone, "Show unflagged"),
+        (Flag::Rejected, Icon::FlagReject, "Show rejected"),
+    ] {
+        let on = filter.flags.contains(&flag);
+        if ui.add(IconButton::new(icon, name).selected(on)).clicked() {
+            if on {
+                filter.flags.retain(|other| *other != flag);
+            } else {
+                filter.flags.push(flag);
             }
         }
-        ui.add_space(space::XL);
-        rating(ui, filter);
-        ui.add_space(space::XL);
-        ui.label(RichText::new("Color").color(palette::TEXT_DIM));
-        color_label_set(ui, "Filter label", &mut filter.labels);
-        ui.add_space(space::XL);
-        choice(
-            ui,
-            "Kind",
-            "File kind filter",
-            &mut filter.kind,
-            &[
-                (None, "All"),
-                (Some(FileKind::Raw), "RAW"),
-                (Some(FileKind::Raster), "Raster"),
-            ],
-        );
-        choice(
-            ui,
-            "Copies",
-            "Copies filter",
-            &mut filter.copies,
-            &[
-                (None, "All"),
-                (Some(CopyFilter::Masters), "Masters"),
-                (Some(CopyFilter::VirtualCopies), "Virtual copies"),
-            ],
-        );
-        choice(
-            ui,
-            "Edits",
-            "Edited filter",
-            &mut filter.edited,
-            &[(None, "All"), (Some(true), "Edited"), (Some(false), "Unedited")],
-        );
-    });
+    }
+    ui.add_space(space::XL);
+    rating(ui, filter);
+    ui.add_space(space::XL);
+    ui.label(RichText::new("Color").color(palette::TEXT_DIM));
+    color_label_set(ui, "Filter label", &mut filter.labels);
+}
+
+/// The file kind, copies and edits conditions.
+fn kinds(ui: &mut Ui, filter: &mut Filter) {
+    choice(
+        ui,
+        "Kind",
+        "File kind filter",
+        &mut filter.kind,
+        &[
+            (None, "All"),
+            (Some(FileKind::Raw), "RAW"),
+            (Some(FileKind::Raster), "Raster"),
+        ],
+    );
+    choice(
+        ui,
+        "Copies",
+        "Copies filter",
+        &mut filter.copies,
+        &[
+            (None, "All"),
+            (Some(CopyFilter::Masters), "Masters"),
+            (Some(CopyFilter::VirtualCopies), "Virtual copies"),
+        ],
+    );
+    choice(
+        ui,
+        "Edits",
+        "Edited filter",
+        &mut filter.edited,
+        &[
+            (None, "All"),
+            (Some(true), "Edited"),
+            (Some(false), "Unedited"),
+        ],
+    );
 }
 
 /// "Rating [at least] ★★★☆☆": no stars is no rating condition.

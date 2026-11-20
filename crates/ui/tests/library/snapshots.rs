@@ -1,7 +1,7 @@
 //! Frames of every Library state, rendered on the GPU at 1600 x 1000
 //! points, at 1x and 2x, to `target/ui-snapshots/library-*.png`, for a
 //! person to look at. On a machine with no GPU nothing is rendered and the
-//! test only drives the states.
+//! tests only drive the states.
 
 use std::path::{Path, PathBuf};
 
@@ -22,21 +22,34 @@ fn snapshot_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Render the frame as `library-{name}.png` (with `@2x` at two pixels per
-/// point), or say why not.
-fn snap(harness: &mut Harness<PhotoApp>, name: &str, scale: u32) -> TestResult {
+/// Render the resting frame as `library-{name}.png` (with `@2x` at two
+/// pixels per point), or say why not.
+pub fn snap(harness: &mut Harness<PhotoApp>, name: &str, scale: u32) -> TestResult {
     settle(harness)?;
     // Let toasts and animations finish, so the frame is the resting one,
     // with no pointer drawn or hovering.
     harness.pointer_leave()?;
     harness.advance(3.0);
     harness.run()?;
-    let suffix = if scale == 1 { String::new() } else { format!("@{scale}x") };
+    snap_now(harness, name, scale)
+}
+
+/// Render the frame as it is, while work may still be running.
+pub fn snap_now(harness: &mut Harness<PhotoApp>, name: &str, scale: u32) -> TestResult {
+    let suffix = if scale == 1 {
+        String::new()
+    } else {
+        format!("@{scale}x")
+    };
     let file = format!("library-{name}{suffix}.png");
+    let window = harness.ctx().content_rect().size() * scale as f32;
     match harness.save_png(snapshot_path(&file)) {
         Ok(()) => {
             let image = image::open(snapshot_path(&file))?;
-            assert_eq!((image.width(), image.height()), (1600 * scale, 1000 * scale));
+            assert_eq!(
+                (image.width(), image.height()),
+                (window.x as u32, window.y as u32)
+            );
             Ok(())
         }
         Err(RenderError::NoAdapter(reason)) => {
@@ -88,13 +101,35 @@ fn shoot() -> Result<(TempDir, Vec<PathBuf>), Box<dyn std::error::Error>> {
     std::fs::create_dir(&hills)?;
     let palettes: [[[u8; 3]; 4]; 6] = [
         [[40, 64, 120], [230, 150, 110], [70, 60, 90], [30, 40, 50]],
-        [[120, 170, 210], [220, 230, 235], [90, 120, 80], [50, 80, 40]],
+        [
+            [120, 170, 210],
+            [220, 230, 235],
+            [90, 120, 80],
+            [50, 80, 40],
+        ],
         [[20, 20, 50], [170, 80, 60], [50, 30, 50], [20, 15, 25]],
-        [[150, 190, 220], [245, 225, 190], [160, 130, 90], [110, 80, 50]],
+        [
+            [150, 190, 220],
+            [245, 225, 190],
+            [160, 130, 90],
+            [110, 80, 50],
+        ],
         [[70, 110, 140], [190, 210, 200], [60, 90, 100], [30, 55, 60]],
-        [[200, 140, 120], [250, 210, 150], [120, 90, 110], [60, 45, 60]],
+        [
+            [200, 140, 120],
+            [250, 210, 150],
+            [120, 90, 110],
+            [60, 45, 60],
+        ],
     ];
-    let sizes = [(1200, 800), (800, 1200), (1200, 900), (1280, 720), (1000, 1000), (1200, 800)];
+    let sizes = [
+        (1200, 800),
+        (800, 1200),
+        (1200, 900),
+        (1280, 720),
+        (1000, 1000),
+        (1200, 800),
+    ];
     let mut files = Vec::new();
     for index in 0..12 {
         let folder = if index < 7 { &coast } else { &hills };
@@ -153,7 +188,11 @@ fn organise(harness: &mut Harness<PhotoApp>) -> TestResult {
     harness.press_key(Key::Enter, Modifiers::NONE)?;
     harness.click(Role::Button, "Create collection")?;
     harness.click(Role::Button, "New Smart Collection…")?;
-    harness.set_text(Role::TextInput, "Smart collection name", "Four stars and up")?;
+    harness.set_text(
+        Role::TextInput,
+        "Smart collection name",
+        "Four stars and up",
+    )?;
     harness.click(Role::ComboBox, "Rule 1 operator")?;
     harness.click(Role::Button, "is at least")?;
     harness.click(Role::Button, "Rule 1 rating 4")?;
@@ -161,8 +200,14 @@ fn organise(harness: &mut Harness<PhotoApp>) -> TestResult {
 
     click_cell(harness, "DSC_4100.jpg", Modifiers::NONE)?;
     click_cell(harness, "DSC_4103.jpg", Modifiers::COMMAND)?;
-    let from = harness.control(Role::ListBoxOption, "DSC_4100.jpg")?.rect.center();
-    let to = harness.control(Role::TreeItem, "Collection Portfolio")?.rect.center();
+    let from = harness
+        .control(Role::ListBoxOption, "DSC_4100.jpg")?
+        .rect
+        .center();
+    let to = harness
+        .control(Role::TreeItem, "Collection Portfolio")?
+        .rect
+        .center();
     harness.drag(from, to)?;
     harness.set_text(Role::TextInput, "Add keywords", "coast, evening")?;
     click_cell(harness, "IMG_2211.jpg", Modifiers::NONE)?;

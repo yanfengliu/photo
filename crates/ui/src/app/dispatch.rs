@@ -102,7 +102,9 @@ fn step_within_selection(cx: &mut Cx<'_>, step: isize) {
     else {
         return;
     };
-    let next = at.saturating_add_signed(step).min(selected.len().saturating_sub(1));
+    let next = at
+        .saturating_add_signed(step)
+        .min(selected.len().saturating_sub(1));
     if let Some(photo) = selected.get(next).copied() {
         cx.act(Action::MakeActive(photo));
     }

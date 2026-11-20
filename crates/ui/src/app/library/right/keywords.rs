@@ -1,17 +1,19 @@
-//! Keywording and the Keyword List.
+//! Keywording and the Keyword List, both about the selected photos (the
+//! active photo when none is selected).
 //!
-//! Keywording shows the keywords of the selected photos as tags (a tag
-//! carried by only some of them is marked with an asterisk): a click on a
-//! tag's cross takes that keyword off the selection, and names typed in the
-//! field (separated by commas) go onto it with Enter. The Keyword List is
-//! the keyword tree with each keyword's count and a tick where the active
-//! photo carries it; clicking a tick puts the keyword on the selection or
+//! Keywording shows their keywords as tags (a tag carried by only some of
+//! them is marked with an asterisk): a click on a tag's cross takes that
+//! keyword off them, and names typed in the field (separated by commas) go
+//! onto them with Enter. The Keyword List is the keyword tree with each
+//! keyword's count and a tick where every one of them carries it (a dash
+//! where only some do); clicking a tick puts the keyword on them all or
 //! takes it off.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egui::{
-    Checkbox, CornerRadius, Key, Rect, RichText, Sense, TextEdit, Ui, Vec2, pos2, vec2,
+    Checkbox, CornerRadius, Key, Rect, RichText, Role, Sense, TextEdit, Ui, UiBuilder, Vec2,
+    WidgetInfo, pos2, vec2,
 };
 use photo_core::meta::{KeywordId, PhotoId};
 use photo_engine::{Engine, KeywordInfo, Target};
@@ -21,8 +23,8 @@ use crate::app::{Cx, text};
 use crate::theme::{self, palette, radius, size, space};
 use crate::widgets::{Icon, IconButton};
 
-/// The most selected photos whose keywords are read for the tags; the tags
-/// of a larger selection are those of its first photos.
+/// The most selected photos whose keywords are read; the tags and ticks of
+/// a larger selection are those of its first photos.
 const MOST_READ: usize = 500;
 /// How far each level of the keyword tree is indented.
 const INDENT: f32 = 14.0;
@@ -32,34 +34,40 @@ const INDENT: f32 = 14.0;
 pub(crate) struct KeywordState {
     /// The names being typed into Keywording.
     pub(crate) draft: String,
-    /// The keywords of the selection and of the active photo, and what
-    /// they were read for.
+    /// The keywords of the photos the panels are about, and what they were
+    /// read for.
     read: Option<Read>,
 }
 
 #[derive(Clone, Debug)]
 struct Read {
-    /// The selected photos and the keyword list they were read against: a
-    /// keyword put on or taken off a photo changes a count in that list.
+    /// The selected photos, the active one and the keyword list they were
+    /// read against: a keyword put on or taken off a photo changes a count
+    /// in that list.
     selection: Vec<PhotoId>,
     active: Option<PhotoId>,
     keywords: Vec<KeywordInfo>,
-    /// Each keyword name of the selection, with how many photos carry it.
-    tags: BTreeMap<String, usize>,
-    /// How many selected photos were read.
+    /// How many photos the panels are about: those `Target::Selected`
+    /// names, the selection or else the active photo.
+    subject: usize,
+    /// How many of them were read.
     counted: usize,
-    /// The keywords of the active photo.
-    on_active: HashSet<KeywordId>,
+    /// Each keyword name of the photos read, with how many carry it.
+    tags: BTreeMap<String, usize>,
+    /// Each keyword of the photos read, with how many carry it.
+    carried: HashMap<KeywordId, usize>,
 }
 
 impl KeywordState {
-    /// The keywords of the selection and the active photo, read again only
-    /// when the selection or the keyword list changed.
+    /// The keywords of the photos the panels are about, read again only
+    /// when the selection, the active photo or the keyword list changed.
     fn read(&mut self, engine: &Engine) -> &Read {
         let selection = engine.selection().selected();
         let active = engine.active_photo();
         let stale = self.read.as_ref().is_none_or(|read| {
-            read.selection != selection || read.active != active || read.keywords != engine.keywords()
+            read.selection != selection
+                || read.active != active
+                || read.keywords != engine.keywords()
         });
         if stale {
             self.read = Some(read_keywords(engine));
@@ -70,27 +78,29 @@ impl KeywordState {
 
 fn read_keywords(engine: &Engine) -> Read {
     let selection = engine.selection().selected().to_vec();
+    let active = engine.active_photo();
+    let subject: Vec<PhotoId> = if selection.is_empty() {
+        active.into_iter().collect()
+    } else {
+        selection.clone()
+    };
+    let counted = subject.len().min(MOST_READ);
     let mut tags = BTreeMap::new();
-    let counted = selection.len().min(MOST_READ);
-    for photo in &selection[..counted] {
+    let mut carried = HashMap::new();
+    for photo in &subject[..counted] {
         for keyword in engine.photo_keywords(*photo).unwrap_or_default() {
+            *carried.entry(keyword.id).or_insert(0) += 1;
             *tags.entry(keyword.name).or_insert(0) += 1;
         }
     }
-    let active = engine.active_photo();
-    let on_active = active
-        .and_then(|photo| engine.photo_keywords(photo).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|keyword| keyword.id)
-        .collect();
     Read {
         selection,
         active,
         keywords: engine.keywords().to_vec(),
-        tags,
+        subject: subject.len(),
         counted,
-        on_active,
+        tags,
+        carried,
     }
 }
 
@@ -113,7 +123,7 @@ pub(super) fn keywording(ui: &mut Ui, cx: &mut Cx<'_>) {
             }
         }
     });
-    if read.selection.len() > read.counted {
+    if read.subject > read.counted {
         let note = format!("Keywords of the first {} selected photos.", read.counted);
         ui.label(RichText::new(note).color(palette::TEXT_DIM).small());
     }
@@ -150,11 +160,12 @@ fn tag(ui: &mut Ui, name: &str, partial: bool) -> bool {
     } else {
         name.to_owned()
     };
-    let galley = ui
-        .painter()
-        .layout_no_wrap(shown, theme::body_font(), palette::TEXT_STRONG);
+    let galley =
+        ui.painter()
+            .layout_no_wrap(shown.clone(), theme::body_font(), palette::TEXT_STRONG);
     let size = vec2(PAD + galley.size().x + space::XS + CROSS + 2.0, size::ROW);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &shown));
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(radius::MD), palette::RAISED);
     let text = pos2(rect.left() + PAD, rect.center().y - galley.size().y / 2.0);
@@ -164,7 +175,9 @@ fn tag(ui: &mut Ui, name: &str, partial: bool) -> bool {
         Vec2::splat(CROSS),
     );
     let label = format!("Remove keyword {name}");
-    ui.put(cross, IconButton::new(Icon::Close, &label).side(CROSS))
+    // A child of its own, so the button does not move the row's cursor.
+    ui.new_child(UiBuilder::new().max_rect(cross))
+        .add(IconButton::new(Icon::Close, &label).side(CROSS))
         .clicked()
 }
 
@@ -172,18 +185,23 @@ fn tag(ui: &mut Ui, name: &str, partial: bool) -> bool {
 pub(super) fn list(ui: &mut Ui, cx: &mut Cx<'_>) {
     let keywords = cx.engine.keywords().to_vec();
     if keywords.is_empty() {
-        ui.label(RichText::new("Keywords appear here once photos carry them.").color(palette::TEXT_DIM));
+        ui.label(
+            RichText::new("Keywords appear here once photos carry them.").color(palette::TEXT_DIM),
+        );
         return;
     }
-    let on_active = cx.ui.right.keywords.read(cx.engine).on_active.clone();
-    let can_tick = cx.engine.active_photo().is_some();
+    let read = cx.ui.right.keywords.read(cx.engine);
+    let (carried, counted) = (read.carried.clone(), read.counted);
     for (index, depth) in tree(&keywords) {
         let keyword = &keywords[index];
+        let carriers = carried.get(&keyword.id).copied().unwrap_or(0);
         ui.horizontal(|ui| {
             ui.add_space(INDENT * depth as f32);
-            let mut ticked = on_active.contains(&keyword.id);
+            let mut ticked = counted > 0 && carriers == counted;
+            let checkbox = Checkbox::new(&mut ticked, keyword.name.as_str())
+                .indeterminate(carriers > 0 && carriers < counted);
             let response = ui
-                .add_enabled(can_tick, Checkbox::new(&mut ticked, keyword.name.as_str()))
+                .add_enabled(counted > 0, checkbox)
                 .accessible_name(format!("Keyword {}", keyword.name));
             if response.changed() {
                 let names = vec![keyword.name.clone()];

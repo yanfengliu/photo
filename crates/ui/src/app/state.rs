@@ -249,7 +249,10 @@ mod tests {
 
         layout.left = false;
         layout.toggle_sides();
-        assert!(!layout.left && !layout.right, "either side shown hides both");
+        assert!(
+            !layout.left && !layout.right,
+            "either side shown hides both"
+        );
 
         let mut layout = Layout::default();
         layout.toggle_edges();

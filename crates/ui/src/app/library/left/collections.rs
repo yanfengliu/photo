@@ -51,8 +51,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     let collections = cx.engine.collections().to_vec();
     if collections.is_empty() {
         ui.label(
-            RichText::new("Make a collection, then drag photos onto it.")
-                .color(palette::TEXT_DIM),
+            RichText::new("Make a collection, then drag photos onto it.").color(palette::TEXT_DIM),
         );
         return;
     }
@@ -97,7 +96,10 @@ fn new_items(ui: &mut Ui, cx: &mut Cx<'_>, parent: Option<CollectionId>) {
     if ui.button(format!("New Collection Set{inside}…")).clicked() {
         dialogs::open_new(cx, NewKind::Set, parent);
     }
-    if ui.button(format!("New Smart Collection{inside}…")).clicked() {
+    if ui
+        .button(format!("New Smart Collection{inside}…"))
+        .clicked()
+    {
         dialogs::open_new_smart(cx, parent);
     }
 }
@@ -162,7 +164,12 @@ fn row(
 mod tests {
     use super::*;
 
-    fn collection(id: i64, parent: Option<i64>, kind: CollectionKind, name: &str) -> CollectionInfo {
+    fn collection(
+        id: i64,
+        parent: Option<i64>,
+        kind: CollectionKind,
+        name: &str,
+    ) -> CollectionInfo {
         CollectionInfo {
             id: CollectionId(id),
             parent: parent.map(CollectionId),

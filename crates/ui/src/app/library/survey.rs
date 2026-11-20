@@ -83,10 +83,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         );
         let at = Align2::LEFT_CENTER.anchor_size(caption.left_center(), galley.size());
         ui.painter().galley(at.min, galley, palette::TEXT_DIM);
-        let close = Rect::from_min_size(
-            caption.right_top() + vec2(-18.0, 1.0),
-            Vec2::splat(18.0),
-        );
+        let close = Rect::from_min_size(caption.right_top() + vec2(-18.0, 1.0), Vec2::splat(18.0));
         let label = format!("Remove {display} from the survey");
         let closed = ui
             .put(close, IconButton::new(Icon::Close, &label).side(18.0))
@@ -94,7 +91,9 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
 
         let rect = Rect::from_min_size(min + vec2(0.0, CAPTION), cell_size);
         let name = prefixed("Survey", photo);
-        let builder = UiBuilder::new().max_rect(rect).id_salt(("survey", photo.id));
+        let builder = UiBuilder::new()
+            .max_rect(rect)
+            .id_salt(("survey", photo.id));
         let response = ui
             .scope_builder(builder, |ui| {
                 cell(ui, cx, photo, &name, rect.size(), preview)

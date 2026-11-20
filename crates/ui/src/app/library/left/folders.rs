@@ -69,7 +69,9 @@ pub(super) fn tree(folders: &[FolderInfo]) -> Vec<Node> {
 pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     let folders = cx.engine.folders().to_vec();
     if folders.is_empty() {
-        ui.label(RichText::new("Folders appear here once photos are imported.").color(palette::TEXT_DIM));
+        ui.label(
+            RichText::new("Folders appear here once photos are imported.").color(palette::TEXT_DIM),
+        );
         return;
     }
     let current = *cx.engine.source();

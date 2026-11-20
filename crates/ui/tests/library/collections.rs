@@ -29,7 +29,10 @@ fn a_new_collection_takes_photos_dragged_onto_it_and_shows_them() -> TestResult 
     settle(&mut harness)?;
 
     harness.press_key(Key::N, Modifiers::COMMAND)?;
-    assert!(harness.control(Role::Button, "Create")?.disabled, "it needs a name");
+    assert!(
+        harness.control(Role::Button, "Create")?.disabled,
+        "it needs a name"
+    );
     harness.type_text("Best of 2024")?;
     harness.press_key(Key::Enter, Modifiers::NONE)?;
     assert!(!harness.app().dialog_open());
@@ -38,7 +41,10 @@ fn a_new_collection_takes_photos_dragged_onto_it_and_shows_them() -> TestResult 
 
     click_cell(&mut harness, "dawn.jpg", Modifiers::NONE)?;
     click_cell(&mut harness, "fireworks.jpg", Modifiers::COMMAND)?;
-    let from = harness.control(Role::ListBoxOption, "dawn.jpg")?.rect.center();
+    let from = harness
+        .control(Role::ListBoxOption, "dawn.jpg")?
+        .rect
+        .center();
     let to = harness
         .control(Role::TreeItem, "Collection Best of 2024")?
         .rect
@@ -55,7 +61,10 @@ fn a_new_collection_takes_photos_dragged_onto_it_and_shows_them() -> TestResult 
     );
 
     harness.click(Role::TreeItem, "Collection Best of 2024")?;
-    assert_eq!(harness.app().engine().source(), &Source::Collection(best.id));
+    assert_eq!(
+        harness.app().engine().source(),
+        &Source::Collection(best.id)
+    );
     assert_eq!(names(&harness), ["dawn.jpg", "fireworks.jpg"]);
     assert_eq!(
         harness
@@ -79,8 +88,14 @@ fn photos_dragged_onto_the_quick_collection_go_into_it_and_b_toggles_it() -> Tes
     let studio = Studio::new();
     let mut harness = studio.app_with(files(&library));
     settle(&mut harness)?;
-    let from = harness.control(Role::ListBoxOption, "ridge.jpg")?.rect.center();
-    let to = harness.control(Role::TreeItem, "Quick Collection")?.rect.center();
+    let from = harness
+        .control(Role::ListBoxOption, "ridge.jpg")?
+        .rect
+        .center();
+    let to = harness
+        .control(Role::TreeItem, "Quick Collection")?
+        .rect
+        .center();
     harness.drag(from, to)?;
     assert_eq!(harness.app().engine().source_counts().quick_collection, 1);
     assert!(crate::cell(&harness, "ridge.jpg")?.contains("in quick collection"));
@@ -104,7 +119,10 @@ fn a_smart_collection_on_the_rating_follows_rating_changes() -> TestResult {
     harness.click(Role::Button, "New Smart Collection…")?;
     harness.set_text(Role::TextInput, "Smart collection name", "Three and up")?;
     assert_eq!(
-        harness.control(Role::ComboBox, "Rule 1 field")?.text.as_deref(),
+        harness
+            .control(Role::ComboBox, "Rule 1 field")?
+            .text
+            .as_deref(),
         Some("Rating")
     );
     harness.click(Role::ComboBox, "Rule 1 operator")?;
@@ -158,17 +176,26 @@ fn a_collection_is_renamed_and_deleted_from_its_menu_and_the_delete_undone() -> 
     let iceland = collection(&harness, "Iceland").ok_or("the collection")?;
     assert_eq!(iceland.parent, Some(trips.id));
 
-    let row = harness.control(Role::TreeItem, "Collection Iceland")?.rect.center();
+    let row = harness
+        .control(Role::TreeItem, "Collection Iceland")?
+        .rect
+        .center();
     harness.secondary_click_at(row)?;
     harness.click(Role::Button, "Rename…")?;
     harness.set_text(Role::TextInput, "New name", "Iceland 2024")?;
     harness.click(Role::Button, "Rename")?;
     assert!(collection(&harness, "Iceland 2024").is_some());
 
-    let row = harness.control(Role::TreeItem, "Collection Set Trips")?.rect.center();
+    let row = harness
+        .control(Role::TreeItem, "Collection Set Trips")?
+        .rect
+        .center();
     harness.secondary_click_at(row)?;
     harness.click(Role::Button, "Delete…")?;
-    assert!(shows(&harness, "Delete the collection set \"Trips\" and everything inside it?"));
+    assert!(shows(
+        &harness,
+        "Delete the collection set \"Trips\" and everything inside it?"
+    ));
     harness.click(Role::Button, "Delete")?;
     assert!(collection(&harness, "Trips").is_none());
     assert!(collection(&harness, "Iceland 2024").is_none());

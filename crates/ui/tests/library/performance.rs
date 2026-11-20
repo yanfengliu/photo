@@ -15,7 +15,9 @@ const PHOTOS: usize = 3_000;
 const FRAMES: usize = 60;
 
 /// The median and the slowest of `frames` timed frames.
-fn time_frames(harness: &mut photo_ui::harness::Harness<photo_ui::PhotoApp>) -> (Duration, Duration) {
+fn time_frames(
+    harness: &mut photo_ui::harness::Harness<photo_ui::PhotoApp>,
+) -> (Duration, Duration) {
     let mut times: Vec<Duration> = (0..FRAMES)
         .map(|_| {
             let start = Instant::now();
@@ -52,7 +54,10 @@ fn a_grid_of_three_thousand_photos_draws_a_frame_well_within_sixteen_millisecond
     );
     // The frame includes building the accessibility tree the harness reads,
     // which a window without a screen reader does not.
-    assert!(median < Duration::from_millis(16), "median frame {median:?}");
+    assert!(
+        median < Duration::from_millis(16),
+        "median frame {median:?}"
+    );
 
     if harness.can_render() {
         // Tessellating and drawing it on the GPU, and reading the pixels

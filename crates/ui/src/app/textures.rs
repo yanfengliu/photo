@@ -28,17 +28,15 @@ const STANDARD_MEMORY: usize = 96 << 20;
 /// Bytes of import-candidate textures kept.
 const CANDIDATE_MEMORY: usize = 48 << 20;
 
-/// A texture ready to draw.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A texture ready to draw: the current version's, or while that is not
+/// uploaded yet, an older one.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Shown {
     pub(crate) id: TextureId,
     /// Width divided by height.
     pub(crate) aspect: f32,
     /// The size in pixels.
     pub(crate) pixels: Vec2,
-    /// False while an older version is shown because the current one has
-    /// not been uploaded yet.
-    pub(crate) current: bool,
 }
 
 struct Slot {
@@ -50,12 +48,11 @@ struct Slot {
 }
 
 impl Slot {
-    fn shown(&self, current: bool) -> Shown {
+    fn shown(&self) -> Shown {
         Shown {
             id: self.handle.id(),
             aspect: self.pixels.x / self.pixels.y.max(1.0),
             pixels: self.pixels,
-            current,
         }
     }
 }
@@ -172,19 +169,18 @@ impl Textures {
         if let Some(slot) = shelf.slots.get_mut(&photo) {
             slot.used = frame;
             if ready.is_none_or(|preview| preview.version() == slot.version) {
-                return Some(slot.shown(ready.is_some()));
+                return Some(slot.shown());
             }
         }
         let preview = ready?;
-        let budget = upload_allowed(self.uploaded, preview);
-        if !budget {
+        if !upload_allowed(self.uploaded, preview.image().pixels.len()) {
             self.deferred = true;
-            return shelf.slots.get(&photo).map(|slot| slot.shown(false));
+            return shelf.slots.get(&photo).map(Slot::shown);
         }
         let name = format!("photo-{photo}-{size:?}");
         let slot = upload(ctx, &name, preview, frame)?;
         self.uploaded += slot.bytes;
-        let shown = slot.shown(true);
+        let shown = slot.shown();
         shelf.insert(photo, slot);
         Some(shown)
     }
@@ -199,20 +195,20 @@ impl Textures {
         let frame = self.frame;
         if let Some(slot) = self.candidates.slots.get_mut(path) {
             slot.used = frame;
-            return Some(slot.shown(true));
+            return Some(slot.shown());
         }
         let state = engine.candidate_thumbnail(path);
         let PreviewState::Ready(preview) = state else {
             return None;
         };
-        if !upload_allowed(self.uploaded, &preview) {
+        if !upload_allowed(self.uploaded, preview.image().pixels.len()) {
             self.deferred = true;
             return None;
         }
         let name = format!("candidate-{}", path.display());
         let slot = upload(ctx, &name, &preview, frame)?;
         self.uploaded += slot.bytes;
-        let shown = slot.shown(true);
+        let shown = slot.shown();
         self.candidates.insert(path.to_path_buf(), slot);
         Some(shown)
     }
@@ -223,10 +219,10 @@ impl Textures {
     }
 }
 
-/// Whether `preview` may be uploaded with `uploaded` bytes already sent
-/// this frame: always the first one, and others while the budget lasts.
-fn upload_allowed(uploaded: usize, preview: &Preview) -> bool {
-    uploaded == 0 || uploaded + preview.image().pixels.len() <= UPLOAD_BUDGET
+/// Whether `bytes` more may be uploaded with `uploaded` bytes already sent
+/// this frame: always the first preview, and others while the budget lasts.
+fn upload_allowed(uploaded: usize, bytes: usize) -> bool {
+    uploaded == 0 || uploaded + bytes <= UPLOAD_BUDGET
 }
 
 /// Upload a preview's pixels. `None` for pixels that do not match their
@@ -249,4 +245,48 @@ fn upload(ctx: &egui::Context, name: &str, preview: &Preview, frame: u64) -> Opt
         bytes: expected,
         used: frame,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A slot of `bytes`, last drawn in frame `used`.
+    fn slot(ctx: &egui::Context, bytes: usize, used: u64) -> Slot {
+        let image = ColorImage::filled([1, 1], egui::Color32::GRAY);
+        Slot {
+            version: 1,
+            handle: ctx.load_texture("test", image, TextureOptions::LINEAR),
+            pixels: vec2(1.0, 1.0),
+            bytes,
+            used,
+        }
+    }
+
+    #[test]
+    fn the_first_upload_of_a_frame_always_goes_and_later_ones_while_the_budget_lasts() {
+        assert!(
+            upload_allowed(0, UPLOAD_BUDGET * 3),
+            "one standard preview is never refused"
+        );
+        assert!(upload_allowed(1 << 20, 1 << 20));
+        assert!(!upload_allowed(UPLOAD_BUDGET - 10, 1 << 20));
+    }
+
+    #[test]
+    fn over_its_bound_a_shelf_drops_what_was_drawn_longest_ago_but_never_this_frame() {
+        let ctx = egui::Context::default();
+        let mut shelf = Shelf::new(100);
+        shelf.insert(1, slot(&ctx, 60, 3));
+        shelf.insert(2, slot(&ctx, 60, 1));
+        shelf.insert(3, slot(&ctx, 60, 5));
+        shelf.evict(5);
+        assert!(shelf.slots.contains_key(&3), "drawn this frame");
+        assert!(!shelf.slots.contains_key(&2), "the oldest goes first");
+        assert!(!shelf.slots.contains_key(&1));
+        assert_eq!(shelf.bytes, 60);
+
+        shelf.insert(3, slot(&ctx, 20, 6));
+        assert_eq!(shelf.bytes, 20, "a replaced texture's bytes are given back");
+    }
 }

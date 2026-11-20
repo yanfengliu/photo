@@ -46,9 +46,19 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     let pixels_per_point = ui.ctx().pixels_per_point();
     let stage = area.with_min_y(area.top() + INFO);
     // A fitted photo keeps a margin; a larger one uses the whole stage.
-    let view_for = |zoom| if zoom == Zoom::Fit { stage.shrink(MARGIN) } else { stage };
+    let view_for = |zoom| {
+        if zoom == Zoom::Fit {
+            stage.shrink(MARGIN)
+        } else {
+            stage
+        }
+    };
 
-    let response = ui.interact(stage, ui.make_persistent_id("loupe"), Sense::click_and_drag());
+    let response = ui.interact(
+        stage,
+        ui.make_persistent_id("loupe"),
+        Sense::click_and_drag(),
+    );
     let loupe = &mut cx.ui.loupe;
     if response.is_pointer_button_down_on() {
         loupe.pan += ui.input(|input| input.pointer.delta());
@@ -97,7 +107,9 @@ fn natural_size(photo: &PhotoSummary, standard: Option<Shown>, thumbnail: Option
     if let Some(standard) = standard {
         return standard.pixels;
     }
-    let aspect = thumbnail.map_or(photo.width as f32 / photo.height.max(1) as f32, |t| t.aspect);
+    let aspect = thumbnail.map_or(photo.width as f32 / photo.height.max(1) as f32, |t| {
+        t.aspect
+    });
     let long = (photo.width.max(photo.height) as f32).clamp(1.0, STANDARD_EDGE);
     if aspect >= 1.0 {
         vec2(long, long / aspect)
@@ -160,10 +172,12 @@ fn region(image: Rect, view: Rect) -> Option<Rect> {
     if seen.width() >= image.width() - 0.5 && seen.height() >= image.height() - 0.5 {
         return None;
     }
-    let to_unit = |point: Pos2| pos2(
-        (point.x - image.left()) / image.width(),
-        (point.y - image.top()) / image.height(),
-    );
+    let to_unit = |point: Pos2| {
+        pos2(
+            (point.x - image.left()) / image.width(),
+            (point.y - image.top()) / image.height(),
+        )
+    };
     Some(Rect::from_min_max(to_unit(seen.min), to_unit(seen.max)))
 }
 
@@ -180,17 +194,26 @@ fn info_line(ui: &Ui, cx: &mut Cx<'_>, photo: &PhotoSummary, band: Rect) {
         parts.extend(record.metadata.iso.map(|iso| format!("ISO {iso}")));
     }
     let painter = ui.painter_at(band);
-    let note = (cx.ui.loupe.zoom == Zoom::OneToOne)
-        .then_some("1:1 shows the standard preview (up to 2048 pixels) until Develop renders full size");
+    let note = (cx.ui.loupe.zoom == Zoom::OneToOne).then_some(
+        "1:1 shows the standard preview (up to 2048 pixels) until Develop renders full size",
+    );
     let note_width = note.map_or(0.0, |note| {
-        let galley = painter.layout_no_wrap(note.to_owned(), theme::small_font(), palette::TEXT_DIM);
+        let galley =
+            painter.layout_no_wrap(note.to_owned(), theme::small_font(), palette::TEXT_DIM);
         let width = galley.size().x;
-        let at = Align2::RIGHT_CENTER.anchor_size(band.right_center() - vec2(12.0, 0.0), galley.size());
+        let at =
+            Align2::RIGHT_CENTER.anchor_size(band.right_center() - vec2(12.0, 0.0), galley.size());
         painter.galley(at.min, galley, palette::TEXT_DIM);
         width + 24.0
     });
     let room = band.width() - note_width - 24.0;
-    let galley = text::fitted(&painter, &parts.join("    "), theme::small_font(), palette::TEXT, room);
+    let galley = text::fitted(
+        &painter,
+        &parts.join("    "),
+        theme::small_font(),
+        palette::TEXT,
+        room,
+    );
     let at = Align2::LEFT_CENTER.anchor_size(band.left_center() + vec2(12.0, 0.0), galley.size());
     painter.galley(at.min, galley, palette::TEXT);
 }
@@ -214,9 +237,18 @@ mod tests {
     fn fit_shows_everything_fill_covers_and_one_to_one_is_one_pixel_per_pixel() {
         let natural = vec2(2048.0, 1024.0);
         let view = vec2(1000.0, 800.0);
-        assert_eq!(image_size(Zoom::Fit, natural, view, 1.0), vec2(1000.0, 500.0));
-        assert_eq!(image_size(Zoom::Fill, natural, view, 1.0), vec2(1600.0, 800.0));
-        assert_eq!(image_size(Zoom::OneToOne, natural, view, 2.0), vec2(1024.0, 512.0));
+        assert_eq!(
+            image_size(Zoom::Fit, natural, view, 1.0),
+            vec2(1000.0, 500.0)
+        );
+        assert_eq!(
+            image_size(Zoom::Fill, natural, view, 1.0),
+            vec2(1600.0, 800.0)
+        );
+        assert_eq!(
+            image_size(Zoom::OneToOne, natural, view, 2.0),
+            vec2(1024.0, 512.0)
+        );
     }
 
     #[test]
@@ -224,7 +256,10 @@ mod tests {
         let view = vec2(1000.0, 800.0);
         let pan = clamp_pan(vec2(900.0, -900.0), vec2(1600.0, 800.0), view);
         assert_eq!(pan, vec2(300.0, 0.0));
-        assert_eq!(clamp_pan(vec2(50.0, 50.0), vec2(400.0, 300.0), view), Vec2::ZERO);
+        assert_eq!(
+            clamp_pan(vec2(50.0, 50.0), vec2(400.0, 300.0), view),
+            Vec2::ZERO
+        );
     }
 
     #[test]
@@ -239,7 +274,10 @@ mod tests {
         assert_eq!(loupe.zoom, Zoom::OneToOne);
         let zoomed = placed(view, natural, loupe.pan, 1.0);
         let fraction = (pointer - zoomed.min) / zoomed.size();
-        assert!((fraction - vec2(0.75, 0.25)).length() < 1.0e-4, "{fraction:?}");
+        assert!(
+            (fraction - vec2(0.75, 0.25)).length() < 1.0e-4,
+            "{fraction:?}"
+        );
     }
 
     #[test]

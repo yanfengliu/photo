@@ -52,7 +52,11 @@ fn column(ui: &mut Ui, facet: Facet, header: &str, values: &[FacetValue], filter
     ui.vertical(|ui| {
         ui.add_sized(
             vec2(ui.available_width(), HEADER),
-            egui::Label::new(RichText::new(header.to_uppercase()).small().color(palette::TEXT_DIM)),
+            egui::Label::new(
+                RichText::new(header.to_uppercase())
+                    .small()
+                    .color(palette::TEXT_DIM),
+            ),
         );
         ScrollArea::vertical()
             .id_salt(("facet", header))
@@ -63,7 +67,11 @@ fn column(ui: &mut Ui, facet: Facet, header: &str, values: &[FacetValue], filter
                 let none_chosen = !chosen_any(facet, filter);
                 let row = Button::selectable(none_chosen, format!("All ({all})"))
                     .min_size(vec2(ui.available_width(), 18.0));
-                if ui.add(row).accessible_name(format!("{header} all")).clicked() {
+                if ui
+                    .add(row)
+                    .accessible_name(format!("{header} all"))
+                    .clicked()
+                {
                     clear(facet, filter);
                 }
                 for value in values {
@@ -74,8 +82,11 @@ fn column(ui: &mut Ui, facet: Facet, header: &str, values: &[FacetValue], filter
                     };
                     let selected = is_chosen(facet, &value.value, filter);
                     let usable = choosable(facet, &value.value);
+                    // A long lens name is cut short with an ellipsis rather
+                    // than run under the next column.
                     let row = Button::selectable(selected, format!("{shown} ({})", value.count))
-                        .min_size(vec2(ui.available_width(), 18.0));
+                        .min_size(vec2(ui.available_width(), 18.0))
+                        .truncate();
                     let response = ui
                         .add_enabled(usable, row)
                         .accessible_name(format!("{header} {shown}"));
@@ -122,10 +133,11 @@ fn is_chosen(facet: Facet, value: &str, filter: &Filter) -> bool {
         Facet::Camera => filter.cameras.iter().any(|camera| camera == value),
         Facet::Lens => filter.lenses.iter().any(|lens| lens == value),
         Facet::Iso => value.parse::<u32>().ok().is_some_and(|iso| {
-            filter.iso == Some(IsoRange {
-                min: Some(iso),
-                max: Some(iso),
-            })
+            filter.iso
+                == Some(IsoRange {
+                    min: Some(iso),
+                    max: Some(iso),
+                })
         }),
         Facet::CaptureDate => day(value).is_some_and(|range| filter.capture == Some(range)),
     }

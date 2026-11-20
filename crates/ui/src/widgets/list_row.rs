@@ -177,7 +177,11 @@ impl<'a> ListRow<'a> {
         } else if self.selected {
             painter.rect_filled(band, rounding, palette::RAISED);
         } else if response.hovered() {
-            painter.rect_filled(band, rounding, theme::mix(palette::PANEL, palette::HOVER, 0.4));
+            painter.rect_filled(
+                band,
+                rounding,
+                theme::mix(palette::PANEL, palette::HOVER, 0.4),
+            );
         }
         let ink = if self.selected || drop_here {
             palette::TEXT_STRONG
@@ -201,14 +205,16 @@ impl<'a> ListRow<'a> {
                     center + vec2(-2.0, 3.5),
                 ]
             };
-            painter.add(Shape::convex_polygon(corners, palette::TEXT_DIM, Stroke::NONE));
+            painter.add(Shape::convex_polygon(
+                corners,
+                palette::TEXT_DIM,
+                Stroke::NONE,
+            ));
         }
         x += DISCLOSURE;
         if let Some(icon) = self.icon {
-            let glyph = Rect::from_min_size(
-                pos2(x, rect.center().y - ICON / 2.0),
-                Vec2::splat(ICON),
-            );
+            let glyph =
+                Rect::from_min_size(pos2(x, rect.center().y - ICON / 2.0), Vec2::splat(ICON));
             icon.paint(painter, glyph, palette::TEXT_DIM);
             x += ICON + space::MD;
         }

@@ -196,9 +196,19 @@ mod tests {
         assert_eq!(shortcut(Key::Z, SHIFT_COMMAND), Some(Shortcut::Redo));
         assert_eq!(shortcut(Key::I, SHIFT_COMMAND), Some(Shortcut::Import));
         assert_eq!(shortcut(Key::I, Modifiers::COMMAND), None);
-        assert_eq!(shortcut(Key::N, Modifiers::COMMAND), Some(Shortcut::NewCollection));
-        assert_eq!(shortcut(Key::Tab, Modifiers::SHIFT), Some(Shortcut::ToggleEdges));
-        assert_eq!(shortcut(Key::Num3, Modifiers::COMMAND), None, "not a rating");
+        assert_eq!(
+            shortcut(Key::N, Modifiers::COMMAND),
+            Some(Shortcut::NewCollection)
+        );
+        assert_eq!(
+            shortcut(Key::Tab, Modifiers::SHIFT),
+            Some(Shortcut::ToggleEdges)
+        );
+        assert_eq!(
+            shortcut(Key::Num3, Modifiers::COMMAND),
+            None,
+            "not a rating"
+        );
         assert_eq!(shortcut(Key::G, Modifiers::ALT), None);
         let mac_control = Modifiers {
             ctrl: true,

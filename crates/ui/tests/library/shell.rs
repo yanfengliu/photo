@@ -28,7 +28,10 @@ fn develop_is_shown_as_the_next_module_but_cannot_be_chosen() -> TestResult {
     let studio = Studio::new();
     let mut harness = studio.app();
     harness.run()?;
-    assert_eq!(harness.control(Role::Button, "Library")?.toggled, Some(true));
+    assert_eq!(
+        harness.control(Role::Button, "Library")?.toggled,
+        Some(true)
+    );
     let develop = harness.control(Role::Button, "Develop")?;
     assert!(develop.disabled);
 
@@ -68,9 +71,17 @@ fn tab_toggles_the_side_columns_shift_tab_every_edge_and_t_the_toolbar() -> Test
     harness.press_key(Key::Tab, Modifiers::SHIFT)?;
     let layout = harness.app().layout();
     assert!(!layout.top_bar && !layout.left && !layout.right && !layout.filmstrip);
-    assert_eq!(harness.count(Role::Button, "Library"), 0, "the top bar is gone");
+    assert_eq!(
+        harness.count(Role::Button, "Library"),
+        0,
+        "the top bar is gone"
+    );
     assert_eq!(harness.count(Role::ListBoxOption, "Filmstrip dawn.jpg"), 0);
-    assert_eq!(harness.count(Role::ListBoxOption, "dawn.jpg"), 1, "the grid stays");
+    assert_eq!(
+        harness.count(Role::ListBoxOption, "dawn.jpg"),
+        1,
+        "the grid stays"
+    );
     harness.press_key(Key::Tab, Modifiers::SHIFT)?;
     assert_eq!(harness.count(Role::Button, "Library"), 1);
     assert_eq!(harness.count(Role::ListBoxOption, "Filmstrip dawn.jpg"), 1);

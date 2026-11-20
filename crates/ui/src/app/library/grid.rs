@@ -8,7 +8,7 @@
 
 use egui::{Align, Button, Rect, RichText, ScrollArea, Ui, UiBuilder, Vec2, vec2};
 use photo_core::meta::PhotoId;
-use photo_engine::{CollectionKind, Filter, PreviewSize, Source, Target};
+use photo_engine::{CollectionKind, Filter, PreviewSize, Source, Target, TaskKind, TaskState};
 
 use super::{cell, drag};
 use crate::app::actions::Action;
@@ -45,7 +45,10 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         return;
     }
     let reveal = cx.ui.grid.reveal_active;
-    let active = cx.engine.active_photo().and_then(|photo| cx.engine.index_of(photo));
+    let active = cx
+        .engine
+        .active_photo()
+        .and_then(|photo| cx.engine.index_of(photo));
     let output = ScrollArea::vertical()
         .id_salt("grid")
         .auto_shrink([false, false])
@@ -175,15 +178,25 @@ fn menu(cx: &mut Cx<'_>, response: &egui::Response) {
 
 /// The grid has nothing to show: say why, and offer the way on.
 fn empty(ui: &mut Ui, cx: &mut Cx<'_>) {
-    let catalog_empty = cx.engine.source_counts().all_photos == 0;
+    let importing = cx
+        .engine
+        .tasks()
+        .iter()
+        .any(|task| task.kind == TaskKind::Import && task.state == TaskState::Running);
+    let catalog_empty = cx.engine.source_counts().all_photos == 0 && !importing;
     let filtered = !cx.engine.filter().is_empty();
-    let (title, hint) = if catalog_empty {
+    let (title, hint) = if importing {
+        ("Importing photos…", "They appear here as they are added.")
+    } else if catalog_empty {
         (
             "Import photos to get started",
             "Photos are added where they are, or copied into folders by date.",
         )
     } else if filtered {
-        ("No photo matches the filter", "Loosen the filter, or turn it off.")
+        (
+            "No photo matches the filter",
+            "Loosen the filter, or turn it off.",
+        )
     } else {
         match *cx.engine.source() {
             Source::QuickCollection => (
@@ -218,11 +231,7 @@ fn empty(ui: &mut Ui, cx: &mut Cx<'_>) {
     };
     ui.with_layout(egui::Layout::top_down(Align::Center), |ui| {
         ui.add_space((ui.available_height() / 2.0 - 60.0).max(space::XL));
-        ui.label(
-            RichText::new(title)
-                .size(18.0)
-                .color(palette::TEXT_STRONG),
-        );
+        ui.label(RichText::new(title).size(18.0).color(palette::TEXT_STRONG));
         ui.add_space(space::MD);
         if !hint.is_empty() {
             ui.label(RichText::new(hint).color(palette::TEXT_DIM));

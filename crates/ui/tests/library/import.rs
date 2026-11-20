@@ -6,7 +6,7 @@ use photo_testkit::TempLibrary;
 use photo_ui::PhotoApp;
 use photo_ui::harness::Harness;
 
-use crate::{Studio, TestResult, names, settle, shows};
+use crate::{Studio, TestResult, names, restless, settle, shows};
 
 /// Open the dialog with the keyboard and look in `library`'s folder.
 fn scan(harness: &mut Harness<PhotoApp>, library: &TempLibrary) -> TestResult {
@@ -27,7 +27,12 @@ fn a_folder_imported_through_the_dialog_fills_the_grid_as_the_previous_import() 
     scan(&mut harness, &library)?;
 
     for entry in library.entries() {
-        let name = entry.path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = entry
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let candidate = harness.control(Role::ListBoxOption, &format!("Import {name}"))?;
         assert_eq!(candidate.selected, Some(true), "{name} is ticked");
     }
@@ -42,14 +47,30 @@ fn a_folder_imported_through_the_dialog_fills_the_grid_as_the_previous_import() 
     assert_eq!(engine.photo_count(), 6);
     assert_eq!(
         names(&harness),
-        ["lake.png", "meadow.tif", "dawn.jpg", "ridge.jpg", "harbour.dng", "fireworks.jpg"]
+        [
+            "lake.png",
+            "meadow.tif",
+            "dawn.jpg",
+            "ridge.jpg",
+            "harbour.dng",
+            "fireworks.jpg"
+        ]
     );
     for name in names(&harness) {
-        assert_eq!(harness.count(Role::ListBoxOption, &name), 1, "{name} has a cell");
+        assert_eq!(
+            harness.count(Role::ListBoxOption, &name),
+            1,
+            "{name} has a cell"
+        );
     }
     assert!(shows(&harness, "Previous Import"));
     assert!(shows(&harness, "6 of 6 photos, 1 selected"));
-    assert!(harness.app().toasts().any(|toast| toast == "Imported 6 photos"));
+    assert!(
+        harness
+            .app()
+            .toasts()
+            .any(|toast| toast == "Imported 6 photos")
+    );
     Ok(())
 }
 
@@ -63,7 +84,9 @@ fn an_unticked_candidate_is_left_out() -> TestResult {
 
     harness.click(Role::ListBoxOption, "Import lake.png")?;
     assert_eq!(
-        harness.control(Role::ListBoxOption, "Import lake.png")?.selected,
+        harness
+            .control(Role::ListBoxOption, "Import lake.png")?
+            .selected,
         Some(false)
     );
     harness.click(Role::Button, "Uncheck All")?;
@@ -104,12 +127,19 @@ fn copies_go_into_dated_folders_with_the_keywords_asked_for() -> TestResult {
     harness.click(Role::RadioButton, "Copy to a folder by date")?;
     let target = destination.path().display().to_string();
     harness.set_text(Role::TextInput, "Destination folder", &target)?;
-    assert!(shows_example(&harness), "the pattern is shown with an example");
+    assert!(
+        shows_example(&harness),
+        "the pattern is shown with an example"
+    );
     harness.set_text(Role::TextInput, "Import keywords", "spring, trip")?;
     harness.click(Role::Button, "Import 6 Photos")?;
     settle(&mut harness)?;
 
-    let copy = destination.path().join("2024").join("2024-03-15").join("dawn.jpg");
+    let copy = destination
+        .path()
+        .join("2024")
+        .join("2024-03-15")
+        .join("dawn.jpg");
     assert!(copy.is_file(), "{} was copied", copy.display());
     let engine = harness.app().engine();
     let dawn = engine
@@ -129,8 +159,67 @@ fn copies_go_into_dated_folders_with_the_keywords_asked_for() -> TestResult {
 
 /// The pattern's example line, written with this platform's separators.
 fn shows_example(harness: &Harness<PhotoApp>) -> bool {
-    let example = std::path::Path::new("2024").join("2024-03-15").join("dawn.jpg");
+    let example = std::path::Path::new("2024")
+        .join("2024-03-15")
+        .join("dawn.jpg");
     shows(harness, &format!("e.g. {}", example.display()))
+}
+
+#[test]
+fn a_running_import_shows_its_progress_and_can_be_cancelled() -> TestResult {
+    const FILES: usize = 3_000;
+    let folder = tempfile::tempdir()?;
+    for index in 0..FILES {
+        photo_testkit::write_jpeg(folder.path(), &format!("IMG_{index:04}.jpg"), 32, 24);
+    }
+    let studio = Studio::new();
+    let mut harness = studio.app_restless();
+    restless(harness.run().map(drop))?;
+    restless(harness.click(Role::Button, "Import…"))?;
+    let root = folder.path().display().to_string();
+    restless(harness.set_text(Role::TextInput, "Source folder", &root))?;
+    harness.app_mut().wait_idle(crate::PATIENCE);
+    harness.step(4);
+    assert!(shows(&harness, "3000 photos found, 3000 ticked"));
+
+    // Copying, each file written and flushed, takes seconds; adding 3000
+    // small files in place is over before a click has been answered.
+    let destination = tempfile::tempdir()?;
+    restless(harness.click(Role::RadioButton, "Copy to a folder by date"))?;
+    let target = destination.path().display().to_string();
+    restless(harness.set_text(Role::TextInput, "Destination folder", &target))?;
+    restless(harness.click(Role::Button, "Import 3000 Photos"))?;
+    let cancel = "Cancel Importing 3000 photos";
+    assert_eq!(
+        harness.count(Role::Button, cancel),
+        1,
+        "the import is shown running"
+    );
+    assert!(
+        shows(&harness, "Importing photos…") || harness.app().engine().photo_count() > 0,
+        "an empty grid says photos are on their way"
+    );
+    crate::snapshots::snap_now(&mut harness, "importing", 1)?;
+    restless(harness.click(Role::Button, cancel))?;
+    harness.app_mut().wait_idle(crate::PATIENCE);
+    harness.step(4);
+
+    assert_eq!(
+        harness.count(Role::Button, cancel),
+        0,
+        "nothing runs any more"
+    );
+    let imported = harness.app().engine().source_counts().all_photos;
+    assert!(imported < FILES as u64, "cancelled after {imported} photos");
+    assert!(
+        harness
+            .app()
+            .toasts()
+            .any(|toast| toast.starts_with("Import cancelled after")),
+        "{:?}",
+        harness.app().toasts().collect::<Vec<_>>()
+    );
+    Ok(())
 }
 
 #[test]
@@ -140,7 +229,11 @@ fn a_folder_that_is_not_there_is_said_so() -> TestResult {
     harness.run()?;
     harness.click(Role::Button, "Import…")?;
     let missing = std::env::temp_dir().join("photo-no-such-folder-here");
-    harness.set_text(Role::TextInput, "Source folder", &missing.display().to_string())?;
+    harness.set_text(
+        Role::TextInput,
+        "Source folder",
+        &missing.display().to_string(),
+    )?;
     let message = format!("There is no folder at {}.", missing.display());
     assert!(shows(&harness, &message));
     assert!(harness.control(Role::Button, "Import 0 Photos")?.disabled);

@@ -49,7 +49,12 @@ fn keys_rate_flag_and_label_and_undo_and_redo_take_them_back_and_forth() -> Test
     key(&mut harness, Key::Num8)?;
     assert_eq!(marks(&harness, "dawn.jpg").2, ColorLabel::Green);
     assert_eq!(cell(&harness, "dawn.jpg")?, "active, 2 stars, green");
-    assert!(harness.app().toasts().any(|toast| toast == "Set Color Label to Green"));
+    assert!(
+        harness
+            .app()
+            .toasts()
+            .any(|toast| toast == "Set Color Label to Green")
+    );
 
     let undo = Modifiers::COMMAND;
     let redo = Modifiers::COMMAND | Modifiers::SHIFT;
@@ -122,12 +127,20 @@ fn the_attribute_filter_keeps_the_flags_ratings_and_labels_asked_for() -> TestRe
     assert_eq!(names(&harness).len(), 6);
 
     harness.click(Role::Button, "Filter rating 4")?;
-    assert_eq!(names(&harness), ["dawn.jpg", "harbour.dng"], "at least four stars");
+    assert_eq!(
+        names(&harness),
+        ["dawn.jpg", "harbour.dng"],
+        "at least four stars"
+    );
     harness.click(Role::ComboBox, "Rating comparison")?;
     harness.click(Role::Button, "exactly")?;
     assert_eq!(names(&harness), ["dawn.jpg"]);
     harness.click(Role::Button, "Filter rating 4")?;
-    assert_eq!(harness.app().engine().filter().rating, None, "a second click clears it");
+    assert_eq!(
+        harness.app().engine().filter().rating,
+        None,
+        "a second click clears it"
+    );
 
     harness.click(Role::Button, "Filter label red")?;
     assert_eq!(names(&harness), ["ridge.jpg"]);
@@ -152,8 +165,20 @@ fn the_text_filter_takes_what_is_typed_and_command_f_puts_the_keyboard_there() -
     harness.type_text("ridge")?;
     assert_eq!(harness.app().engine().filter().text, "ridge");
     assert_eq!(names(&harness), ["ridge.jpg"]);
-    // Typing into the field is not a shortcut: "e" did not open the loupe.
-    assert_eq!(harness.app().view(), photo_ui::View::Grid);
+    // Keys pressed while typing are the field's: no shortcut fires.
+    for key in [Key::E, Key::Num3, Key::P, Key::Tab] {
+        harness.press_key(key, Modifiers::NONE)?;
+    }
+    assert_eq!(
+        harness.app().view(),
+        photo_ui::View::Grid,
+        "E did not open the loupe"
+    );
+    assert_eq!(
+        marks(&harness, "ridge.jpg"),
+        (Rating::UNRATED, Flag::Unflagged, ColorLabel::None)
+    );
+    assert!(harness.app().layout().left, "Tab did not hide the panels");
 
     harness.set_text(Role::TextInput, "Search text", "")?;
     assert_eq!(names(&harness).len(), 6);
@@ -175,7 +200,10 @@ fn the_metadata_filter_narrows_by_camera_and_date() -> TestResult {
         .ok_or("a photo records its camera")?
         .clone();
     harness.click(Role::Button, &format!("Camera {}", camera.value))?;
-    assert_eq!(harness.app().engine().filter().cameras, [camera.value.clone()]);
+    assert_eq!(
+        harness.app().engine().filter().cameras,
+        std::slice::from_ref(&camera.value)
+    );
     assert_eq!(names(&harness).len() as u64, camera.count);
     harness.click(Role::Button, "Camera all")?;
     assert_eq!(names(&harness).len(), 6);

@@ -23,8 +23,8 @@ use std::time::Duration;
 use photo_engine::Engine;
 
 use self::actions::Action;
-pub use self::state::{Layout, Module, View, Zoom};
 use self::state::UiState;
+pub use self::state::{Layout, Module, View, Zoom};
 use self::textures::Textures;
 use crate::AppOptions;
 use crate::theme;
