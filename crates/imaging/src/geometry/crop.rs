@@ -74,10 +74,12 @@ const SEARCH_STEPS: usize = 20;
 
 /// The largest rectangle centred in the frame, with pixel aspect ratio
 /// `crop_aspect` and rotated by `angle_degrees`, whose whole boundary
-/// satisfies `inside` (given positions in frame pixels). `None` when the
-/// largest one that does has a side under [`CropRect::MIN_SIDE`]: a crop
-/// cannot be that small, so using it would mean enlarging it into the area
-/// it was meant to avoid.
+/// satisfies `inside` (given positions in frame pixels).
+///
+/// A side under [`CropRect::MIN_SIDE`] is raised to it, as the crop itself
+/// would raise it, and the rectangle that results must still satisfy
+/// `inside`; `None` when it does not (the picture leaves the frame centre
+/// too little room for any crop).
 ///
 /// Shrinks [`CropRect::inscribed`] about the frame centre by bisection. That
 /// finds the true maximum whenever the acceptable region is convex or
@@ -127,8 +129,13 @@ pub(crate) fn largest_centred(
             }
         }
     }
-    let rect = shrunk(low);
-    (rect.width >= CropRect::MIN_SIDE && rect.height >= CropRect::MIN_SIDE).then_some(rect)
+    let found = shrunk(low);
+    let rect = CropRect {
+        width: found.width.max(CropRect::MIN_SIDE),
+        height: found.height.max(CropRect::MIN_SIDE),
+        ..found
+    };
+    fits(&rect).then_some(rect)
 }
 
 #[cfg(test)]

@@ -7,8 +7,9 @@
 //! that doubles back keeps its turning point.
 
 /// How far, in cells, the path a stroke is drawn along may stray from the
-/// path it was painted along: a quarter of a cell, which is never more than
-/// a quarter of a view pixel.
+/// path it was painted along, at least: a quarter of a cell, which is a
+/// quarter of a view pixel or less at 1:1 and smaller scales, and a quarter
+/// of a source pixel when the view magnifies.
 pub(super) const SIMPLIFY_TOLERANCE: f64 = 0.25;
 /// Most original path segments one drawn segment may replace. Bounds the
 /// work of simplifying a path to a constant per point.

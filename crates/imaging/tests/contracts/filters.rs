@@ -268,31 +268,37 @@ fn gradient_magnitude_measures_slope_in_any_direction() {
 /// R1 for a filter: filter the whole plane and crop, or crop a region padded
 /// by the filter's support and filter that; the region must come out the
 /// same. `filter` is given the plane and the position of its top-left sample
-/// in the whole plane's coordinates.
+/// in the grid the whole plane belongs to.
+///
+/// The whole plane is placed in that grid twice: at the origin, and five
+/// samples before it, as the padded buffer of a whole view would be. Tiles
+/// start on cell boundaries and partway into cells alike.
 fn assert_tile_invariant(name: &str, support: usize, filter: impl Fn(&Plane, (i64, i64)) -> Plane) {
     let (width, height) = (190usize, 150usize);
     let whole = noise_plane(width, height, 13);
-    let expected = filter(&whole, (0, 0));
-    for (x, y, w, h) in [
-        (60usize, 50usize, 40usize, 30usize),
-        (0, 0, 50, 40),
-        (130, 100, 60, 50),
-        (17, 90, 33, 21),
-    ] {
-        let x0 = x.saturating_sub(support);
-        let y0 = y.saturating_sub(support);
-        let x1 = (x + w + support).min(width);
-        let y1 = (y + h + support).min(height);
-        let tile = filter(
-            &whole.crop(x0, y0, x1 - x0, y1 - y0),
-            (x0 as i64, y0 as i64),
-        );
-        let got = tile.crop(x - x0, y - y0, w, h);
-        let diff = max_abs_diff(got.as_slice(), expected.crop(x, y, w, h).as_slice());
-        assert!(
-            diff <= 1e-4,
-            "{name}: tile at ({x}, {y}) differs by {diff} with support {support}"
-        );
+    for shift in [0i64, -5] {
+        let expected = filter(&whole, (shift, shift));
+        for (x, y, w, h) in [
+            (60usize, 50usize, 40usize, 30usize),
+            (0, 0, 50, 40),
+            (130, 100, 60, 50),
+            (17, 90, 33, 21),
+            (61, 41, 30, 30),
+            (97, 97, 40, 20),
+        ] {
+            let x0 = x.saturating_sub(support);
+            let y0 = y.saturating_sub(support);
+            let x1 = (x + w + support).min(width);
+            let y1 = (y + h + support).min(height);
+            let origin = (x0 as i64 + shift, y0 as i64 + shift);
+            let tile = filter(&whole.crop(x0, y0, x1 - x0, y1 - y0), origin);
+            let got = tile.crop(x - x0, y - y0, w, h);
+            let diff = max_abs_diff(got.as_slice(), expected.crop(x, y, w, h).as_slice());
+            assert!(
+                diff <= 1e-4,
+                "{name}: tile at ({x}, {y}), grid shifted by {shift}, differs by {diff} with support {support}"
+            );
+        }
     }
 }
 

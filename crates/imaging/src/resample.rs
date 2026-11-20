@@ -70,6 +70,12 @@ pub fn resample_level(pyramid: &SourcePyramid, geometry: &Geometry, view: &View)
 ///   which averages the level instead of point sampling it.
 /// - In between, a mix of the two that follows the footprint continuously.
 ///
+/// That continuity holds within a level. Where a view crosses into the
+/// next level (at each halving of its scale) the triangle on the finer
+/// level gives way to the cubic on the coarser one, and fine-texture
+/// contrast steps by roughly 15%: the price of reading one level rather
+/// than blending two, which would also mean healing two.
+///
 /// The footprint is one number for the whole view (the view's pitch times
 /// [`Geometry::source_pixels_per_output_pixel`]), so the same kernel is
 /// used everywhere, including where perspective or lens distortion locally

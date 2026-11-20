@@ -100,9 +100,10 @@ impl View {
     }
 
     /// The rectangle of the output this view covers, in full-resolution
-    /// output pixels. For a view made with [`Self::new`] this is the `roi`
-    /// it was given; for a tile it is the tile's part of it, rounded to
-    /// `f32`.
+    /// output pixels: its first pixel's corner plus its pixel count times
+    /// its pitch, rounded to `f32`. For a view made with [`Self::new`] that
+    /// is the `roi` it was given, up to `f32` rounding of the roi's extent;
+    /// for a tile it is the tile's part of its parent's.
     pub fn roi(&self) -> Rect {
         let (x0, y0) = self.output(0.0, 0.0);
         let (x1, y1) = self.output(f64::from(self.width), f64::from(self.height));
@@ -114,11 +115,13 @@ impl View {
     /// resolution are multiplied by this.
     ///
     /// Every tile of a view has exactly its parent's scale. A view with no
-    /// pixels, or whose `roi` is empty or not finite, has no scale; 1 is
-    /// returned for it so that nothing downstream divides by zero.
+    /// pixels, or whose `roi` is empty, not finite, or so small that its
+    /// scale is not a finite `f32`, has no scale; 1 is returned for it so
+    /// that nothing downstream divides by zero or multiplies by infinity.
     pub fn scale(&self) -> f32 {
-        if self.pitch.0 > 0.0 {
-            (1.0 / self.pitch.0) as f32
+        let scale = (1.0 / self.pitch.0) as f32;
+        if scale.is_finite() && scale > 0.0 {
+            scale
         } else {
             1.0
         }
@@ -332,6 +335,9 @@ mod tests {
         assert_eq!(empty.grid(2).pitch(), 1.0);
         assert_eq!(empty.scale(), 1.0);
         assert_eq!(View::new(Rect::default(), 8, 8).scale(), 1.0);
+        // A pitch too small for its inverse to be a finite f32.
+        let microscopic = View::new(Rect::new(0.0, 0.0, 1.0e-38, 1.0), 1_000_000, 1);
+        assert_eq!(microscopic.scale(), 1.0);
         let broken = View::new(Rect::new(f32::NAN, 0.0, f32::INFINITY, 1.0), 4, 4);
         let (x, y) = centre(&broken, 0, 1, 1);
         assert!(x.is_finite() && y.is_finite());

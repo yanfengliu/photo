@@ -25,33 +25,54 @@ const MAX_GAIN: f32 = 16.0;
 const WINDOW_FRACTION: f64 = 0.15;
 const MIN_SAMPLES: f64 = 8.0;
 const MAX_SAMPLES: f64 = 48.0;
-/// Most pixels read along each side of a window. A larger window is read
-/// on a regular sub-grid: plenty for a mean that only steers low-frequency
-/// tone, and it keeps a spot's cost from growing with its size.
-const MAX_WINDOW_SIDE: i64 = 32;
+/// Most pixels read along each side of a window. Every pixel of a window up
+/// to this size is read, which covers spots up to about 420 px in radius.
+/// A larger window is divided into this many cells a side and one pixel is
+/// read from each, at a position inside its cell that a hash of the cell
+/// picks. That keeps a spot's cost from growing with its size, and unlike
+/// a regular sub-grid it cannot fall in step with a fine periodic texture
+/// and read only its light or only its dark pixels.
+const MAX_WINDOW_SIDE: i64 = 128;
+
+/// Where in its cell, `0..stride`, the sample of cell `(column, row)` is
+/// read along `axis` (0 or 1). A fixed hash, so the mean is the same every
+/// time.
+fn jitter(column: i64, row: i64, axis: u32, stride: i64) -> i64 {
+    let mut hash = (column as u32).wrapping_mul(0x9E37_79B1)
+        ^ (row as u32).wrapping_mul(0x85EB_CA77)
+        ^ axis.wrapping_mul(0xC2B2_AE3D);
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x7FEB_352D);
+    hash ^= hash >> 15;
+    i64::from(hash) % stride
+}
 
 /// Mean of the `(2 * half + 1)` square of pixels around `(x, y)`, with the
 /// image's edge replicated. Windows wider than [`MAX_WINDOW_SIDE`] pixels
-/// are read every `ceil(side / MAX_WINDOW_SIDE)` pixels, centred on `(x, y)`.
+/// are estimated from one pixel per cell, as described there.
 fn window_mean(image: &SourceImage, x: i64, y: i64, half: i64) -> [f32; 3] {
     let (width, height) = (i64::from(image.width), i64::from(image.height));
-    let stride = (2 * half + 1 + MAX_WINDOW_SIDE - 1) / MAX_WINDOW_SIDE;
-    let samples = 2 * half / stride + 1;
-    let (left, top) = (
-        x - (samples - 1) * stride / 2,
-        y - (samples - 1) * stride / 2,
-    );
+    let side = 2 * half + 1;
+    let stride = (side + MAX_WINDOW_SIDE - 1) / MAX_WINDOW_SIDE;
+    // Cells of `stride` pixels, centred on (x, y); with a stride of 1 they
+    // are exactly the window's pixels.
+    let cells = (side + stride - 1) / stride;
+    let first = |centre: i64| centre - (cells * stride - 1) / 2;
+    let (left, top) = (first(x), first(y));
     let mut sum = [0u64; 3];
-    for row in (0..samples).map(|k| top + k * stride) {
-        let start = row.clamp(0, height - 1) as usize * image.width as usize;
-        for column in (0..samples).map(|k| left + k * stride) {
-            let index = (start + column.clamp(0, width - 1) as usize) * CHANNELS;
+    for cell_row in 0..cells {
+        for cell_column in 0..cells {
+            let column = left + cell_column * stride + jitter(cell_column, cell_row, 0, stride);
+            let row = top + cell_row * stride + jitter(cell_column, cell_row, 1, stride);
+            let index = (row.clamp(0, height - 1) as usize * image.width as usize
+                + column.clamp(0, width - 1) as usize)
+                * CHANNELS;
             for (total, &value) in sum.iter_mut().zip(&image.pixels[index..index + CHANNELS]) {
                 *total += u64::from(value);
             }
         }
     }
-    let count = (samples * samples) as f32;
+    let count = (cells * cells) as f32;
     sum.map(|total| total as f32 / count)
 }
 
@@ -163,25 +184,38 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_window_is_read_on_a_centred_sub_grid() {
-        // A ramp's mean over a symmetric window is its centre value, read
-        // densely or not.
+    fn windows_up_to_the_limit_are_read_in_full() {
+        // A ramp's mean over a symmetric window is its centre value.
         let ramp = image(|x, _| x as u16 * 10);
-        assert_eq!(window_mean(&ramp, 50, 40, 15), [500.0; 3], "31 wide: dense");
-        assert_eq!(
-            window_mean(&ramp, 50, 40, 16),
-            [500.0; 3],
-            "33 wide: every 2nd"
-        );
-        assert_eq!(
-            window_mean(&ramp, 50, 40, 30),
-            [500.0; 3],
-            "61 wide: every 2nd"
-        );
-        // However wide the window, about a thousand pixels are read, and a
-        // flat image still gives its own value.
+        assert_eq!(window_mean(&ramp, 50, 40, 15), [500.0; 3]);
+        assert_eq!(window_mean(&ramp, 50, 40, 40), [500.0; 3], "81 wide");
         let flat = image(|_, _| 777);
         assert_eq!(window_mean(&flat, 10, 10, 5000), [777.0; 3]);
+    }
+
+    #[test]
+    fn a_wider_window_reads_every_phase_of_a_fine_texture() {
+        // A one-pixel checker in a window read one pixel per cell of 3 x 3
+        // (half 191): a regular sub-grid would see only one of the two
+        // values; one pixel per cell at a hashed position sees both about
+        // equally, and the same ones every time.
+        let pixels = (0..400u32 * 400)
+            .flat_map(|i| {
+                let light = (i % 400 + i / 400) % 2 == 0;
+                [if light { 30_000 } else { 10_000 }; 3]
+            })
+            .collect();
+        let checker = SourceImage::new(400, 400, pixels, SourceColor::Rgb(RgbSpace::Srgb)).unwrap();
+        let mean = window_mean(&checker, 200, 200, 191);
+        assert!((mean[0] / 20_000.0 - 1.0).abs() < 0.03, "{mean:?}");
+        assert_eq!(mean, window_mean(&checker, 200, 200, 191));
+        // The cells are centred: a ramp still averages to about its middle.
+        let pixels = (0..1000u32 * 10)
+            .flat_map(|i| [(i % 1000) as u16 * 50; 3])
+            .collect();
+        let ramp = SourceImage::new(1000, 10, pixels, SourceColor::Rgb(RgbSpace::Srgb)).unwrap();
+        let mean = window_mean(&ramp, 500, 5, 300);
+        assert!((mean[0] / 25_000.0 - 1.0).abs() < 0.01, "{mean:?}");
     }
 
     #[test]
