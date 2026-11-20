@@ -187,6 +187,36 @@ fn text_fields_support_every_text_operator_ignoring_case() {
 }
 
 #[test]
+fn folder_rules_match_windows_paths_whichever_slash_they_are_typed_with() {
+    // a and b live in Windows folders, stored with backslashes; c in a POSIX
+    // folder.
+    let mut catalog = common::memory();
+    common::import_paths(
+        &mut catalog,
+        &[
+            r"C:\Photos\2024\a.jpg",
+            "D:/Other/b.jpg",
+            "/mnt/Photos/2024/c.jpg",
+        ],
+    );
+    check(
+        &mut catalog,
+        SmartField::FolderPath,
+        &[
+            (SmartOp::Is, "c:/photos/2024", "a"),
+            (SmartOp::Is, r"C:\Photos\2024", "a"),
+            (SmartOp::IsNot, "C:/Photos/2024", "bc"),
+            (SmartOp::StartsWith, "C:/Photos", "a"),
+            (SmartOp::StartsWith, r"d:\", "b"),
+            (SmartOp::Contains, "Photos/2024", "ac"),
+            (SmartOp::Contains, r"photos\2024", "ac"),
+            (SmartOp::DoesNotContain, "/Photos/", "b"),
+            (SmartOp::EndsWith, ":/other", "b"),
+        ],
+    );
+}
+
+#[test]
 fn an_empty_text_value_is_contained_in_everything() {
     let (mut catalog, _) = library();
     check(

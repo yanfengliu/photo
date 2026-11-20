@@ -11,6 +11,7 @@ use crate::catalog::Catalog;
 use crate::error::{CatalogError, Entity, Result};
 use crate::query::Source;
 use crate::smart::SmartRules;
+use crate::stored::{RULES_WRITTEN, decode_rules, encode_rules, require_rules_format};
 use crate::text::natural_key;
 use crate::tree::{COLLECTIONS, DeletedTree, clean_name};
 
@@ -127,8 +128,13 @@ impl Catalog {
         for collection in &mut collections {
             collection.photo_count = match self.count(&Source::Collection(collection.id)) {
                 Ok(count) => count,
-                // One unreadable rule set must not take the whole panel down.
-                Err(error @ (CatalogError::Corrupt { .. } | CatalogError::InvalidRule(_))) => {
+                // One rule set this build cannot read (damaged, or written
+                // by a newer version) must not take the whole panel down.
+                Err(
+                    error @ (CatalogError::Corrupt { .. }
+                    | CatalogError::InvalidRule(_)
+                    | CatalogError::NewerFormat { .. }),
+                ) => {
                     log::warn!(
                         "smart collection {} cannot be evaluated: {error}",
                         collection.id
@@ -189,9 +195,11 @@ impl Catalog {
         self.write(|tx, now| {
             require_set(tx, parent)?;
             COLLECTIONS.require_free_name(tx, parent, name, None)?;
+            let format = rules.as_ref().map(|_| RULES_WRITTEN);
             tx.execute(
-                "INSERT INTO collections (parent_id, kind, name, rules, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![parent, kind.to_sql(), name, rules, now],
+                "INSERT INTO collections (parent_id, kind, name, rules, rules_format, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![parent, kind.to_sql(), name, rules, format, now],
             )?;
             Ok(CollectionId(tx.last_insert_rowid()))
         })
@@ -268,32 +276,31 @@ impl Catalog {
         self.write(|tx, _| COLLECTIONS.restore_branch(tx, &deleted.deleted))
     }
 
-    /// The rules of a smart collection.
+    /// The rules of a smart collection. Rules written by a newer version
+    /// fail with [`CatalogError::NewerFormat`].
     pub fn smart_rules(&self, id: CollectionId) -> Result<SmartRules> {
         stored_rules(&self.conn, id)
     }
 
     /// Replace the rules of a smart collection. Rules that do not validate
-    /// are refused and the old ones kept.
+    /// are refused and the old ones kept, and so are rules written by a newer
+    /// version ([`CatalogError::NewerFormat`]), which this build must not
+    /// replace.
     pub fn set_smart_rules(&mut self, id: CollectionId, rules: &SmartRules) -> Result<()> {
         let rules = encode_rules(rules)?;
         self.write(|tx, _| {
             require_kind(tx, id, |kind| kind == CollectionKind::Smart)?;
+            let format: i64 = tx
+                .prepare_cached("SELECT rules_format FROM collections WHERE id = ?1")?
+                .query_row([id.0], |row| row.get(0))?;
+            require_rules_format(format)?;
             tx.execute(
-                "UPDATE collections SET rules = ?2 WHERE id = ?1",
-                params![id.0, rules],
+                "UPDATE collections SET rules = ?2, rules_format = ?3 WHERE id = ?1",
+                params![id.0, rules, RULES_WRITTEN],
             )?;
             Ok(())
         })
     }
-}
-
-fn encode_rules(rules: &SmartRules) -> Result<String> {
-    rules.validate()?;
-    serde_json::to_string(rules).map_err(|source| CatalogError::Unstorable {
-        what: "smart collection rules",
-        source,
-    })
 }
 
 /// The kind of a collection. Fails if it does not exist.
@@ -333,11 +340,8 @@ fn require_set(tx: &Transaction<'_>, parent: Option<i64>) -> Result<()> {
 /// The stored rules of a smart collection.
 pub(crate) fn stored_rules(conn: &Connection, id: CollectionId) -> Result<SmartRules> {
     require_kind(conn, id, |kind| kind == CollectionKind::Smart)?;
-    let json: String = conn
-        .prepare_cached("SELECT rules FROM collections WHERE id = ?1")?
-        .query_row([id.0], |row| row.get(0))?;
-    serde_json::from_str(&json).map_err(|source| CatalogError::Corrupt {
-        what: "smart collection rules",
-        source,
-    })
+    let (json, format): (String, i64) = conn
+        .prepare_cached("SELECT rules, rules_format FROM collections WHERE id = ?1")?
+        .query_row([id.0], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    decode_rules(&json, format)
 }

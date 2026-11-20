@@ -61,7 +61,9 @@ fn expression(field: SmartField) -> &'static str {
         SmartField::Edited => "p.has_edits",
         SmartField::FileName => "p.file_name",
         SmartField::Keyword => "k.name",
-        SmartField::FolderPath => "f.path",
+        // Windows folders are stored with backslashes; with both slashes
+        // made one, a rule matches whichever way it was typed.
+        SmartField::FolderPath => "replace(f.path, '\\', '/')",
     }
 }
 
@@ -179,7 +181,7 @@ fn push_text_rule(sql: &mut Sql, field: SmartField, op: SmartOp, text: &str) {
         }
         SmartField::FolderPath => {
             sql.push("p.folder_id IN (SELECT f.id FROM folders f WHERE ");
-            push_text_match(sql, expression(field), op, text);
+            push_text_match(sql, expression(field), op, &text.replace('\\', "/"));
             sql.push(")");
         }
         _ => push_text_match(sql, expression(field), op, text),

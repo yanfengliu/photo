@@ -340,3 +340,38 @@ fn a_mutation_that_fails_leaves_the_file_backed_catalog_as_it_was() {
     after.stats.imports -= 1;
     assert_eq!(after, before);
 }
+
+#[test]
+fn a_removal_that_fails_part_way_through_leaves_every_photo_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.photocat");
+    let (ids, before) = {
+        let mut catalog = Catalog::open(&path).unwrap();
+        let mut photo = raster("/r/a.jpg");
+        photo.keywords = vec!["kept".into()];
+        let ids = import(&mut catalog, &[photo, raster("/r/b.jpg")]);
+        catalog
+            .set_develop_settings(ids[0], &exposure(0.5), Some("Edit"))
+            .unwrap();
+        let album = catalog.create_collection("Album", None).unwrap();
+        catalog.add_to_collection(album, &ids).unwrap();
+        (ids, dump(&catalog))
+    };
+    // Another program left a trigger that refuses to delete the second
+    // photo: the removal fails after the first photo, with its history,
+    // keywords and membership, has already been deleted.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER keep BEFORE DELETE ON photos WHEN old.id = {}
+             BEGIN SELECT RAISE(ABORT, 'kept'); END;",
+            ids[1].0
+        ))
+        .unwrap();
+
+    let mut catalog = Catalog::open(&path).unwrap();
+    assert!(catalog.remove_photos(&ids).is_err());
+    assert_eq!(dump(&catalog), before);
+    drop(catalog);
+    assert_eq!(dump(&Catalog::open(&path).unwrap()), before);
+}

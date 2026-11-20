@@ -22,10 +22,19 @@ fn ascending(catalog: &Catalog, key: SortKey) -> Vec<String> {
 }
 
 /// Descending must be the exact mirror image of ascending, ties included.
+/// Compared by id, because photos that tie on everything else (a master and
+/// its virtual copy, or files of one name in two folders) also share a name.
 fn assert_descending_mirrors(catalog: &Catalog, key: SortKey) {
-    let mut reversed = sorted(catalog, key, SortDirection::Descending);
+    let ids = |direction| {
+        let query = PhotoQuery {
+            sort: Sort { key, direction },
+            ..PhotoQuery::default()
+        };
+        catalog.query_ids(&query).unwrap()
+    };
+    let mut reversed = ids(SortDirection::Descending);
     reversed.reverse();
-    assert_eq!(reversed, ascending(catalog, key), "{key:?}");
+    assert_eq!(reversed, ids(SortDirection::Ascending), "{key:?}");
 }
 
 fn library() -> (Catalog, Vec<PhotoId>) {

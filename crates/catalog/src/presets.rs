@@ -5,8 +5,8 @@ use photo_core::meta::PresetId;
 use rusqlite::{Connection, params};
 
 use crate::catalog::Catalog;
-use crate::develop::{decode_settings, encode_settings};
 use crate::error::{CatalogError, Entity, Result};
+use crate::stored::{SETTINGS_WRITTEN, decode_settings, encode_settings};
 use crate::text::natural_key;
 use crate::tree::clean_name;
 
@@ -45,8 +45,9 @@ impl Catalog {
         self.write(|tx, now| {
             require_free_name(tx, group, name, None)?;
             tx.execute(
-                "INSERT INTO presets (group_name, name, settings, groups, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![group, name, settings, groups, now],
+                "INSERT INTO presets (group_name, name, settings, settings_format, groups, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![group, name, settings, SETTINGS_WRITTEN, groups, now],
             )?;
             Ok(PresetId(tx.last_insert_rowid()))
         })
@@ -89,15 +90,15 @@ impl Catalog {
     /// presets down with it. It is left in the file exactly as it is, and
     /// its name in its group stays taken.
     pub fn presets(&self) -> Result<Vec<Preset>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT id, group_name, name, settings, groups FROM presets")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, group_name, name, settings, settings_format, groups FROM presets",
+        )?;
         let mut rows = stmt.query([])?;
         let mut presets = Vec::new();
         while let Some(row) = rows.next()? {
             let id = PresetId(row.get(0)?);
-            let settings = decode_settings(&row.get::<_, String>(3)?);
-            let groups = serde_json::from_str::<GroupSet>(&row.get::<_, String>(4)?);
+            let settings = decode_settings(&row.get::<_, String>(3)?, row.get(4)?);
+            let groups = serde_json::from_str::<GroupSet>(&row.get::<_, String>(5)?);
             match (settings, groups) {
                 (Ok(settings), Ok(groups)) => presets.push(Preset {
                     id,
@@ -106,7 +107,8 @@ impl Catalog {
                     settings,
                     groups,
                 }),
-                _ => log::warn!("preset {id} cannot be read by this version and is not listed"),
+                (Err(error), _) => log::warn!("preset {id} is not listed: {error}"),
+                (_, Err(error)) => log::warn!("preset {id} is not listed: its groups: {error}"),
             }
         }
         presets.sort_by_cached_key(|preset| {

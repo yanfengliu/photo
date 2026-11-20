@@ -155,6 +155,22 @@ pub enum CatalogError {
         source: serde_json::Error,
     },
 
+    /// Stored settings or rules were written in a newer format than this
+    /// build reads. Reading them would drop what it does not know, so they
+    /// are not read, and any change that would replace them is refused;
+    /// nothing was changed.
+    #[error(
+        "stored {what} were written by a newer version (format {found}; this build reads up to {supported})"
+    )]
+    NewerFormat {
+        /// What was stored.
+        what: &'static str,
+        /// The format it was stored in.
+        found: u32,
+        /// The newest format this build reads.
+        supported: u32,
+    },
+
     /// Stored JSON could not be read back. The stored text is left alone, so
     /// it is never replaced by defaults behind the user's back.
     #[error("stored {what} is unreadable")]
@@ -186,6 +202,13 @@ pub enum CatalogError {
     /// (for redo). Nothing was changed.
     #[error("the develop state of photo {0} has changed since this edit")]
     StaleChange(PhotoId),
+
+    /// The catalog file (or the volume it is on) is write-protected, so the
+    /// catalog can be read but not changed; nothing was changed. Opening
+    /// fails with this when the file would first have to be set up or
+    /// upgraded.
+    #[error("the catalog file is write-protected, so it cannot be changed")]
+    ReadOnly,
 
     /// The catalog file could not be read from disk.
     #[error("the catalog file could not be read")]

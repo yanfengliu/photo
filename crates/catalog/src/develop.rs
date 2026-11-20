@@ -14,6 +14,7 @@ use crate::catalog::Catalog;
 use crate::codec::{kind_from_sql, unix_seconds};
 use crate::error::{CatalogError, Entity, Result};
 use crate::photos::{kind_of, require_photo};
+use crate::stored::{SETTINGS_WRITTEN, decode_settings, encode_settings, require_settings_format};
 
 /// One write of develop settings, for [`Catalog::apply_develop_edits`].
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +107,8 @@ impl DevelopChange {
 #[derive(Clone, Debug)]
 struct Point {
     settings: Option<String>,
+    /// The format `settings` is stored in.
+    format: Option<i64>,
     has_edits: bool,
     edited_at: Option<i64>,
     current_step: Option<i64>,
@@ -120,8 +123,15 @@ impl Point {
     /// not compared: writing the same settings again leaves the same state.
     fn is_state(&self, other: &Point) -> bool {
         self.settings == other.settings
+            && self.format == other.format
             && self.current_step == other.current_step
             && self.newest_step == other.newest_step
+    }
+
+    /// Fail with [`CatalogError::NewerFormat`] if these settings were
+    /// written by a newer version, which this build must not replace.
+    fn require_replaceable(&self) -> Result<()> {
+        self.format.map_or(Ok(()), require_settings_format)
     }
 }
 
@@ -131,44 +141,26 @@ struct Step {
     id: i64,
     label: String,
     settings: String,
+    format: i64,
     created_at: i64,
-}
-
-/// Settings as the JSON the catalog stores. Refuses settings that would not
-/// read back (a NaN or infinity is written as `null`), so that nothing
-/// unreadable is ever stored.
-pub(crate) fn encode_settings(settings: &DevelopSettings) -> Result<String> {
-    let unstorable = |source| CatalogError::Unstorable {
-        what: "develop settings",
-        source,
-    };
-    let json = serde_json::to_string(settings).map_err(unstorable)?;
-    serde_json::from_str::<DevelopSettings>(&json).map_err(unstorable)?;
-    Ok(json)
-}
-
-/// Stored JSON back into settings. A failure is reported, never papered over
-/// with defaults, because the next write would then destroy the stored edit.
-pub(crate) fn decode_settings(json: &str) -> Result<DevelopSettings> {
-    serde_json::from_str(json).map_err(|source| CatalogError::Corrupt {
-        what: "develop settings",
-        source,
-    })
 }
 
 impl Catalog {
     /// The photo's develop settings: what was last stored for it, or the
-    /// default for its kind if it has never been edited.
+    /// default for its kind if it has never been edited. Settings written by
+    /// a newer version fail with [`CatalogError::NewerFormat`].
     pub fn develop_settings(&self, photo: PhotoId) -> Result<DevelopSettings> {
-        let stored: Option<(Option<String>, i64)> = self
+        let stored: Option<(Option<String>, Option<i64>, i64)> = self
             .conn
-            .prepare_cached("SELECT develop, kind FROM photos WHERE id = ?1")?
-            .query_row([photo.0], |row| Ok((row.get(0)?, row.get(1)?)))
+            .prepare_cached("SELECT develop, develop_format, kind FROM photos WHERE id = ?1")?
+            .query_row([photo.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .optional()?;
         match stored {
             None => Err(CatalogError::not_found(Entity::Photo, photo.0)),
-            Some((Some(json), _)) => decode_settings(&json),
-            Some((None, kind)) => Ok(DevelopSettings::default_for(kind_from_sql(kind))),
+            Some((Some(json), format, _)) => {
+                decode_settings(&json, format.unwrap_or(SETTINGS_WRITTEN))
+            }
+            Some((None, _, kind)) => Ok(DevelopSettings::default_for(kind_from_sql(kind))),
         }
     }
 
@@ -198,6 +190,10 @@ impl Catalog {
     /// to an earlier step), the steps after it are discarded first, as the
     /// new edit replaces them. Several edits may name the same photo and
     /// apply in order.
+    ///
+    /// All or nothing: an edit that would replace settings (or discard a
+    /// step) written by a newer version fails the whole call with
+    /// [`CatalogError::NewerFormat`].
     pub fn apply_develop_edits(&mut self, edits: &[DevelopEdit<'_>]) -> Result<Vec<DevelopChange>> {
         self.write(|tx, now| edits.iter().map(|edit| write_edit(tx, now, edit)).collect())
     }
@@ -221,31 +217,40 @@ impl Catalog {
         Ok(steps)
     }
 
-    /// The settings recorded by a history step.
+    /// The settings recorded by a history step; fails with
+    /// [`CatalogError::NewerFormat`] for a step written by a newer version.
     pub fn history_settings(&self, step: HistoryId) -> Result<DevelopSettings> {
-        let json: Option<String> = self
+        let stored: Option<(String, i64)> = self
             .conn
-            .prepare_cached("SELECT settings FROM history WHERE id = ?1")?
-            .query_row([step.0], |row| row.get(0))
+            .prepare_cached("SELECT settings, settings_format FROM history WHERE id = ?1")?
+            .query_row([step.0], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        decode_settings(&json.ok_or_else(|| CatalogError::not_found(Entity::HistoryStep, step.0))?)
+        let (json, format) =
+            stored.ok_or_else(|| CatalogError::not_found(Entity::HistoryStep, step.0))?;
+        decode_settings(&json, format)
     }
 
     /// Take the photo back (or forward) to the settings of one of its own
     /// history steps and make that step current. No step is added or
     /// removed: the later steps stay available until the next labelled edit
-    /// replaces them.
+    /// replaces them. Fails with [`CatalogError::NewerFormat`] if the step,
+    /// or the settings it would replace, were written by a newer version.
     pub fn go_to_history_step(&mut self, photo: PhotoId, step: HistoryId) -> Result<DevelopChange> {
         self.write(|tx, now| {
             let before = current_point(tx, photo)?;
-            let json: Option<String> = tx
-                .prepare_cached("SELECT settings FROM history WHERE id = ?1 AND photo_id = ?2")?
-                .query_row([step.0, photo.0], |row| row.get(0))
+            before.require_replaceable()?;
+            let stored: Option<(String, i64)> = tx
+                .prepare_cached(
+                    "SELECT settings, settings_format FROM history WHERE id = ?1 AND photo_id = ?2",
+                )?
+                .query_row([step.0, photo.0], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()?;
-            let json = json.ok_or_else(|| CatalogError::not_found(Entity::HistoryStep, step.0))?;
+            let (json, format) =
+                stored.ok_or_else(|| CatalogError::not_found(Entity::HistoryStep, step.0))?;
             let after = Point {
-                has_edits: !decode_settings(&json)?.is_default_for(kind_of(tx, photo)?),
+                has_edits: !decode_settings(&json, format)?.is_default_for(kind_of(tx, photo)?),
                 settings: Some(json),
+                format: Some(format),
                 edited_at: Some(now),
                 current_step: Some(step.0),
                 newest_step: before.newest_step,
@@ -299,9 +304,12 @@ impl Catalog {
 }
 
 /// Fail unless the photo's develop state is `expected`: the same stored
-/// settings, at the same step of the same history.
+/// settings, at the same step of the same history. Settings written by a
+/// newer version are never replaced, whatever the change.
 fn require_point(tx: &Transaction<'_>, photo: PhotoId, expected: &Point) -> Result<()> {
-    if current_point(tx, photo)?.is_state(expected) {
+    let current = current_point(tx, photo)?;
+    current.require_replaceable()?;
+    if current.is_state(expected) {
         Ok(())
     } else {
         Err(CatalogError::StaleChange(photo))
@@ -311,6 +319,7 @@ fn require_point(tx: &Transaction<'_>, photo: PhotoId, expected: &Point) -> Resu
 fn write_edit(tx: &Transaction<'_>, now: i64, edit: &DevelopEdit<'_>) -> Result<DevelopChange> {
     let photo = edit.photo;
     let before = current_point(tx, photo)?;
+    before.require_replaceable()?;
     let json = encode_settings(edit.settings)?;
     let mut removed = Vec::new();
     let mut added = Vec::new();
@@ -318,16 +327,23 @@ fn write_edit(tx: &Transaction<'_>, now: i64, edit: &DevelopEdit<'_>) -> Result<
     if let Some(label) = edit.history_label {
         if let Some(current) = before.current_step {
             removed = steps_after(tx, photo, current)?;
+            // The new step replaces the later ones, so none of them may
+            // have been written by a newer version.
+            removed
+                .iter()
+                .try_for_each(|step| require_settings_format(step.format))?;
             swap_steps(tx, photo, &removed, &[])?;
         }
         tx.prepare_cached(
-            "INSERT INTO history (photo_id, label, settings, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO history (photo_id, label, settings, settings_format, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?
-        .execute(params![photo.0, label, json, now])?;
+        .execute(params![photo.0, label, json, SETTINGS_WRITTEN, now])?;
         let step = Step {
             id: tx.last_insert_rowid(),
             label: label.to_string(),
             settings: json.clone(),
+            format: SETTINGS_WRITTEN,
             created_at: now,
         };
         (current_step, newest_step) = (Some(step.id), Some(step.id));
@@ -336,6 +352,7 @@ fn write_edit(tx: &Transaction<'_>, now: i64, edit: &DevelopEdit<'_>) -> Result<
     let after = Point {
         has_edits: !edit.settings.is_default_for(kind_of(tx, photo)?),
         settings: Some(json),
+        format: Some(SETTINGS_WRITTEN),
         edited_at: Some(now),
         current_step,
         newest_step,
@@ -353,10 +370,14 @@ fn write_edit(tx: &Transaction<'_>, now: i64, edit: &DevelopEdit<'_>) -> Result<
 /// The photo's develop state right now. Fails if the photo does not exist.
 fn current_point(tx: &Transaction<'_>, photo: PhotoId) -> Result<Point> {
     let stored = tx
-        .prepare_cached("SELECT develop, has_edits, edited_at FROM photos WHERE id = ?1")?
-        .query_row([photo.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .prepare_cached(
+            "SELECT develop, develop_format, has_edits, edited_at FROM photos WHERE id = ?1",
+        )?
+        .query_row([photo.0], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
         .optional()?;
-    let (settings, has_edits, edited_at) =
+    let (settings, format, has_edits, edited_at) =
         stored.ok_or_else(|| CatalogError::not_found(Entity::Photo, photo.0))?;
     let current_step = tx
         .prepare_cached("SELECT id FROM history WHERE photo_id = ?1 AND is_current = 1")?
@@ -367,6 +388,7 @@ fn current_point(tx: &Transaction<'_>, photo: PhotoId) -> Result<Point> {
         .query_row([photo.0], |row| row.get(0))?;
     Ok(Point {
         settings,
+        format,
         has_edits,
         edited_at,
         current_step,
@@ -390,12 +412,14 @@ fn apply_point(tx: &Transaction<'_>, photo: PhotoId, point: &Point) -> Result<()
     let version = next_develop_version(tx)?;
     let changed = tx
         .prepare_cached(
-            "UPDATE photos SET develop = ?2, has_edits = ?3, edited_at = ?4, develop_version = ?5
+            "UPDATE photos SET develop = ?2, develop_format = ?3, has_edits = ?4, edited_at = ?5,
+                 develop_version = ?6
              WHERE id = ?1",
         )?
         .execute(params![
             photo.0,
             point.settings,
+            point.format,
             point.has_edits,
             point.edited_at,
             version
@@ -417,7 +441,8 @@ fn apply_point(tx: &Transaction<'_>, photo: PhotoId, point: &Point) -> Result<()
 /// The photo's steps recorded after `step`, oldest first.
 fn steps_after(tx: &Transaction<'_>, photo: PhotoId, step: i64) -> Result<Vec<Step>> {
     let mut stmt = tx.prepare_cached(
-        "SELECT id, label, settings, created_at FROM history WHERE photo_id = ?1 AND id > ?2 ORDER BY id",
+        "SELECT id, label, settings, settings_format, created_at FROM history
+         WHERE photo_id = ?1 AND id > ?2 ORDER BY id",
     )?;
     let steps = stmt
         .query_map([photo.0, step], |row| {
@@ -425,7 +450,8 @@ fn steps_after(tx: &Transaction<'_>, photo: PhotoId, step: i64) -> Result<Vec<St
                 id: row.get(0)?,
                 label: row.get(1)?,
                 settings: row.get(2)?,
-                created_at: row.get(3)?,
+                format: row.get(3)?,
+                created_at: row.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -441,9 +467,17 @@ fn swap_steps(tx: &Transaction<'_>, photo: PhotoId, out: &[Step], back: &[Step])
     }
     for step in back {
         tx.prepare_cached(
-            "INSERT INTO history (id, photo_id, label, settings, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO history (id, photo_id, label, settings, settings_format, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?
-        .execute(params![step.id, photo.0, step.label, step.settings, step.created_at])?;
+        .execute(params![
+            step.id,
+            photo.0,
+            step.label,
+            step.settings,
+            step.format,
+            step.created_at
+        ])?;
     }
     Ok(())
 }

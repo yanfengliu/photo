@@ -20,3 +20,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `trace` (no extra crates), for tests only: they count the statements a
+# read runs, to prove that none runs a query per row.
+rusqlite = { workspace = true, features = ["functions", "trace"] }

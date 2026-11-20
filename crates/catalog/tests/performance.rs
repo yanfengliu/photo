@@ -1,9 +1,10 @@
 //! Timing reports. Ignored by default; run with
 //! `cargo test -p photo-catalog --test performance -- --ignored --nocapture`.
 //!
-//! The assertions are generous ceilings that only catch a pathological
-//! regression (a missing index, a query per row); the printed numbers are
-//! the real result.
+//! The assertions are generous ceilings that only catch pathological
+//! slowness; the printed numbers are the real result. That no read runs a
+//! query per row is pinned exactly, and on every test run, by the
+//! statement-counting unit test in `src/statement_counts.rs`.
 
 mod common;
 
