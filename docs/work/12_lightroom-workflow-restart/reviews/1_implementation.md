@@ -75,7 +75,9 @@ Verdicts of "fixed" (F0, F1, F3, F5, F6, F7, F9, F12, F13, F14, F17, F18, F19, F
 ## Verification
 
 - F26 and F27 were repaired by the coordinator and checked by running the failing test before and after (F26), and by mutating the shape both ways (F27): `cargo test -p photo-core` 75 passed, clippy with `-D warnings` and fmt clean.
-- F10, F24 and F28 are with their builders; the coordinator will run their crates' gates and read each repair against the finding before closing them.
+- F10, F24 and F28 went back to their builders, and the photo-catalog builder also checked its smart-rules gate for F27's gap. Closed on 2026-11-20 after the coordinator ran each crate's four gates on `restart-wave1` and read the repairs:
+  - F10 and F28, `cba95c5` (photo-xmp, 177 tests): every present `photo:Settings`, whatever its form, goes through one check that never falls back to Camera Raw for unreadable settings and refuses to write over them; the symlink is followed afresh on each attempt and before the rename, and `a_link_led_elsewhere_while_writing_is_written_where_it_now_leads` retargets it mid-write. The round-0 names became `unreadable_settings_format` and `XmpError::UnreadableSettings`, and the engine was updated to match.
+  - F24 and the catalog side of F27 (photo-catalog, 250 tests): a removal turned out to be a single cascading `DELETE`, so the multi-statement rollback test now fails `restore_photos` at its last insert; the smart-rules gate records nested strings and was proved red with a nested rename.
 
 ## Round outcome
 
