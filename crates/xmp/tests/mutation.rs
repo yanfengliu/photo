@@ -14,14 +14,16 @@ const FIXTURES: [&str; 3] = [
     include_str!("fixtures/foreign.xmp"),
 ];
 
-/// Characters XML gives meaning to, spliced in anywhere.
-const NOISE: [&str; 18] = [
+/// Characters XML gives meaning to, or forbids, spliced in anywhere.
+const NOISE: [&str; 20] = [
     "<", ">", "\"", "'", "&", "/", "=", " ", ":", ";", "\n", "|", "&amp;", "&#10;", "]]>", "<!--",
-    "-->", "\u{feff}",
+    "-->", "\u{feff}", "&#1;", "\u{1}",
 ];
 
 /// Attributes this crate reads, spliced in after a quotation mark.
-const ATTRIBUTES: [&str; 17] = [
+const ATTRIBUTES: [&str; 19] = [
+    " rdf:value=\"3\"",
+    " rdf:parseType=\"Resource\"",
     " xmp:Rating=\"7\"",
     " xmp:Rating=\"-1\"",
     " xmlns:photo=\"http://ns.photo.invalid/1.0/\" photo:Flag=\"1\"",
@@ -42,7 +44,11 @@ const ATTRIBUTES: [&str; 17] = [
 ];
 
 /// Elements this crate reads, spliced in before a tag.
-const ELEMENTS: [&str; 13] = [
+const ELEMENTS: [&str; 17] = [
+    "<xmp:Rating rdf:parseType=\"Resource\"><rdf:value>4</rdf:value><xmp:Nickname>q</xmp:Nickname></xmp:Rating>",
+    "<xmp:Label><rdf:Description rdf:value=\"Red\" xmp:Nickname=\"q\"/></xmp:Label>",
+    "<dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\"><rdf:Description><rdf:value>qualified</rdf:value><xmp:Nickname>q</xmp:Nickname></rdf:Description></rdf:li></rdf:Alt></dc:title>",
+    "<dc:subject xmlns:rdf=\"urn:foreign\"><x:Bag xmlns:x=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><x:li>rebound</x:li></x:Bag></dc:subject>",
     "<xmp:Rating>2</xmp:Rating>",
     "<xmp:Rating>-1</xmp:Rating>",
     "<photo:Flag xmlns:photo=\"http://ns.photo.invalid/1.0/\">0</photo:Flag>",

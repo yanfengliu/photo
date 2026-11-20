@@ -1,9 +1,10 @@
 //! A small XML document model that keeps what it does not understand.
 //!
 //! [`Document::parse`] accepts exactly the well-formed documents: one root
-//! element, every tag closed, every reference resolvable. What it reads is
-//! kept as written: character data, comments, processing instructions, and
-//! the start tag of every element whose attributes are left alone.
+//! element, every tag closed, every reference resolvable, every character
+//! one XML allows. What it reads is kept as written: character data,
+//! comments, processing instructions, and the start tag of every element
+//! whose attributes are left alone.
 //! [`Document::write`] therefore reproduces an untouched document byte for
 //! byte (bar a leading byte-order mark and white space inside end tags), and
 //! an edit disturbs nothing but the nodes it touches.
@@ -33,7 +34,7 @@ pub(crate) enum Node {
 
 impl Node {
     /// White space between tags: the indentation of whatever follows.
-    fn is_blank(&self) -> bool {
+    pub(crate) fn is_blank(&self) -> bool {
         matches!(self, Self::Text(text) if text::is_blank(text))
     }
 }
@@ -142,9 +143,16 @@ impl Element {
         self.source_tag = None;
     }
 
-    pub(crate) fn remove_attribute(&mut self, index: usize) {
-        if index < self.attributes.len() {
-            self.attributes.remove(index);
+    /// Removes the attributes at `indices`, in one pass however many there
+    /// are. Indices past the end are ignored.
+    pub(crate) fn remove_attributes(&mut self, indices: &[usize]) {
+        let doomed = marked(self.attributes.len(), indices.iter().copied());
+        if doomed.contains(&true) {
+            let mut position = 0;
+            self.attributes.retain(|_| {
+                position += 1;
+                !doomed[position - 1]
+            });
             self.source_tag = None;
         }
     }
@@ -215,19 +223,35 @@ impl Element {
         index
     }
 
-    /// Removes the child at `index` together with the white space that
-    /// indented it.
-    pub(crate) fn remove_child(&mut self, index: usize) {
-        if index >= self.children.len() {
-            return;
-        }
-        self.children.remove(index);
-        if let Some(before) = index.checked_sub(1)
-            && self.children.get(before).is_some_and(Node::is_blank)
-        {
-            self.children.remove(before);
+    /// Removes the children at `indices`, each together with the white
+    /// space that indented it, in one pass however many there are. Indices
+    /// past the end are ignored.
+    pub(crate) fn remove_children(&mut self, indices: &[usize]) {
+        let children = &self.children;
+        let indentation = indices.iter().filter_map(|&index| {
+            let before = index.checked_sub(1)?;
+            let indented = index < children.len() && children[before].is_blank();
+            indented.then_some(before)
+        });
+        let all = indices.iter().copied().chain(indentation);
+        let doomed = marked(children.len(), all);
+        let mut position = 0;
+        self.children.retain(|_| {
+            position += 1;
+            !doomed[position - 1]
+        });
+    }
+}
+
+/// For each of `count` positions, whether it is among `chosen`.
+fn marked(count: usize, chosen: impl Iterator<Item = usize>) -> Vec<bool> {
+    let mut marks = vec![false; count];
+    for position in chosen {
+        if let Some(mark) = marks.get_mut(position) {
+            *mark = true;
         }
     }
+    marks
 }
 
 /// A whole XML document, split at its root element.

@@ -1,12 +1,15 @@
 //! Reading a document: `quick-xml` events into the tree, with the checks a
 //! pull parser leaves to its caller.
 
+use std::collections::HashMap;
+
 use quick_xml::escape::resolve_xml_entity;
 use quick_xml::events::{BytesDecl, BytesRef, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
+use super::text::{first_forbidden, is_xml_char};
 use super::{Attribute, Document, Element, Node};
-use crate::XmpError;
+use crate::{MAX_SIDECAR_BYTES, XmpError};
 
 /// Deepest element nesting accepted. XMP nests a handful of levels; the limit
 /// keeps a hostile file from exhausting the stack when the tree is walked.
@@ -15,11 +18,21 @@ pub(super) const MAX_DEPTH: usize = 128;
 impl Document {
     /// Reads `text`, refusing anything that is not well-formed XML with
     /// namespaces: unclosed or mismatched tags, malformed attributes,
-    /// references to entities XML does not define, names with a prefix that
-    /// is not declared, text outside the root, more or less than one root.
-    /// A declaration that names an encoding other than UTF-8 is refused too,
-    /// because the document would be written back contradicting it.
+    /// references to entities XML does not define, characters XML does not
+    /// allow (written out or by reference), names with a prefix that is not
+    /// declared, text outside the root, more or less than one root. A
+    /// declaration that names an encoding other than UTF-8 is refused too,
+    /// because the document would be written back contradicting it. A text
+    /// longer than [`MAX_SIDECAR_BYTES`] is refused before it is read.
     pub(crate) fn parse(text: &str) -> Result<Self, XmpError> {
+        if text.len() > MAX_SIDECAR_BYTES {
+            return Err(XmpError::TooLarge);
+        }
+        // A character XML forbids would be dropped the next time the value
+        // holding it is written, so the document is refused as it stands.
+        if let Some((offset, character)) = first_forbidden(text) {
+            return Err(malformed(offset as u64, forbidden(character)));
+        }
         let mut reader = Reader::from_str(text);
         let mut open: Vec<Element> = Vec::new();
         let mut prefixes = Prefixes::default();
@@ -130,6 +143,11 @@ impl Element {
             let value = attribute
                 .normalized_value(XmlVersion::Implicit1_0)
                 .map_err(|error| error.to_string())?;
+            // The text itself holds no such character, so this one came
+            // through a reference.
+            if let Some((_, character)) = first_forbidden(&value) {
+                return Err(forbidden(character));
+            }
             attributes.push(Attribute {
                 name: utf8(attribute.key.into_inner())?.to_owned(),
                 value: value.into_owned(),
@@ -152,26 +170,33 @@ impl Element {
 /// A prefix nothing declares makes a name meaningless. It also must not be
 /// let through: a declaration added to the document later would silently
 /// give every such name a meaning.
+///
+/// Declarations are kept by prefix, so looking one up costs the same however
+/// many an element makes.
 #[derive(Default)]
 struct Prefixes {
-    /// Every declaration in force, innermost last: the prefix, and whether
-    /// it is bound (an empty URI takes a binding away).
-    declared: Vec<(String, bool)>,
-    /// Where the declarations of each open element start.
-    frames: Vec<usize>,
+    /// For every prefix some open element declares, those declarations,
+    /// innermost last: whether each binds the prefix (an empty URI takes a
+    /// binding away).
+    bindings: HashMap<String, Vec<bool>>,
+    /// The prefixes each open element declares, innermost last.
+    frames: Vec<Vec<String>>,
 }
 
 impl Prefixes {
     /// Takes in the declarations of an element being opened, then checks
     /// the prefixes of its own name and of its attributes.
     fn open(&mut self, element: &Element) -> Result<(), String> {
-        self.frames.push(self.declared.len());
+        let mut frame = Vec::new();
         for attribute in element.attributes() {
             if let Some(prefix) = attribute.declared_prefix() {
                 let bound = !attribute.value.is_empty();
-                self.declared.push((prefix.to_owned(), bound));
+                let declarations = self.bindings.entry(prefix.to_owned()).or_default();
+                declarations.push(bound);
+                frame.push(prefix.to_owned());
             }
         }
+        self.frames.push(frame);
         let attributes = element.attributes().iter();
         let names = std::iter::once(element.name())
             .chain(attributes.map(|attribute| attribute.name.as_str()));
@@ -187,20 +212,29 @@ impl Prefixes {
 
     /// Forgets the declarations of the element opened last.
     fn close(&mut self) {
-        if let Some(frame) = self.frames.pop() {
-            self.declared.truncate(frame);
+        for prefix in self.frames.pop().unwrap_or_default() {
+            if let Some(declarations) = self.bindings.get_mut(&prefix) {
+                declarations.pop();
+                if declarations.is_empty() {
+                    self.bindings.remove(&prefix);
+                }
+            }
         }
     }
 
     fn is_bound(&self, prefix: &str) -> bool {
         // `xml` is bound by definition, and `xmlns` is how declarations are spelled.
         let innermost = self
-            .declared
-            .iter()
-            .rev()
-            .find(|(declared, _)| declared == prefix);
-        matches!(prefix, "xml" | "xmlns") || innermost.is_some_and(|(_, bound)| *bound)
+            .bindings
+            .get(prefix)
+            .and_then(|declarations| declarations.last());
+        matches!(prefix, "xml" | "xmlns") || innermost.is_some_and(|bound| *bound)
     }
+}
+
+fn forbidden(character: char) -> String {
+    let code = u32::from(character);
+    format!("U+{code:04X} is a character XML does not allow")
 }
 
 fn malformed(offset: u64, message: impl ToString) -> XmpError {
@@ -232,15 +266,17 @@ fn checked_declaration(declaration: &BytesDecl<'_>) -> Result<String, String> {
 }
 
 /// A reference as it was written (`&name;`), once it is known to resolve:
-/// a character reference, or one of the five entities XML defines.
+/// a character reference to a character XML allows, or one of the five
+/// entities XML defines.
 fn checked_reference(reference: &BytesRef<'_>) -> Result<String, String> {
     let name = utf8(reference)?;
     let character = reference
         .resolve_char_ref()
         .map_err(|error| error.to_string())?;
-    if character.is_some() || resolve_xml_entity(name).is_some() {
-        Ok(format!("&{name};"))
-    } else {
-        Err(format!("&{name}; is not a defined entity"))
+    match character {
+        Some(character) if !is_xml_char(character) => Err(forbidden(character)),
+        Some(_) => Ok(format!("&{name};")),
+        None if resolve_xml_entity(name).is_some() => Ok(format!("&{name};")),
+        None => Err(format!("&{name}; is not a defined entity")),
     }
 }

@@ -53,7 +53,8 @@ fn an_attribute_edit_that_changes_nothing_keeps_the_tag_as_written() {
     let text = "<a x='1'  y='2'/>";
     let mut document = Document::parse(text).unwrap();
     document.root.retain_attributes(|_| true);
-    document.root.remove_attribute(9);
+    document.root.remove_attributes(&[9]);
+    document.root.remove_attributes(&[]);
     document.root.set_attribute_at(9, "ignored");
     assert_eq!(document.write(), text);
 }
@@ -75,11 +76,26 @@ fn many_attributes_are_written_one_to_a_line() {
         .element_mut(1)
         .unwrap()
         .retain_attributes(|attribute| attribute.name != "two");
-    document.root.element_mut(1).unwrap().remove_attribute(0);
+    document
+        .root
+        .element_mut(1)
+        .unwrap()
+        .remove_attributes(&[0]);
     assert_eq!(
         document.write(),
         "<r>\n  <a early=\"0\" three=\"3\"/>\n</r>"
     );
+}
+
+#[test]
+fn many_attributes_or_children_go_in_one_removal() {
+    let mut document =
+        Document::parse("<r a='1' b='2' c='3' d='4'>\n  <a/>\n  <b/>keep<c/>\n  <d/>\n</r>")
+            .unwrap();
+    document.root.remove_attributes(&[3, 0, 3, 40]);
+    // `b` is indented, `c` follows text that stays, `d` is indented.
+    document.root.remove_children(&[3, 5, 7, 40]);
+    assert_eq!(document.write(), "<r b=\"2\" c=\"3\">\n  <a/>keep\n</r>");
 }
 
 #[test]
@@ -137,16 +153,16 @@ fn what_is_written_reads_back_as_the_same_bytes() {
 #[test]
 fn removing_an_element_takes_its_indentation_with_it() {
     let mut document = Document::parse("<r>\n  <a/>\n  <b/>\n  <c/>\n</r>").unwrap();
-    document.root.remove_child(3);
+    document.root.remove_children(&[3]);
     assert_eq!(document.write(), "<r>\n  <a/>\n  <c/>\n</r>");
-    document.root.remove_child(1);
+    document.root.remove_children(&[1]);
     assert_eq!(document.write(), "<r>\n  <c/>\n</r>");
-    document.root.remove_child(7);
-    document.root.remove_child(1);
+    document.root.remove_children(&[7]);
+    document.root.remove_children(&[1]);
     assert_eq!(document.write(), "<r>\n</r>");
 
     let mut inline = Document::parse("<r>keep <a/> this</r>").unwrap();
-    inline.root.remove_child(1);
+    inline.root.remove_children(&[1]);
     assert_eq!(inline.write(), "<r>keep  this</r>");
 }
 

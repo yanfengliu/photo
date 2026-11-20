@@ -5,6 +5,15 @@ use std::borrow::Cow;
 
 use quick_xml::escape::unescape;
 
+/// Whether XML 1.0 allows `character` in a document at all, written out or
+/// by reference: its `Char` production.
+pub(super) const fn is_xml_char(character: char) -> bool {
+    matches!(
+        character,
+        '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..
+    )
+}
+
 /// Whether `text` is nothing but XML white space.
 pub(super) fn is_blank(text: &str) -> bool {
     let is_space = |byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
@@ -32,6 +41,13 @@ pub(super) fn decode(raw: &str) -> String {
     }
 }
 
+/// The first character in `text` that XML does not allow, with its byte
+/// offset.
+pub(super) fn first_forbidden(text: &str) -> Option<(usize, char)> {
+    text.char_indices()
+        .find(|&(_, character)| !is_xml_char(character))
+}
+
 /// `text` as it has to be written between tags or, when `in_attribute`,
 /// between double quotes, so that it reads back unchanged. Characters XML
 /// cannot represent at all are left out.
@@ -48,9 +64,7 @@ pub(super) fn escape(text: &str, in_attribute: bool) -> String {
             // Bare tabs and line feeds in an attribute are read back as spaces.
             '\t' if in_attribute => out.push_str("&#9;"),
             '\n' if in_attribute => out.push_str("&#10;"),
-            '\t' | '\n' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'.. => {
-                out.push(character);
-            }
+            _ if is_xml_char(character) => out.push(character),
             _ => {}
         }
     }

@@ -7,8 +7,10 @@
 //! write: properties as attributes of `rdf:Description` or as child
 //! elements, lists as `rdf:Bag`, `rdf:Seq` or `rdf:Alt`, any namespace
 //! prefixes (names are resolved by namespace URI), with or without the
-//! `<?xpacket?>` wrapper and the `x:xmpmeta` element. Properties that are
-//! not understood are ignored; values that do not parse count as absent.
+//! `<?xpacket?>` wrapper and the `x:xmpmeta` element. A value with
+//! qualifiers beside it (XMP specification, part 1) is read from its
+//! `rdf:value`, and an update changes only that. Properties that are not
+//! understood are ignored; values that do not parse count as absent.
 //!
 //! # What is written
 //!
@@ -278,8 +280,9 @@ pub enum XmpError {
         source: std::io::Error,
     },
     /// The text is not well-formed XML in UTF-8: a tag is unclosed or
-    /// mismatched, a reference is undefined, the file is cut short, empty,
-    /// or in another encoding.
+    /// mismatched, a reference is undefined, a character XML does not allow
+    /// is written out or referred to, the file is cut short, empty, or in
+    /// another encoding.
     #[error("not well-formed XML at byte {offset}: {message}")]
     Malformed {
         /// Where in the text the problem was noticed.
@@ -291,10 +294,30 @@ pub enum XmpError {
     /// `rdf:RDF` element at or directly under the root.
     #[error("the XML holds no XMP packet (no rdf:RDF element)")]
     NotXmp,
+    /// The sidecar, or the text that would replace it, is larger than
+    /// [`MAX_SIDECAR_BYTES`]. Such a sidecar is neither read nor written.
+    #[error("the sidecar is larger than the {MAX_SIDECAR_BYTES} bytes accepted")]
+    TooLarge,
+    /// The sidecar kept changing while it was being updated, so the update
+    /// was given up rather than written over what another application had
+    /// just saved. The file holds that application's last version.
+    #[error("{} kept changing while it was being updated", .path.display())]
+    Conflict {
+        /// The sidecar file.
+        path: PathBuf,
+    },
     /// The develop settings could not be encoded as JSON.
     #[error("the develop settings could not be encoded: {0}")]
     Settings(#[from] serde_json::Error),
 }
+
+/// The largest sidecar read or written, in bytes: 16 MiB.
+///
+/// Real sidecars hold kilobytes, a few megabytes at most. The limit bounds
+/// the time and memory a hostile file can cost, and a text this crate would
+/// write beyond it is refused too, so that every sidecar it writes can be
+/// read back.
+pub const MAX_SIDECAR_BYTES: usize = 16 << 20;
 
 /// Reads the text of a sidecar for an image described by `image`.
 ///
@@ -321,16 +344,27 @@ pub fn parse(xml: &str, image: ImageInfo) -> Result<XmpData, XmpError> {
 ///
 /// Without `existing` the result is a new packet in the standard
 /// `<?xpacket?>` wrapper.
+///
+/// Either way, an `existing` or a result longer than [`MAX_SIDECAR_BYTES`]
+/// is refused with [`XmpError::TooLarge`].
 pub fn to_string(
     data: &XmpData,
     image: ImageInfo,
     existing: Option<&str>,
 ) -> Result<String, XmpError> {
+    let too_large = |text: &str| text.len() > MAX_SIDECAR_BYTES;
+    if existing.is_some_and(too_large) {
+        return Err(XmpError::TooLarge);
+    }
     let is_blank = |text: &str| text.trim_start_matches('\u{feff}').trim().is_empty();
     let mut packet = match existing {
         Some(text) if !is_blank(text) => rdf::Packet::parse(text)?,
         _ => rdf::Packet::new(),
     };
     fields::write(&mut packet, data, image)?;
-    Ok(packet.into_string())
+    let text = packet.into_string();
+    if too_large(&text) {
+        return Err(XmpError::TooLarge);
+    }
+    Ok(text)
 }

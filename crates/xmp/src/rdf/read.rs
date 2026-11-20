@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use super::scope::Scope;
+use super::value::{Holder, ValueAt};
 use super::{Container, DEFAULT_LANGUAGE, Item, LANGUAGE, Namespace, Packet, Property, RDF};
-use crate::dom::Element;
+use crate::dom::{Element, Node};
 
 /// The plain-valued properties of one namespace, by local name.
 pub(crate) type Values = HashMap<String, String>;
@@ -55,10 +56,9 @@ impl Packet {
     pub(crate) fn plain_values(&self, namespace: Namespace) -> Values {
         let mut values = Values::new();
         self.each_description(|_, description, scope| {
-            let prefixes = scope.prefixes_of(namespace.uri);
             for attribute in description.attributes() {
                 if let Some((prefix, name)) = attribute.name.split_once(':')
-                    && prefixes.contains(&prefix)
+                    && scope.uri(prefix) == Some(namespace.uri)
                 {
                     let value = || attribute.value.clone();
                     values.entry(name.to_owned()).or_insert_with(value);
@@ -66,8 +66,9 @@ impl Packet {
             }
             for (_, child) in description.elements() {
                 let (prefix, name) = child.name().split_once(':').unwrap_or(("", child.name()));
-                if scope.enter(child).uri(prefix) == Some(namespace.uri)
-                    && let Some(text) = child.text()
+                let scope = scope.enter(child);
+                if scope.uri(prefix) == Some(namespace.uri)
+                    && let Value::Text(text) = element_value(child, &scope)
                 {
                     values.entry(name.to_owned()).or_insert(text);
                 }
@@ -101,8 +102,47 @@ impl Packet {
     }
 }
 
-/// What a property element holds. `scope` is the element's own.
+/// What a property element, or an item of a list, holds: its own content,
+/// or the `rdf:value` beside its qualifiers. `scope` is the element's own.
 fn element_value(element: &Element, scope: &Scope<'_>) -> Value {
+    match Holder::of(element, scope) {
+        Holder::Content => content_value(element, scope),
+        Holder::Structure => Value::Other,
+        Holder::Qualified {
+            resource: None,
+            value,
+        } => qualified_value(element, scope, value),
+        Holder::Qualified {
+            resource: Some(position),
+            value,
+        } => match element.children.get(position) {
+            Some(Node::Element(resource)) => {
+                qualified_value(resource, &scope.enter(resource), value)
+            }
+            _ => Value::Other,
+        },
+    }
+}
+
+/// What a resource's `rdf:value` holds. `scope` is the resource's own.
+fn qualified_value(resource: &Element, scope: &Scope<'_>, value: ValueAt) -> Value {
+    match value {
+        ValueAt::Attribute(index) => resource
+            .attributes()
+            .get(index)
+            .map_or(Value::Other, |attribute| {
+                Value::Text(attribute.value.clone())
+            }),
+        ValueAt::Element(position) => match resource.children.get(position) {
+            Some(Node::Element(element)) => content_value(element, &scope.enter(element)),
+            _ => Value::Other,
+        },
+    }
+}
+
+/// What an element holds as its own content: a list, or plain text.
+/// `scope` is the element's own.
+fn content_value(element: &Element, scope: &Scope<'_>) -> Value {
     match container_in(element, scope) {
         Some((_, list)) => {
             let items = list_items(list, scope);
@@ -126,20 +166,21 @@ pub(super) fn container_in<'e>(
     })
 }
 
-/// The items of a list that hold plain text, each with its position among
-/// the list's children. `scope` is that of the property element around the
-/// list.
+/// The items of a list that hold plain text, qualified or not, each with its
+/// position among the list's children. `scope` is that of the element
+/// around the list.
 pub(super) fn list_items(list: &Element, scope: &Scope<'_>) -> Vec<(usize, Item)> {
     let scope = scope.enter(list);
     let items = list.elements().filter_map(|(position, element)| {
-        if !scope.enter(element).element_is(element.name(), RDF, "li") {
+        let scope = scope.enter(element);
+        if !scope.element_is(element.name(), RDF, "li") {
             return None;
         }
-        let item = Item {
-            language: element.attribute(LANGUAGE).map(str::to_owned),
-            text: element.text()?,
+        let Value::Text(text) = element_value(element, &scope) else {
+            return None;
         };
-        Some((position, item))
+        let language = element.attribute(LANGUAGE).map(str::to_owned);
+        Some((position, Item { language, text }))
     });
     items.collect()
 }
