@@ -1,0 +1,247 @@
+{
+  "version": 1,
+  "allocations": [
+    {
+      "id": 0,
+      "theme": "image-editing",
+      "legacyFiles": [
+        {
+          "path": "historical/superpowers/plans/2026-03-30-image-editing.md",
+          "sha256": "cdd9402f15664734b217ad2797331928f8497a1eed9d7e86f5e10d501730d0bb",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/superpowers/plans/2026-03-30-image-editing.md"
+        },
+        {
+          "path": "historical/superpowers/specs/2026-03-30-image-editing-design.md",
+          "sha256": "3cbd6e4190a7a4dabb87c5860c54f97678c494f1d01ae7b0d6d48ca333be2dba",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/superpowers/specs/2026-03-30-image-editing-design.md"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "theme": "collections",
+      "legacyFiles": [
+        {
+          "path": "historical/superpowers/plans/2026-04-03-collections.md",
+          "sha256": "f6c7bcb370d4fc08eda6e104c2ef8e613e2bcde6d50780e2b7ede8b8ff629bd8",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/superpowers/plans/2026-04-03-collections.md"
+        },
+        {
+          "path": "historical/superpowers/specs/2026-04-03-collections-design.md",
+          "sha256": "395d6c60da3dbf24575fc8c6fa3953b04904349c2ca91ddcc5df708d210ba9bc",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/superpowers/specs/2026-04-03-collections-design.md"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "theme": "esc-crop-cancel",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "b0cde1f428b123d4ecce3c1122162d39a43d6d4773ead933d0c7df08e0849716",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/esc-crop-cancel/2026-06-10/1/REVIEW.md"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "theme": "lightroom-param-parity",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "2117d90d6d4059621f182e6f164b61e59586d87691f0bd70faf3f4e04697c71f",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/lightroom-param-parity/2026-06-10/1/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/done/lightroom-param-parity/DESIGN.md",
+          "sha256": "252fc1d79dfff7a30744a877f896bf706cc6795cf34d3cbc1c70b3a50b9ddf82",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/lightroom-param-parity/DESIGN.md"
+        },
+        {
+          "path": "historical/threads/done/lightroom-param-parity/PLAN.md",
+          "sha256": "5639b1238ef49537b439047984a9a97f5711a8cb9e1d4ec4cc7e6bcfb7142f3a",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/lightroom-param-parity/PLAN.md"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "theme": "project-health-overhaul",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "6e23c7551f2e743cc839dd3762e171a09521a1beacbc9e707a432d7fd83296da",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/project-health-overhaul/2026-06-10/1/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/done/project-health-overhaul/PLAN.md",
+          "sha256": "f2c51eebef2945937121538706313d3cca9f19556becd57b7f74d54f57ef875f",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/project-health-overhaul/PLAN.md"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "theme": "library-offline-edits",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "d97c2db174301b12cf5454fc003d4be7bd7d0ecbbe4a29166076dae33fb0a30c",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-offline-edits/2026-06-11/1/REVIEW.md"
+        },
+        {
+          "path": "reviews/1_legacy.md",
+          "sha256": "0bc6c43867e2d386ab2ab9b7647e734843c6a01868fd44b54505030a15497501",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-offline-edits/2026-06-11/2/REVIEW.md"
+        },
+        {
+          "path": "reviews/2_legacy.md",
+          "sha256": "57ce0cc83f04eec97ef851926ec30caedcc4b361c710371f394f85bd150d1820",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-offline-edits/2026-06-11/3/REVIEW.md"
+        },
+        {
+          "path": "reviews/3_legacy.md",
+          "sha256": "6fda700baac6cedc20d20f8e9bc158ee7828c733b38838e7fe944a2ce6f67ac3",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-offline-edits/2026-06-11/4/REVIEW.md"
+        },
+        {
+          "path": "reviews/4_legacy.md",
+          "sha256": "21648b206a08e52a4247c8b6ece69b9fc5ffc770109d623704c85d99c76c64d9",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-offline-edits/2026-06-11/5/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/done/library-offline-edits/DESIGN.md",
+          "sha256": "30702ca911404543a9d35554a47f92b05567dae6050f762e5d89c0708507e432",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-offline-edits/DESIGN.md"
+        },
+        {
+          "path": "historical/threads/done/library-offline-edits/PLAN.md",
+          "sha256": "9b761d230628a281eb26c1bb2765454912e7762dcb7fa5f79d2e97c56ca1d1ad",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-offline-edits/PLAN.md"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "theme": "repo-local-exports",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "5b19a4723de78da9239a01f452f489e599b80b24d0dd292acbe0cf3fcdb50830",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/repo-local-exports/2026-06-11/1/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/done/repo-local-exports/DESIGN.md",
+          "sha256": "5782c33099a1920f8d3a95ab244a222c5673feea88344f950bcdf39994747bd3",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/repo-local-exports/DESIGN.md"
+        },
+        {
+          "path": "historical/threads/done/repo-local-exports/PLAN.md",
+          "sha256": "1623d7f7881bc94d91114abe12905cb1db6233c07264f8fb1611f0c7aa9ef9a3",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/repo-local-exports/PLAN.md"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "theme": "perf-and-calibration",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "f3e15fd73d2d59a9b5d851ad1bbd6cf9d9a67ec4683002631424496249d75f3e",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/perf-and-calibration/2026-06-12/1/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/done/perf-and-calibration/DESIGN.md",
+          "sha256": "a348ef29aa7534318a58b77809c3319e7780a4dfba685a54d990abbf5fae68a5",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/perf-and-calibration/DESIGN.md"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "theme": "raw-default-tone",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "e1a324c128e73a77b0e4d513dacc8d37624215ae56c1b0b198c5b29f23394934",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/raw-default-tone/2026-06-12/1/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/done/raw-default-tone/DESIGN.md",
+          "sha256": "08f7bebdfb7e02c348f7741339d6e8ba3075bdaf05525efaed87bc9322b2a17f",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/raw-default-tone/DESIGN.md"
+        },
+        {
+          "path": "historical/threads/done/raw-default-tone/PLAN.md",
+          "sha256": "a558580fcfae6eb97eadac355c63e7a83729a561f087d670f0aa57a7a114e83d",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/raw-default-tone/PLAN.md"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "theme": "library-test-isolation",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "f05b20749f143c3b484ea7860822d349d5854ff75343f9fbb76fc38163a08a88",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/library-test-isolation/2026-06-13/1/REVIEW.md"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "theme": "agent-harness",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "8b4061b87304bdf760d38f3df3341d6d4939242e6d695f3680604702167d22af",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/agent-harness/2026-07-08/1/REVIEW.md"
+        },
+        {
+          "path": "reviews/1_legacy.md",
+          "sha256": "2ea3ba350113f75eaed6d1c288523ae9e7a9f6e3e563ecf98306ff5e87d8f091",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/agent-harness/2026-07-08/2/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/done/agent-harness/DESIGN.md",
+          "sha256": "7720b98e401cb61561172e64491d93af1a200ac440195b7aa985777719d91295",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/agent-harness/DESIGN.md"
+        },
+        {
+          "path": "historical/threads/done/agent-harness/PLAN.md",
+          "sha256": "d170c88596a3c16e838533c62f2e4d3853d2345a40f907cea33a83f3f43171ac",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/done/agent-harness/PLAN.md"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "theme": "natural-edit-ranges",
+      "legacyFiles": [
+        {
+          "path": "reviews/0_legacy.md",
+          "sha256": "6502d39bf3080d0003411dfbf04a99d8e2c578d19a8cf0b5f876cdbbcfbecafd",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/current/natural-edit-ranges/2026-07-14/1/REVIEW.md"
+        },
+        {
+          "path": "reviews/1_legacy.md",
+          "sha256": "ed577df2079386005f15acbf437797fdaaddb4ab93cc53a063dca3a6bfa98c75",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/current/natural-edit-ranges/2026-07-14/2/REVIEW.md"
+        },
+        {
+          "path": "historical/threads/current/natural-edit-ranges/DESIGN.md",
+          "sha256": "b300a4376831ad4d3a7e9f9ca24048ad17fc7c8fb8b713088da64ee183b2f779",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/current/natural-edit-ranges/DESIGN.md"
+        },
+        {
+          "path": "historical/threads/current/natural-edit-ranges/PLAN.md",
+          "sha256": "19724da98cabeada56e8b22bad69c193d283c504e48d2d2ac4f68255837d6476",
+          "source": "photo@20fe1d976a748ffc0ff123ca1cbd5bf027322158:docs/threads/current/natural-edit-ranges/PLAN.md"
+        }
+      ]
+    }
+  ]
+}

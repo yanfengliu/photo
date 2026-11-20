@@ -4,3 +4,18 @@
 !/.claude/skills/
 .DS_Store
 *.stackdump
+
+# Local photo fixtures for harness and tuning sessions (RAWs, XMP settings, JPGs). Never committed.
+/test_photos/
+
+# Data stores and build leftovers of the previous app, still on disk in older checkouts. Never committed.
+/decoded-cache
+/edited/
+/local-edits/
+/local-edits.json
+/code_review/
+/.superpowers
+*.exe
+*.pdb
+*.dll
+*.jpg

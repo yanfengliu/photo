@@ -1,0 +1,23 @@
+# Review — library-offline-edits, 2026-06-11, iteration 1
+
+Reviewers: Claude (fable-5, effort max, codebase-grounded — load-bearing), Gemini 3.1 Pro (plan mode, structural). Codex unreachable: usage limit until 2026-07-10; proceeded with two reviewers per AGENTS.md.
+
+Diff under review: F1 (offline-capable bake loading: candidate keys + fail-open-when-absent), F2 (owed-bake registry for commits during staged loads), F5 (thumbnail base provenance), F6 (offline library persistence). 334 tests at dispatch.
+
+## Findings
+
+| ID | Severity | Finding | Disposition |
+|---|---|---|---|
+| Claude 1-H1 | HIGH | Owed-bake fulfillment never seeds `base_image_sources[path]`, breaking the "edit state is relative to the recorded base" invariant: A→B→A reopen resolves the fresh bake as the base and re-applies the still-held session state on top — double-applied pixels are re-baked (S², S³ … per reopen) and exported. Tests masked it because `detail_app_with_image` pre-seeds the map. | Fixed: `fulfill_owed_local_edit_bake` inserts `loaded.base_source` exactly as the current-request arm does. Test `fulfilled_owed_bake_seeds_base_image_source_for_reopen` runs the bake for real and asserts reopen resolves `Original`. |
+| Claude 1-M2 | MEDIUM | Owed bakes registered during stage `Loading` of a staged RAW load can never be fulfilled — the full-image task is chained off `ImagePreviewLoaded`, whose stale branch returned `Task::none()` without chaining. Map entry leaks; the committed edit is still silently lost in that window. | Fixed: the stale-preview branch now chains `full_image_load_task` whenever the request id has an owed entry, so the commit is rescued instead of dropped (also closes the leak: every registered entry now receives exactly one `ImageLoaded`). Test `stale_preview_completion_still_fulfills_owed_bake_via_chained_full_decode` pins owed-entry retention plus end-to-end fulfillment; the spawn line itself is not directly assertable (iced `Task` is opaque). |
+| Claude 1-M3 | MEDIUM | Flicking through unedited baked images queues identity re-bakes: full-resolution render + ~100 MB cache rewrite per superseded load, each pinning a full-res `Arc` in the persist queue. | Fixed: `owed_bake_has_nothing_new` skips default-state images whose base already is the bake, at registration and at fulfillment (a default state over an `Original` base with an existing bake still registers — that is a pending reset and must persist). Tests `navigation_owes_nothing_for_unedited_baked_image`, `owed_bake_skipped_for_unedited_baked_image`. |
+| Claude 1-L4 | LOW/MED | Owed lens snapshot taken while EXIF is pending bakes without lens correction although the state claims it; the mainline path defers instead. | Accepted as visible-parity behavior: the preview render the user committed against also had no profile applied, so the bake matches what they saw; deferring would mean dropping the commit. Documented here; the registration-time snapshot comment explains the choice. |
+| Claude 1-L5 | LOW | Offline key reconstruction misses UNC paths, symlink/junction/subst topologies, and case divergence (silently unreachable bakes offline; offline reset cannot purge canonical-keyed files in those topologies). Verbatim guess is meaningless off-Windows; fail-open triggered on any metadata failure (EACCES, pre-epoch mtimes), letting a stale bake shadow a present-but-unreadable source. | Partially fixed: verbatim guess now `cfg(windows)`; fail-open narrowed to true absence (`probe_source_file_state` tri-state — `Unreadable` is fail-closed; not E2E-testable portably, covered by review). A parent-directory-canonicalize candidate (added post-dispatch) covers deleted-file-with-live-parent and 8.3 temp aliases. UNC/symlink/case topologies remain documented limitations — the user's workflow is plain drive-letter paths. |
+| Gemini 1-1 | LOW | Case-sensitive key hashing could miss offline lookups when library entries differ in casing from bake-time paths; negligible given file-picker-sourced paths. | Same disposition as Claude 1-L5 (documented limitation). |
+| Gemini 1-2 | NIT | `\\?\` guess is Windows-specific. | Fixed via `cfg(windows)` gate. |
+
+Gemini overall: approved, no defects found ("implementation is robust"; owed-bake registry "a precise solution"). Claude overall: F1/F5/F6 verified good with fail-closed semantics intact; F2 findings as above.
+
+## Outcome
+
+All blocking findings (1-H1, 1-M2, 1-M3) fixed with regression tests; 338 tests green, clippy/fmt clean. Iteration 2 re-review dispatched on the full working-tree diff (including the repo-local-exports change the iteration-1 scope note flagged as outside its diff).
