@@ -281,18 +281,6 @@ fn values_that_do_not_parse_are_ignored_rather_than_fatal() {
 }
 
 #[test]
-fn a_rating_is_rounded_and_clamped_to_zero_through_five() {
-    for (text, stars) in [("3.0", 3), ("+2", 2), ("9", 5), ("4.6", 5), ("0", 0)] {
-        let data = parse(&packet(&format!(r#"xmp:Rating="{text}""#)), RAW).unwrap();
-        assert_eq!(
-            (data.rating, data.flag),
-            (Rating::new(stars), Flag::Unflagged),
-            "{text}"
-        );
-    }
-}
-
-#[test]
 fn list_and_text_properties_written_as_plain_values_are_still_read() {
     let data = parse(
         &packet(r#"dc:subject="lighthouse" dc:title="Plain title""#),

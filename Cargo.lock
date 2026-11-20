@@ -3379,6 +3379,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "image",
  "log",
  "photo-core",
  "photo-engine",
@@ -3393,6 +3394,7 @@ version = "0.3.0"
 dependencies = [
  "photo-core",
  "quick-xml",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]

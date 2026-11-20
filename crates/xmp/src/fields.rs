@@ -23,24 +23,73 @@ pub(crate) fn read(packet: &Packet, image: ImageInfo) -> XmpData {
     }
 }
 
+/// How a packet marks a photo: the two properties its stars and its flag
+/// are read from.
+struct Marks {
+    /// `xmp:Rating`, when it holds a finite number.
+    rating: Option<f32>,
+    /// `photo:Flag`, when it holds a flag.
+    flag: Option<Flag>,
+}
+
+impl Marks {
+    fn of(packet: &Packet) -> Self {
+        let rating = packet.text(XMP.property("Rating"));
+        let flag = packet.text(PHOTO.property("Flag"));
+        Self {
+            rating: rating.and_then(|text| parse_number(&text)),
+            flag: flag.and_then(|text| parse_flag(&text)),
+        }
+    }
+
+    /// Whether the rating says "rejected". The XMP specification writes
+    /// that as -1 and allows no other negative value, so every negative
+    /// number is taken to mean it.
+    fn rejects(&self) -> bool {
+        self.rating.is_some_and(|rating| rating < 0.0)
+    }
+
+    /// The stars: the rating to the nearest whole number, five at most. A
+    /// rating that rejects has none.
+    fn stars(&self) -> Rating {
+        match self.rating {
+            // The cast saturates, and `Rating::new` clamps to five stars.
+            Some(rating) if !self.rejects() => Rating::new(rating.round() as u8),
+            _ => Rating::UNRATED,
+        }
+    }
+
+    /// The flag: the private property when it is there, else whatever the
+    /// rating says.
+    fn flag(&self) -> Flag {
+        let by_rating = if self.rejects() {
+            Flag::Rejected
+        } else {
+            Flag::Unflagged
+        };
+        self.flag.unwrap_or(by_rating)
+    }
+}
+
+/// The flag a `photo:Flag` value stands for: one of the whole numbers
+/// [`Flag::to_i8`] gives. Any other value stands for none.
+fn parse_flag(text: &str) -> Option<Flag> {
+    let value: i8 = text.trim().parse().ok()?;
+    [Flag::Rejected, Flag::Unflagged, Flag::Picked]
+        .into_iter()
+        .find(|flag| flag.to_i8() == value)
+}
+
 /// The descriptive part of a packet, without develop settings.
 fn read_metadata(packet: &Packet) -> XmpData {
-    let (rating, flag) = match packet
-        .text(XMP.property("Rating"))
-        .and_then(|text| parse_number::<f32>(&text))
-    {
-        Some(value) if value < 0.0 => (Rating::UNRATED, Flag::Rejected),
-        // The cast saturates, and `Rating::new` clamps to five stars.
-        Some(value) => (Rating::new(value.round() as u8), Flag::Unflagged),
-        None => (Rating::UNRATED, Flag::Unflagged),
-    };
+    let marks = Marks::of(packet);
     let label = packet.text(XMP.property("Label"));
     let hierarchical = packet
         .list(LR.property("hierarchicalSubject"))
         .unwrap_or_default();
     XmpData {
-        rating,
-        flag,
+        rating: marks.stars(),
+        flag: marks.flag(),
         label: label.map_or(ColorLabel::None, |name| ColorLabel::from_name(&name)),
         title: packet.alternative(DC.property("title")).unwrap_or_default(),
         caption: packet
@@ -81,10 +130,7 @@ fn read_develop(packet: &Packet, image: ImageInfo) -> Option<DevelopSettings> {
 pub(crate) fn write(packet: &mut Packet, data: &XmpData, image: ImageInfo) -> Result<(), XmpError> {
     let current = read_metadata(packet);
 
-    let rating = rating_value(data.rating, data.flag);
-    if rating != rating_value(current.rating, current.flag) {
-        packet.set_text(XMP.property("Rating"), &rating.to_string(), Form::Attribute);
-    }
+    write_marks(packet, data.rating, data.flag);
     // A label read as "none" may be a custom name this application has no
     // colour for; it stays until a colour replaces it.
     if data.label != current.label {
@@ -147,12 +193,29 @@ pub(crate) fn write(packet: &mut Packet, data: &XmpData, image: ImageInfo) -> Re
     Ok(())
 }
 
-/// `xmp:Rating` for a rating and flag: rejection is -1 and has no stars.
-fn rating_value(rating: Rating, flag: Flag) -> i8 {
+/// Makes the packet give these stars and this flag.
+///
+/// The stars are `xmp:Rating` whatever the flag is. A pick or a rejection
+/// is `photo:Flag`, and an unflagged photo has no such property. A packet
+/// that already reads this way is left alone, so a rejection another
+/// application wrote as a rating of -1 stays as it is until the stars or
+/// the flag change; this crate itself never writes that rating.
+fn write_marks(packet: &mut Packet, rating: Rating, flag: Flag) {
+    let current = Marks::of(packet);
+    if (current.stars(), current.flag()) == (rating, flag) {
+        return;
+    }
+    if current.rejects() || current.stars() != rating {
+        let stars = rating.stars().to_string();
+        packet.set_text(XMP.property("Rating"), &stars, Form::Attribute);
+    }
+    let property = PHOTO.property("Flag");
     match flag {
-        Flag::Rejected => -1,
-        // At most five, so the conversion cannot fail.
-        Flag::Unflagged | Flag::Picked => i8::try_from(rating.stars()).unwrap_or(i8::MAX),
+        Flag::Unflagged => packet.remove(property),
+        Flag::Picked | Flag::Rejected if current.flag == Some(flag) => {}
+        Flag::Picked | Flag::Rejected => {
+            packet.set_text(property, &flag.to_i8().to_string(), Form::Attribute);
+        }
     }
 }
 
@@ -238,10 +301,14 @@ mod tests {
     }
 
     #[test]
-    fn rejection_is_minus_one_whatever_the_stars() {
-        assert_eq!(rating_value(Rating::new(4), Flag::Rejected), -1);
-        assert_eq!(rating_value(Rating::new(4), Flag::Picked), 4);
-        assert_eq!(rating_value(Rating::UNRATED, Flag::Unflagged), 0);
+    fn a_flag_is_one_of_three_whole_numbers() {
+        for flag in [Flag::Rejected, Flag::Unflagged, Flag::Picked] {
+            assert_eq!(parse_flag(&flag.to_i8().to_string()), Some(flag));
+        }
+        assert_eq!(parse_flag(" +1\n"), Some(Flag::Picked));
+        for text in ["", "2", "-2", "1.0", "one", "picked", "1 1"] {
+            assert_eq!(parse_flag(text), None, "{text:?}");
+        }
     }
 
     #[test]

@@ -21,6 +21,16 @@
 //! and value but is laid out afresh. The properties owned are listed on
 //! [`XmpData`].
 //!
+//! # Rating and flag
+//!
+//! Stars are `xmp:Rating`. XMP has no property for a pick, and can say
+//! "rejected" only as a rating of -1, which leaves no room for stars. So
+//! the flag has a property of its own, the private `photo:Flag`, and what
+//! this crate writes to the rating is always the stars. On reading,
+//! `photo:Flag` decides the flag whenever it holds one; without it a
+//! negative rating means rejected. A negative rating never gives stars.
+//! The details are on [`XmpData::rating`] and [`XmpData::flag`].
+//!
 //! # Develop settings
 //!
 //! The settings are written twice. The private `photo:Settings` property
@@ -109,8 +119,9 @@ use photo_core::time::DateTime;
 pub use file::{read_sidecar, sidecar_path, write_sidecar};
 
 /// The namespace of this application's own properties, bound to the prefix
-/// `photo` in the sidecars it writes. Its one property, `photo:Settings`,
-/// holds the complete [`DevelopSettings`] as JSON.
+/// `photo` in the sidecars it writes. It has two: `photo:Settings` holds
+/// the complete [`DevelopSettings`] as JSON, and `photo:Flag` holds the
+/// pick or reject flag (see [`XmpData::flag`]).
 ///
 /// The host is under `.invalid`, a top-level domain reserved for names that
 /// must never resolve, so the namespace cannot collide with anyone's.
@@ -180,18 +191,39 @@ impl ImageInfo {
 /// What a sidecar says about a photo.
 ///
 /// Reading a sidecar this crate wrote gives back the data it was written
-/// from, with the exceptions noted on [`Self::flag`] and
-/// [`Self::capture_time`]. Empty strings and empty lists mean "absent": they
-/// are what a missing property reads as, and writing them removes the
-/// property.
+/// from, with the exception noted on [`Self::capture_time`]. Empty strings
+/// and empty lists mean "absent": they are what a missing property reads
+/// as, and writing them removes the property.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XmpData {
-    /// `xmp:Rating`, 0 to 5.
+    /// The stars: `xmp:Rating`, 0 to 5, written whatever the flag is.
+    ///
+    /// A rating outside what the XMP specification allows is read as near
+    /// to it as can be: a fraction counts as the nearest whole star and
+    /// anything above five as five. A negative rating has no stars and,
+    /// unless `photo:Flag` says otherwise, means the photo is rejected (see
+    /// [`Self::flag`]). A value that is not a finite number counts as
+    /// absent, which is no stars.
     pub rating: Rating,
-    /// Whether the photo is rejected. XMP records rejection as an
-    /// `xmp:Rating` of -1 and has no place for anything else, so only
-    /// [`Flag::Rejected`] travels: a rejected photo reads back with no
-    /// stars, and [`Flag::Picked`] reads back as [`Flag::Unflagged`].
+    /// The pick or reject flag: the private `photo:Flag` property.
+    ///
+    /// It holds the number [`Flag::to_i8`] gives: 1 for picked, -1 for
+    /// rejected. An unflagged photo is written without the property, and
+    /// one left from an earlier state is removed; a 0 found there reads as
+    /// unflagged all the same.
+    ///
+    /// On reading, `photo:Flag` decides the flag whenever it holds one of
+    /// those three numbers, whatever the rating says; any other value
+    /// counts as absent. Without it the flag comes from `xmp:Rating`: -1,
+    /// which the XMP specification defines as "rejected", and any other
+    /// negative number mean [`Flag::Rejected`], and everything else means
+    /// [`Flag::Unflagged`].
+    ///
+    /// A rejection found as a rating of -1 is left as it is for as long as
+    /// the photo stays rejected and without stars. This crate never writes
+    /// that rating itself: once the stars or the flag change, the rating
+    /// holds the stars and a rejection is in `photo:Flag`, where other
+    /// applications do not look for it.
     pub flag: Flag,
     /// `xmp:Label`, by colour name. A label under any other name reads as
     /// [`ColorLabel::None`], and writing `None` back leaves that name alone.

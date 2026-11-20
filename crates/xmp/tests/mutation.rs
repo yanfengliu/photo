@@ -5,7 +5,7 @@ use photo_core::develop::{
     Crop, CropConstraint, CropRect, CurvePoint, DevelopSettings, Orientation, PointCurve, Profile,
     Treatment,
 };
-use photo_core::meta::FileKind;
+use photo_core::meta::{FileKind, Flag};
 use photo_xmp::{ImageInfo, XmpData, parse, to_string};
 
 const FIXTURES: [&str; 3] = [
@@ -21,8 +21,11 @@ const NOISE: [&str; 18] = [
 ];
 
 /// Attributes this crate reads, spliced in after a quotation mark.
-const ATTRIBUTES: [&str; 14] = [
+const ATTRIBUTES: [&str; 17] = [
     " xmp:Rating=\"7\"",
+    " xmp:Rating=\"-1\"",
+    " xmlns:photo=\"http://ns.photo.invalid/1.0/\" photo:Flag=\"1\"",
+    " xmlns:photo=\"http://ns.photo.invalid/1.0/\" photo:Flag=\"-1\"",
     " xmp:Label=\"Blue\"",
     " dc:title=\"loose\"",
     " crs:HasCrop=\"True\"",
@@ -39,8 +42,11 @@ const ATTRIBUTES: [&str; 14] = [
 ];
 
 /// Elements this crate reads, spliced in before a tag.
-const ELEMENTS: [&str; 10] = [
+const ELEMENTS: [&str; 13] = [
     "<xmp:Rating>2</xmp:Rating>",
+    "<xmp:Rating>-1</xmp:Rating>",
+    "<photo:Flag xmlns:photo=\"http://ns.photo.invalid/1.0/\">0</photo:Flag>",
+    "<photo:Flag xmlns:photo=\"http://ns.photo.invalid/1.0/\">1</photo:Flag>",
     "<dc:title>plain</dc:title>",
     "<dc:subject><rdf:Bag><rdf:li>extra</rdf:li><rdf:li/></rdf:Bag></dc:subject>",
     "<crs:ToneCurvePV2012><rdf:Seq><rdf:li>3, 4</rdf:li><rdf:li>200, 9</rdf:li></rdf:Seq></crs:ToneCurvePV2012>",
@@ -215,6 +221,11 @@ fn altered_sidecars_are_refused_or_updated_soundly() {
         develop.tone_curve.red = PointCurve::new([level(0, 30), level(200, 255)]);
         let changed = XmpData {
             rating: read.rating.increased().decreased().decreased(),
+            flag: match read.flag {
+                Flag::Unflagged => Flag::Picked,
+                Flag::Picked => Flag::Rejected,
+                Flag::Rejected => Flag::Unflagged,
+            },
             title: format!("{} <&>", read.title),
             keywords: vec!["one".to_owned(), "two & three".to_owned()],
             develop: Some(develop.clone()),

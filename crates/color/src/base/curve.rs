@@ -1,11 +1,6 @@
-//! Exposure and base rendering: scene-linear to display-linear (DESIGN §5.4).
-//!
-//! Camera sources get a gain and a filmic base curve; raster sources, which
-//! are already renderings, get a gain and (for positive exposure only) a
-//! shoulder that keeps the brightest pixel on white. Curves are applied with
-//! the hue-preserving RGB tone method of the DNG SDK (`RefBaselineRGBTone`
-//! in `dng_reference.cpp`): the largest and smallest channel go through the
-//! curve and the middle one keeps its relative position between them.
+//! The scalar curves of base rendering, each with its inverse: the filmic
+//! base curve of the curved profiles, the soft clip of the linear profile
+//! and the gain-aware shoulder of raster sources.
 //!
 //! The base curve is the skewed log-logistic sigmoid used by darktable's
 //! sigmoid module (`src/iop/sigmoid.c`, `y = (x^n / (x^n + s))^k`). How it
@@ -14,12 +9,11 @@
 
 use std::sync::LazyLock;
 
-use photo_core::colorimetry::{WORKING_LUMA, luminance};
 use photo_core::develop::Profile;
-use photo_core::image::SourceColor;
 
 use crate::lut::Lut;
-use crate::math::{max3, min3, non_negative, scale3, toward_luminance};
+use crate::math::{max3, min3};
+use crate::tone::encode_d;
 
 // ---- Tunable constants ----------------------------------------------------
 
@@ -56,13 +50,18 @@ const VIVID: Look = Look {
 };
 
 /// The linear profile, and nothing else, clips softly above this value.
-const SOFT_CLIP_KNEE: f32 = 0.8;
+pub(super) const SOFT_CLIP_KNEE: f32 = 0.8;
 /// Exposure (global plus local) is clamped to this many stops either way.
 const EXPOSURE_LIMIT_EV: f32 = 20.0;
-/// Base-curve table: `CURVE_CELLS` samples over `t = x / (x + CURVE_INDEX_HALF)`,
-/// which maps all of `[0, inf)` onto `[0, 1)` with middle grey near 0.42.
+/// Base-curve tables: `CURVE_CELLS` samples over
+/// `t = x / (x + CURVE_INDEX_HALF)`, which maps all of `[0, inf)` onto
+/// `[0, 1)` with middle grey near 0.42 and the two stops above the sensor's
+/// clip point spread over a tenth of the table.
 const CURVE_CELLS: usize = 2048;
 const CURVE_INDEX_HALF: f64 = 0.25;
+/// Scene values are held to this before a table lookup, so that an absurd
+/// input cannot turn the index into NaN.
+const SCENE_LIMIT: f32 = 1.0e12;
 
 // ---------------------------------------------------------------------------
 
@@ -78,8 +77,9 @@ pub fn exposure_gain(ev: f32) -> f32 {
 }
 
 /// Apply a tone curve to an RGB value without shifting its hue (DNG SDK
-/// `RefBaselineRGBTone`). The largest and smallest channel take the curve's
-/// value; the middle channel keeps its relative position between them.
+/// `RefBaselineRGBTone` in `dng_reference.cpp`). The largest and smallest
+/// channel take the curve's value; the middle channel keeps its relative
+/// position between them.
 ///
 /// For an increasing curve the order of the channels is preserved, equal
 /// channels stay equal, and a neutral value stays neutral.
@@ -102,7 +102,7 @@ pub fn rgb_tone(rgb: [f32; 3], curve: impl Fn(f32) -> f32) -> [f32; 3] {
 
 /// The sigmoid `y = (x^n / (x^n + s))^k`, solved so that it passes through
 /// the two anchors for a given skew.
-struct Sigmoid {
+pub(super) struct Sigmoid {
     power: f64,
     scale: f64,
     skew: f64,
@@ -125,7 +125,7 @@ impl Sigmoid {
     }
 
     /// Strictly increasing from 0 at 0 toward (never reaching) 1.
-    fn eval(&self, x: f64) -> f64 {
+    pub(super) fn eval(&self, x: f64) -> f64 {
         if x.is_nan() || x <= 0.0 {
             return 0.0;
         }
@@ -133,41 +133,74 @@ impl Sigmoid {
         // power both land on the correct limit.
         (1.0 / (1.0 + self.scale / x.powf(self.power))).powf(self.skew)
     }
+
+    /// The scene value that the curve maps to display value `y`: 0 at 0,
+    /// growing without bound as `y` approaches 1, infinite from 1 on.
+    pub(super) fn inverse(&self, y: f64) -> f64 {
+        if y.is_nan() || y <= 0.0 {
+            return 0.0;
+        }
+        if y >= 1.0 {
+            return f64::INFINITY;
+        }
+        // With z = y^(1/k): x^n = s z / (1 - z). `exp_m1` keeps 1 - z exact
+        // where y is within rounding of 1, which is where it matters.
+        let log_z = y.ln() / self.skew;
+        (self.scale * log_z.exp() / -log_z.exp_m1()).powf(1.0 / self.power)
+    }
 }
 
-/// A base curve compiled into a table.
-struct CurveTable {
-    exact: Sigmoid,
-    table: Lut,
-    saturation: f32,
+/// A base curve compiled into tables.
+pub(super) struct CurveTable {
+    pub(super) exact: Sigmoid,
+    /// Display-linear value over the table index.
+    display: Lut,
+    /// The same curve as a perceptual value, for the tone base.
+    perceptual: Lut,
+    pub(super) saturation: f32,
 }
 
 impl CurveTable {
     fn new(look: &Look) -> Self {
         let exact = Sigmoid::new(look.skew);
-        let table = Lut::build(CURVE_CELLS, 1.0, |t| {
+        let at = |t: f64| {
             if t >= 1.0 {
                 1.0
             } else {
                 exact.eval(CURVE_INDEX_HALF * t / (1.0 - t))
             }
-        });
+        };
+        let display = Lut::build(CURVE_CELLS, 1.0, at);
+        let perceptual = Lut::build(CURVE_CELLS, 1.0, |t| encode_d(at(t)));
         Self {
             exact,
-            table,
+            display,
+            perceptual,
             saturation: look.saturation,
         }
     }
 
     #[inline(always)]
-    fn eval(&self, x: f32) -> f32 {
-        let x = x.min(1.0e12);
-        self.table.eval(x / (x + CURVE_INDEX_HALF as f32))
+    fn index(x: f32) -> f32 {
+        let x = x.min(SCENE_LIMIT);
+        x / (x + CURVE_INDEX_HALF as f32)
+    }
+
+    /// The curve's display-linear value at scene value `x`.
+    #[inline(always)]
+    pub(super) fn eval(&self, x: f32) -> f32 {
+        self.display.eval(Self::index(x))
+    }
+
+    /// The curve's value at `x` in perceptual terms, `eval(x)^(1/2.2)`.
+    #[inline(always)]
+    pub(super) fn eval_perceptual(&self, x: f32) -> f32 {
+        self.perceptual.eval(Self::index(x))
     }
 }
 
 /// The three curved profiles, built once per process.
-static CURVES: LazyLock<[CurveTable; 3]> = LazyLock::new(|| {
+pub(super) static CURVES: LazyLock<[CurveTable; 3]> = LazyLock::new(|| {
     [
         CurveTable::new(&STANDARD),
         CurveTable::new(&NEUTRAL),
@@ -176,7 +209,7 @@ static CURVES: LazyLock<[CurveTable; 3]> = LazyLock::new(|| {
 });
 
 /// Position of a curved profile in [`CURVES`]; `None` for the linear one.
-fn curve_index(profile: Profile) -> Option<usize> {
+pub(super) fn curve_index(profile: Profile) -> Option<usize> {
     match profile {
         Profile::Standard => Some(0),
         Profile::Neutral => Some(1),
@@ -205,9 +238,21 @@ pub fn soft_clip(x: f32) -> f32 {
     if x.is_nan() || x <= SOFT_CLIP_KNEE {
         return x.max(0.0);
     }
-    let over = x.min(1.0e12) - SOFT_CLIP_KNEE;
+    let over = x.min(SCENE_LIMIT) - SOFT_CLIP_KNEE;
     let room = 1.0 - SOFT_CLIP_KNEE;
     (SOFT_CLIP_KNEE + room * over / (room + over)).min(1.0 - f32::EPSILON)
+}
+
+/// Inverse of [`soft_clip`]: infinite from 1 on.
+pub(super) fn soft_clip_inverse(y: f64) -> f64 {
+    let knee = f64::from(SOFT_CLIP_KNEE);
+    if y.is_nan() || y <= knee {
+        return y.max(0.0);
+    }
+    if y >= 1.0 {
+        return f64::INFINITY;
+    }
+    knee + (1.0 - knee) * (y - knee) / (1.0 - y)
 }
 
 /// The gain-aware shoulder for raster sources brightened by `gain > 1`.
@@ -231,15 +276,15 @@ pub fn soft_clip(x: f32) -> f32 {
 /// `d = u - knee` and `a = g - knee`, which has no cancellation for gains
 /// close to 1.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Shoulder {
+pub(super) struct Shoulder {
     gain: f32,
-    knee: f32,
+    pub(super) knee: f32,
     span: f32,
 }
 
 impl Shoulder {
     #[inline(always)]
-    fn new(gain: f32) -> Self {
+    pub(super) fn new(gain: f32) -> Self {
         let knee = 1.0 / gain;
         Self {
             gain,
@@ -249,153 +294,31 @@ impl Shoulder {
     }
 
     #[inline(always)]
-    fn eval(&self, u: f32) -> f32 {
+    pub(super) fn eval(&self, u: f32) -> f32 {
         if u <= self.knee {
             u
         } else {
-            let over = u - self.knee;
+            let over = u.min(SCENE_LIMIT) - self.knee;
             self.knee + over * self.span / (self.span + self.gain * over)
         }
     }
 }
 
-/// Exposure for a raster source: `rgb` multiplied by `gain`, with the
-/// highlight shoulder described on DESIGN §5.4 when `gain > 1`.
-///
-/// A gain of exactly 1 returns the input unchanged; a gain below 1 is a
-/// pure multiplication (whites go grey); above 1, values under the knee are
-/// a pure multiplication and the rest roll off so that 1.0 stays 1.0. The
-/// result is never negative.
-#[inline]
-pub fn raster_exposure(rgb: [f32; 3], gain: f32) -> [f32; 3] {
-    let rgb = non_negative(rgb);
-    if gain == 1.0 {
-        return rgb;
+/// Inverse of the shoulder for `gain > 1`: the already-gained value that
+/// lands on display value `y`. Infinite at and beyond the shoulder's
+/// asymptote (which lies above 1).
+pub(super) fn shoulder_inverse(gain: f64, y: f64) -> f64 {
+    let knee = 1.0 / gain;
+    if y.is_nan() || y <= knee {
+        return y.max(0.0);
     }
-    let scaled = scale3(rgb, gain);
-    if gain < 1.0 {
-        return scaled;
+    let span = gain - knee;
+    let over = y - knee;
+    let room = span - gain * over;
+    if room <= 0.0 {
+        return f64::INFINITY;
     }
-    let shoulder = Shoulder::new(gain);
-    if max3(scaled) <= shoulder.knee {
-        return scaled;
-    }
-    rgb_tone(scaled, |u| shoulder.eval(u))
-}
-
-/// Scale colour around luminance and bring any channel that went negative
-/// back by desaturating. Neutral values are untouched.
-#[inline(always)]
-fn saturate(rgb: [f32; 3], factor: f32) -> [f32; 3] {
-    let y = luminance(rgb);
-    toward_luminance(
-        [
-            y + (rgb[0] - y) * factor,
-            y + (rgb[1] - y) * factor,
-            y + (rgb[2] - y) * factor,
-        ],
-        &WORKING_LUMA,
-    )
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Rendering {
-    /// A raster source: gain and shoulder.
-    Raster,
-    /// A camera source with the curved profile at this index of [`CURVES`].
-    Curve(usize),
-    /// A camera source with the linear profile: gain and soft clip.
-    Linear,
-}
-
-/// Stage 5 compiled for one source and one global exposure: white-balanced
-/// working RGB in, display-linear working RGB out (nominally 0 to 1).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SceneToDisplay {
-    rendering: Rendering,
-    gain: f32,
-}
-
-impl SceneToDisplay {
-    /// `exposure` is the global Exposure slider in stops. For camera sources
-    /// with a curved profile the gain also includes
-    /// [`RAW_EXPOSURE_BIAS_EV`] and the file's baseline exposure; the linear
-    /// profile and raster sources apply the slider alone. The profile does
-    /// not affect raster sources.
-    pub fn new(profile: Profile, exposure: f32, source: &SourceColor) -> Self {
-        let exposure = if exposure.is_finite() { exposure } else { 0.0 };
-        match source {
-            SourceColor::Rgb(_) => Self {
-                rendering: Rendering::Raster,
-                gain: exposure_gain(exposure),
-            },
-            SourceColor::Camera(camera) => match curve_index(profile) {
-                None => Self {
-                    rendering: Rendering::Linear,
-                    gain: exposure_gain(exposure),
-                },
-                Some(index) => {
-                    let baseline = if camera.baseline_exposure.is_finite() {
-                        camera.baseline_exposure
-                    } else {
-                        0.0
-                    };
-                    Self {
-                        rendering: Rendering::Curve(index),
-                        gain: exposure_gain(exposure + RAW_EXPOSURE_BIAS_EV + baseline),
-                    }
-                }
-            },
-        }
-    }
-
-    /// True when [`Self::apply`] returns every non-negative input bit for
-    /// bit: a raster source at zero exposure.
-    pub fn is_identity(&self) -> bool {
-        self.rendering == Rendering::Raster && self.gain == 1.0
-    }
-
-    /// Apply the stage with the global exposure.
-    #[inline]
-    pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
-        self.render(rgb, self.gain)
-    }
-
-    /// Apply the stage with `exposure_delta` stops added to the global
-    /// exposure (the alpha-weighted sum of mask exposures for this pixel).
-    /// A delta of zero is exactly [`Self::apply`].
-    #[inline]
-    pub fn apply_with_exposure(&self, rgb: [f32; 3], exposure_delta: f32) -> [f32; 3] {
-        if exposure_delta == 0.0 || !exposure_delta.is_finite() {
-            return self.render(rgb, self.gain);
-        }
-        let gain = (self.gain * exposure_gain(exposure_delta)).clamp(1.0e-6, 1.0e6);
-        self.render(rgb, gain)
-    }
-
-    #[inline(always)]
-    fn render(&self, rgb: [f32; 3], gain: f32) -> [f32; 3] {
-        match self.rendering {
-            Rendering::Raster => raster_exposure(rgb, gain),
-            Rendering::Linear => {
-                let scaled = scale3(non_negative(rgb), gain);
-                if max3(scaled) <= SOFT_CLIP_KNEE {
-                    scaled
-                } else {
-                    rgb_tone(scaled, soft_clip)
-                }
-            }
-            Rendering::Curve(index) => {
-                let curve = &CURVES[index];
-                let toned = rgb_tone(scale3(non_negative(rgb), gain), |x| curve.eval(x));
-                if curve.saturation == 1.0 {
-                    toned
-                } else {
-                    saturate(toned, curve.saturation)
-                }
-            }
-        }
-    }
+    knee + span * over / room
 }
 
 #[cfg(test)]
@@ -415,14 +338,55 @@ mod tests {
     }
 
     #[test]
+    fn every_curve_inverts_exactly() {
+        for curve in CURVES.iter() {
+            for step in 1..=400 {
+                // From deep shadow to four stops above the clip point.
+                let x = 1.0e-4 * 1.03f64.powi(step);
+                let back = curve.exact.inverse(curve.exact.eval(x));
+                assert!((back / x - 1.0).abs() < 1e-6, "sigmoid at {x}: {back}");
+            }
+            assert_eq!(curve.exact.inverse(0.0), 0.0);
+            assert!(curve.exact.inverse(1.0).is_infinite());
+            // Within rounding of white the inverse is large but finite.
+            assert!(curve.exact.inverse(1.0 - 1.0e-12).is_finite());
+        }
+        for step in 0..=300 {
+            let x = f64::from(step) * 0.05;
+            let y = f64::from(soft_clip(x as f32));
+            if y < 0.9999 {
+                assert!((soft_clip_inverse(y) - x).abs() < 2e-3 * x.max(1.0), "soft clip at {x}");
+            }
+        }
+        assert!(soft_clip_inverse(1.0).is_infinite());
+        for gain in [1.05f32, 2.0, 8.0, 32.0] {
+            let shoulder = Shoulder::new(gain);
+            for step in 0..=200 {
+                let u = gain * step as f32 / 200.0;
+                let back = shoulder_inverse(f64::from(gain), f64::from(shoulder.eval(u)));
+                assert!(
+                    (back - f64::from(u)).abs() < 2e-3 * f64::from(u.max(1.0)),
+                    "shoulder {gain} at {u}: {back}"
+                );
+            }
+            assert!(shoulder_inverse(f64::from(gain), 5.0).is_infinite());
+        }
+    }
+
+    #[test]
     fn the_tables_track_the_exact_curves() {
         for curve in CURVES.iter() {
             for step in 0..=6000 {
                 let x = step as f32 / 1000.0;
-                let exact = curve.exact.eval(f64::from(x)) as f32;
-                assert!((curve.eval(x) - exact).abs() < 4e-6, "at {x}");
+                let exact = curve.exact.eval(f64::from(x));
+                assert!((curve.eval(x) - exact as f32).abs() < 4e-6, "at {x}");
+                if step >= 5 {
+                    let perceptual = encode_d(exact) as f32;
+                    assert!((curve.eval_perceptual(x) - perceptual).abs() < 2e-5, "at {x}");
+                }
             }
             assert!(curve.eval(f32::MAX) <= 1.0 && curve.eval(f32::INFINITY) <= 1.0);
+            assert_eq!(curve.eval_perceptual(0.0), 0.0);
         }
     }
 
