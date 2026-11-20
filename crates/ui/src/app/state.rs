@@ -5,6 +5,7 @@ use egui::Rect;
 use photo_core::meta::PhotoId;
 use photo_engine::{Engine, PhotoRecord, Target};
 
+use super::develop::DevelopState;
 use super::dialogs::{Dialog, ImportSettings};
 use super::library::compare::ComparePair;
 use super::library::filter_bar::FilterBarState;
@@ -12,11 +13,12 @@ use super::library::{LeftState, RightState};
 use crate::widgets::PanelGroup;
 
 /// The app's modules, as the module picker lists them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Module {
     /// Organising: import, browse, rate, collect.
+    #[default]
     Library,
-    /// Developing one photo. Shown in the picker, not yet available.
+    /// Developing the active photo.
     Develop,
 }
 
@@ -182,6 +184,8 @@ impl RecordCache {
 
 /// All presentation state of the window.
 pub(crate) struct UiState {
+    pub(crate) module: Module,
+    pub(crate) develop: DevelopState,
     pub(crate) view: View,
     pub(crate) layout: Layout,
     pub(crate) left_panels: PanelGroup,
@@ -211,9 +215,13 @@ pub(crate) const THUMB_SIZES: std::ops::RangeInclusive<f32> = 96.0..=320.0;
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            module: Module::Library,
+            develop: DevelopState::default(),
             view: View::Grid,
             layout: Layout::default(),
             left_panels: PanelGroup::with_open(["Navigator", "Catalog", "Folders", "Collections"]),
+            // Quick Develop starts closed, so the Library's own panels are
+            // where they always were.
             right_panels: PanelGroup::with_open([
                 "Histogram",
                 "Keywording",

@@ -14,7 +14,7 @@
 
 pub(crate) mod compare;
 mod drag;
-mod filmstrip;
+pub(crate) mod filmstrip;
 pub(crate) mod filter_bar;
 mod filter_metadata;
 mod grid;

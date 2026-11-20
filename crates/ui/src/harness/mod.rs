@@ -33,6 +33,10 @@ pub struct Control {
     pub rect: Rect,
     /// Its number, for sliders and the like.
     pub value: Option<f64>,
+    /// The least number it takes, for sliders and the like.
+    pub min: Option<f64>,
+    /// The greatest number it takes, for sliders and the like.
+    pub max: Option<f64>,
     /// Its text: the content of a text field, or a widget's own description
     /// of its state.
     pub text: Option<String>,
@@ -337,6 +341,8 @@ impl<A: eframe::App + 'static> Harness<A> {
         Ok(Control {
             rect: self.rect_of(&node, role, name)?,
             value: access.numeric_value(),
+            min: access.min_numeric_value(),
+            max: access.max_numeric_value(),
             text: access.value(),
             toggled: access
                 .toggled()

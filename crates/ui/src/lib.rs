@@ -1,7 +1,8 @@
 //! Photo's user interface.
 //!
 //! The app is [`PhotoApp`]: the shell (top bar, side columns, filmstrip,
-//! toolbar) around the Library module, driving one `photo_engine::Engine`.
+//! toolbar) around the Library and Develop modules, driving one
+//! `photo_engine::Engine`.
 //! It is built from the visual system ([`theme`]) and the widget kit
 //! ([`widgets`]); [`harness`] drives it (or any other `eframe::App`)
 //! without a window, and [`gallery`] is a showcase of every widget.
@@ -20,7 +21,9 @@ pub mod widgets;
 
 use std::path::PathBuf;
 
-pub use app::{Layout, Module, PhotoApp, View, Zoom};
+pub use app::{
+    BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Layout, Module, PhotoApp, View, Zoom,
+};
 use photo_engine::{Engine, EngineConfig, EngineError};
 
 /// Where the app keeps its data. Every path is chosen by the caller:

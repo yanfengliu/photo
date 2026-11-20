@@ -115,6 +115,14 @@ impl<'a> AdjSlider<'a> {
         self
     }
 
+    /// Make the label column `width` points wide, for a panel whose labels
+    /// are longer than most ("Green Saturation"). Sliders that are stacked
+    /// together should share one width, so their tracks line up.
+    pub fn label_width(mut self, width: f32) -> Self {
+        self.label_width = width.max(0.0);
+        self
+    }
+
     /// The name tests and assistive technology find this slider by.
     pub fn accessible_name(&self) -> String {
         match self.name_prefix {

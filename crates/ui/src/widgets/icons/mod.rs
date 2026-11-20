@@ -65,8 +65,14 @@ pub enum Icon {
     ChevronUp,
     /// Go or collapse downwards.
     ChevronDown,
-    /// Before and after, side by side.
+    /// A big step down or back.
+    ChevronsLeft,
+    /// A big step up or on.
+    ChevronsRight,
+    /// Before and after, split down the middle.
     BeforeAfter,
+    /// Pick a colour from the photo: the white-balance picker.
+    Picker,
     /// Zoom in.
     Zoom,
     /// Import photos into the catalog.
@@ -97,7 +103,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every icon, in declaration order.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 42] = [
         Self::Grid,
         Self::Loupe,
         Self::Compare,
@@ -123,7 +129,10 @@ impl Icon {
         Self::ChevronRight,
         Self::ChevronUp,
         Self::ChevronDown,
+        Self::ChevronsLeft,
+        Self::ChevronsRight,
         Self::BeforeAfter,
+        Self::Picker,
         Self::Zoom,
         Self::Import,
         Self::Export,
@@ -167,7 +176,10 @@ impl Icon {
             Self::ChevronRight => "Right",
             Self::ChevronUp => "Up",
             Self::ChevronDown => "Down",
+            Self::ChevronsLeft => "Far left",
+            Self::ChevronsRight => "Far right",
             Self::BeforeAfter => "Before and after",
+            Self::Picker => "Picker",
             Self::Zoom => "Zoom",
             Self::Import => "Import",
             Self::Export => "Export",

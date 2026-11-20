@@ -1,14 +1,17 @@
-//! The right panel column: Histogram, Keywording, Keyword List and
-//! Metadata, all about the active photo (Keywording about the selection).
+//! The right panel column: Histogram, Quick Develop, Keywording, Keyword
+//! List and Metadata, all about the active photo (Quick Develop and
+//! Keywording about the selection).
 
 mod keywords;
 mod metadata;
+mod quick;
 
 use egui::{RichText, Ui};
 use photo_engine::Histogram;
 
 pub(crate) use self::keywords::KeywordState;
 pub(crate) use self::metadata::MetadataDraft;
+use self::quick::QuickState;
 use crate::app::{Cx, text};
 use crate::theme::{self, palette, space};
 use crate::widgets::{HistogramData, Panel, histogram_readout, panel_column};
@@ -23,6 +26,7 @@ const HISTOGRAM: f32 = 96.0;
 pub(crate) struct RightState {
     pub(crate) keywords: KeywordState,
     pub(crate) metadata: MetadataDraft,
+    pub(crate) quick: QuickState,
 }
 
 /// Show the right column.
@@ -36,6 +40,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
             let mut panels = std::mem::take(&mut cx.ui.right_panels);
             panel_column(ui, "right-panels", |ui| {
                 Panel::new("Histogram").show(ui, &mut panels, |ui| histogram_panel(ui, cx));
+                Panel::new("Quick Develop").show(ui, &mut panels, |ui| quick::show(ui, cx));
                 Panel::new("Keywording").show(ui, &mut panels, |ui| keywords::keywording(ui, cx));
                 Panel::new("Keyword List").show(ui, &mut panels, |ui| keywords::list(ui, cx));
                 Panel::new("Metadata").show(ui, &mut panels, |ui| metadata::show(ui, cx));

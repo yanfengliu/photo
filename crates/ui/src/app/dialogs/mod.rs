@@ -1,18 +1,24 @@
-//! The Library's dialogs (design §8.4): Import; new collection, collection
-//! set and smart collection; editing a smart collection's rules; rename;
-//! and the confirmations before deleting a collection or removing photos
-//! from the catalog. At most one is open at a time, and while one is open
-//! the Library's shortcuts are off.
+//! The dialogs (design §8.4): Import; new collection, collection set and
+//! smart collection; editing a smart collection's rules; rename; the
+//! confirmations before deleting a collection or removing photos from the
+//! catalog; and Develop's Copy Settings, Synchronize Settings, New Preset
+//! and snapshot dialogs. At most one is open at a time, and while one is
+//! open the keyboard shortcuts are off.
 
 mod collections;
+mod develop;
 mod import;
 mod import_grid;
 mod smart;
 
-use photo_core::meta::CollectionId;
+use photo_core::meta::{CollectionId, PresetId, SnapshotId};
 use photo_engine::{CollectionInfo, CollectionKind, Target};
 
 use self::collections::{DeleteDialog, NameDialog, RemoveDialog};
+use self::develop::{
+    DeleteDialog as DeleteLookDialog, DevelopDialog, Doomed, GroupsDialog, GroupsPurpose,
+    PresetDialog, SnapshotDialog, USER_GROUP,
+};
 use self::import::ImportDialog;
 pub(crate) use self::import::ImportSettings;
 use self::smart::SmartDialog;
@@ -32,6 +38,7 @@ pub(crate) enum Dialog {
     Smart(Box<SmartDialog>),
     Delete(DeleteDialog),
     Remove(RemoveDialog),
+    Develop(Box<DevelopDialog>),
 }
 
 /// Show the open dialog, if any, and act on its answer.
@@ -45,6 +52,7 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Cx<'_>) {
         Dialog::Smart(dialog) => dialog.show(ctx, cx),
         Dialog::Delete(dialog) => dialog.show(ctx, cx),
         Dialog::Remove(dialog) => dialog.show(ctx, cx),
+        Dialog::Develop(dialog) => dialog.show(ctx, cx),
     };
     if open && cx.ui.dialog.is_none() {
         cx.ui.dialog = Some(dialog);
@@ -115,6 +123,70 @@ pub(crate) fn open_remove_photos(cx: &mut Cx<'_>, target: Target) {
     if count > 0 {
         cx.ui.dialog = Some(Dialog::Remove(RemoveDialog::new(target, count)));
     }
+}
+
+fn open_develop(cx: &mut Cx<'_>, dialog: DevelopDialog) {
+    cx.ui.dialog = Some(Dialog::Develop(Box::new(dialog)));
+}
+
+/// Shift+Cmd+C: choose which settings of the active photo to copy.
+pub(crate) fn open_copy_settings(cx: &mut Cx<'_>) {
+    if cx.engine.active_photo().is_none() {
+        cx.say("Select a photo to copy its settings.");
+        return;
+    }
+    let groups = cx.ui.develop.copy_groups;
+    open_develop(cx, DevelopDialog::Groups(GroupsDialog::new(GroupsPurpose::Copy, groups)));
+}
+
+/// Choose which settings of the active photo the other selected photos
+/// take.
+pub(crate) fn open_sync(cx: &mut Cx<'_>) {
+    let groups = cx.ui.develop.copy_groups;
+    open_develop(cx, DevelopDialog::Groups(GroupsDialog::new(GroupsPurpose::Sync, groups)));
+}
+
+/// Save settings of the open photo as a preset.
+pub(crate) fn open_new_preset(cx: &mut Cx<'_>) {
+    let purpose = GroupsPurpose::NewPreset {
+        name: String::new(),
+        group: USER_GROUP.to_owned(),
+    };
+    let groups = photo_core::develop::GroupSet::default_copy();
+    open_develop(cx, DevelopDialog::Groups(GroupsDialog::new(purpose, groups)));
+}
+
+/// Give a user preset a new name and group.
+pub(crate) fn open_rename_preset(cx: &mut Cx<'_>, id: PresetId, group: &str, name: &str) {
+    open_develop(cx, DevelopDialog::RenamePreset(PresetDialog::new(id, group, name)));
+}
+
+/// Ask before deleting a user preset.
+pub(crate) fn open_delete_preset(cx: &mut Cx<'_>, id: PresetId, name: &str) {
+    open_develop(cx, DevelopDialog::Delete(DeleteLookDialog::new(Doomed::Preset(id), name)));
+}
+
+/// Cmd+N in Develop: name a snapshot of the open photo.
+pub(crate) fn open_new_snapshot(cx: &mut Cx<'_>) {
+    let Some(photo) = cx.engine.develop().map(|session| session.photo()) else {
+        cx.say("Open a photo in Develop to take a snapshot of it.");
+        return;
+    };
+    let existing = cx.ui.develop.lists.snapshots.len();
+    open_develop(cx, DevelopDialog::Snapshot(SnapshotDialog::new(photo, existing)));
+}
+
+/// Give a snapshot of the open photo a new name.
+pub(crate) fn open_rename_snapshot(cx: &mut Cx<'_>, id: SnapshotId, name: &str) {
+    let Some(photo) = cx.engine.develop().map(|session| session.photo()) else {
+        return;
+    };
+    open_develop(cx, DevelopDialog::Snapshot(SnapshotDialog::rename(photo, id, name)));
+}
+
+/// Ask before deleting a snapshot.
+pub(crate) fn open_delete_snapshot(cx: &mut Cx<'_>, id: SnapshotId, name: &str) {
+    open_develop(cx, DevelopDialog::Delete(DeleteLookDialog::new(Doomed::Snapshot(id), name)));
 }
 
 /// The sets a collection can be put in, with their names, for a parent

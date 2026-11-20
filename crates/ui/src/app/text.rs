@@ -123,6 +123,20 @@ fn trim(value: f32, decimals: usize) -> String {
     }
 }
 
+/// `reason` as a sentence: a capital first letter and a full stop.
+pub(crate) fn sentence(reason: &str) -> String {
+    let reason = reason.trim();
+    let mut chars = reason.chars();
+    let mut text: String = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => return String::new(),
+    };
+    if !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
+}
+
 /// Names typed into a field, separated by commas: trimmed, blanks left
 /// out.
 pub(crate) fn split_names(typed: &str) -> Vec<String> {
@@ -174,6 +188,16 @@ mod tests {
     fn typed_names_are_split_at_commas_and_trimmed() {
         assert_eq!(split_names(" sunset, beach ,, "), ["sunset", "beach"]);
         assert!(split_names(" , ").is_empty());
+    }
+
+    #[test]
+    fn a_reason_reads_as_a_sentence() {
+        assert_eq!(
+            sentence("the catalog file is write-protected"),
+            "The catalog file is write-protected."
+        );
+        assert_eq!(sentence("Done."), "Done.");
+        assert_eq!(sentence("  "), "");
     }
 
     #[test]

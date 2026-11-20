@@ -1,15 +1,17 @@
-//! The Library's keyboard shortcuts (design §8.5).
+//! The keyboard shortcuts (design §8.5).
 //!
 //! [`shortcut`] maps one key press to what it means, matching modifiers
 //! exactly (Command is Ctrl on Windows and Linux, as egui's `command`
 //! modifier already is). [`take_shortcuts`] takes the presses that are
 //! shortcuts out of the frame's input, so no widget acts on them as well.
-//! Nothing here runs while a text field has focus or a dialog is up.
+//! Nothing here runs while a text field has focus or a dialog is up, and
+//! the arrow keys are left to a widget that has keyboard focus (a slider
+//! nudges with them).
 
 use egui::{Event, FocusDirection, Key, Modifiers};
 use photo_core::meta::{ColorLabel, Flag};
 
-use super::state::View;
+use super::state::{Module, View};
 
 /// Which way an arrow key moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,11 +46,25 @@ pub(crate) enum Shortcut {
     RotateRight,
     VirtualCopy,
     Import,
-    NewCollection,
+    /// A new collection in the Library, a new snapshot in Develop.
+    New,
     FindText,
     ToggleSides,
     ToggleEdges,
     ToggleToolbar,
+    /// `\`: the before view in place of the edit.
+    Before,
+    /// Y: before and after side by side.
+    SideBySide,
+    /// Shift+Y: before and after split.
+    Split,
+    /// J: the clipping overlays.
+    Clipping,
+    /// W: the white-balance picker.
+    WhiteBalancePicker,
+    CopySettings,
+    PasteSettings,
+    ResetSettings,
 }
 
 impl Shortcut {
@@ -61,7 +77,7 @@ impl Shortcut {
 
 /// What `key` pressed with `modifiers` means, if anything.
 pub(crate) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
-    // Alt, and Control on a Mac, are not part of any Library shortcut.
+    // Alt, and Control on a Mac, are not part of any shortcut.
     if modifiers.alt || (modifiers.ctrl && !modifiers.command) {
         return None;
     }
@@ -108,6 +124,11 @@ pub(crate) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
         (false, false, Key::T) => Shortcut::ToggleToolbar,
         (false, false, Key::Tab) => Shortcut::ToggleSides,
         (false, true, Key::Tab) => Shortcut::ToggleEdges,
+        (false, false, Key::Backslash) => Shortcut::Before,
+        (false, false, Key::Y) => Shortcut::SideBySide,
+        (false, true, Key::Y) => Shortcut::Split,
+        (false, false, Key::J) => Shortcut::Clipping,
+        (false, false, Key::W) => Shortcut::WhiteBalancePicker,
         (true, false, Key::Z) => Shortcut::Undo,
         (true, true, Key::Z) => Shortcut::Redo,
         (true, false, Key::A) => Shortcut::SelectAll,
@@ -116,18 +137,38 @@ pub(crate) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
         (true, false, Key::CloseBracket) => Shortcut::RotateRight,
         (true, false, Key::Quote) => Shortcut::VirtualCopy,
         (true, true, Key::I) => Shortcut::Import,
-        (true, false, Key::N) => Shortcut::NewCollection,
+        (true, false, Key::N) => Shortcut::New,
         (true, false, Key::F) => Shortcut::FindText,
+        (true, true, Key::C) => Shortcut::CopySettings,
+        (true, true, Key::V) => Shortcut::PasteSettings,
+        (true, true, Key::R) => Shortcut::ResetSettings,
         _ => return None,
     };
     Some(found)
 }
 
-/// Take this frame's shortcut presses out of its input, oldest first.
+/// Whether `shortcut` means anything in `module`. Those that do not are
+/// left in the input for the widgets.
+fn applies(shortcut: Shortcut, module: Module) -> bool {
+    let develop_only = matches!(
+        shortcut,
+        Shortcut::Before
+            | Shortcut::SideBySide
+            | Shortcut::Split
+            | Shortcut::Clipping
+            | Shortcut::WhiteBalancePicker
+    );
+    module == Module::Develop || !develop_only
+}
+
+/// Take this frame's shortcut presses for `module` out of its input, oldest
+/// first.
 ///
-/// A Tab that is a shortcut also cancels the keyboard-focus move egui
-/// started for it when the frame began.
-pub(crate) fn take_shortcuts(ctx: &egui::Context) -> Vec<Shortcut> {
+/// While a widget has keyboard focus, the arrow keys are its own. A Tab
+/// that is a shortcut also cancels the keyboard-focus move egui started for
+/// it when the frame began.
+pub(crate) fn take_shortcuts(ctx: &egui::Context, module: Module) -> Vec<Shortcut> {
+    let focused = ctx.memory(|memory| memory.focused().is_some());
     let mut found = Vec::new();
     ctx.input_mut(|input| {
         input.events.retain(|event| {
@@ -144,6 +185,9 @@ pub(crate) fn take_shortcuts(ctx: &egui::Context) -> Vec<Shortcut> {
             let Some(shortcut) = shortcut(*key, *modifiers) else {
                 return true;
             };
+            if !applies(shortcut, module) || (focused && matches!(shortcut, Shortcut::Arrow { .. })) {
+                return true;
+            }
             if *pressed && (!*repeat || shortcut.repeats()) {
                 found.push(shortcut);
             }
@@ -187,7 +231,7 @@ mod tests {
         assert_eq!(plain(Key::N), Some(Shortcut::View(View::Survey)));
         assert_eq!(plain(Key::Space), Some(Shortcut::ToggleZoom));
         assert_eq!(plain(Key::Backspace), Some(Shortcut::Delete));
-        assert_eq!(plain(Key::Q), None);
+        assert_eq!(plain(Key::Q), None, "the healing tool comes with part 2");
     }
 
     #[test]
@@ -196,10 +240,7 @@ mod tests {
         assert_eq!(shortcut(Key::Z, SHIFT_COMMAND), Some(Shortcut::Redo));
         assert_eq!(shortcut(Key::I, SHIFT_COMMAND), Some(Shortcut::Import));
         assert_eq!(shortcut(Key::I, Modifiers::COMMAND), None);
-        assert_eq!(
-            shortcut(Key::N, Modifiers::COMMAND),
-            Some(Shortcut::NewCollection)
-        );
+        assert_eq!(shortcut(Key::N, Modifiers::COMMAND), Some(Shortcut::New));
         assert_eq!(
             shortcut(Key::Tab, Modifiers::SHIFT),
             Some(Shortcut::ToggleEdges)
@@ -215,6 +256,24 @@ mod tests {
             ..Modifiers::NONE
         };
         assert_eq!(shortcut(Key::A, mac_control), None);
+    }
+
+    #[test]
+    fn the_develop_keys_are_there_and_take_their_modifiers() {
+        let plain = |key| shortcut(key, Modifiers::NONE);
+        assert_eq!(plain(Key::Backslash), Some(Shortcut::Before));
+        assert_eq!(plain(Key::Y), Some(Shortcut::SideBySide));
+        assert_eq!(shortcut(Key::Y, Modifiers::SHIFT), Some(Shortcut::Split));
+        assert_eq!(plain(Key::J), Some(Shortcut::Clipping));
+        assert_eq!(plain(Key::W), Some(Shortcut::WhiteBalancePicker));
+        assert_eq!(shortcut(Key::C, SHIFT_COMMAND), Some(Shortcut::CopySettings));
+        assert_eq!(shortcut(Key::V, SHIFT_COMMAND), Some(Shortcut::PasteSettings));
+        assert_eq!(shortcut(Key::R, SHIFT_COMMAND), Some(Shortcut::ResetSettings));
+        assert_eq!(shortcut(Key::C, Modifiers::COMMAND), None, "the clipboard's own");
+        assert_eq!(plain(Key::R), None, "the crop tool comes with part 2");
+        assert!(applies(Shortcut::Clipping, Module::Develop));
+        assert!(!applies(Shortcut::Clipping, Module::Library));
+        assert!(applies(Shortcut::CopySettings, Module::Library));
     }
 
     #[test]

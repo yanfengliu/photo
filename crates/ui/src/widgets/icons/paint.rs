@@ -104,10 +104,26 @@ impl Icon {
             Self::ChevronRight => pen.line(&[[6.0, 3.5], [10.5, 8.0], [6.0, 12.5]]),
             Self::ChevronUp => pen.line(&[[3.5, 10.0], [8.0, 5.5], [12.5, 10.0]]),
             Self::ChevronDown => pen.line(&[[3.5, 6.0], [8.0, 10.5], [12.5, 6.0]]),
+            Self::ChevronsLeft => {
+                pen.line(&[[8.0, 3.5], [3.5, 8.0], [8.0, 12.5]]);
+                pen.line(&[[13.0, 3.5], [8.5, 8.0], [13.0, 12.5]]);
+            }
+            Self::ChevronsRight => {
+                pen.line(&[[3.0, 3.5], [7.5, 8.0], [3.0, 12.5]]);
+                pen.line(&[[8.0, 3.5], [12.5, 8.0], [8.0, 12.5]]);
+            }
             Self::BeforeAfter => {
                 pen.frame(2.5, 3.5, 13.5, 12.5);
                 pen.block(8.0, 3.5, 13.5, 12.5);
                 pen.line(&[[8.0, 1.5], [8.0, 14.5]]);
+            }
+            Self::Picker => {
+                // An eyedropper at 45 degrees: the bulb, the collar, the
+                // glass and the drop at its tip.
+                pen.solid(&[[11.0, 1.8], [14.2, 5.0], [12.4, 6.8], [9.2, 3.6]]);
+                pen.line(&[[8.2, 4.4], [11.6, 7.8]]);
+                pen.line(&[[10.0, 6.2], [3.8, 12.4], [3.2, 12.8]]);
+                pen.dot(2.6, 13.4, 1.1);
             }
             Self::Zoom => {
                 magnifier(&pen);

@@ -1,7 +1,7 @@
-//! The filmstrip across the bottom of the window: the source line (where
-//! the photos come from, how many pass the filter, how many are selected)
-//! and the list's photos as small cells, of which only those in view are
-//! laid out.
+//! The filmstrip across the bottom of the window, in both modules: the
+//! source line (where the photos come from, how many pass the filter, how
+//! many are selected) and the list's photos as small cells, of which only
+//! those in view are laid out.
 
 use egui::{Align, Layout, Margin, Rect, RichText, ScrollArea, Ui, UiBuilder, Vec2, vec2};
 use photo_core::meta::PhotoId;
@@ -10,7 +10,7 @@ use photo_engine::{Engine, Filter, PreviewSize};
 use super::{cell, drag, grid, prefixed};
 use crate::app::actions::Action;
 use crate::app::shell::Edge;
-use crate::app::state::View;
+use crate::app::state::{Module, View};
 use crate::app::{Cx, dispatch, text};
 use crate::theme::{self, palette, space};
 use crate::widgets::{IconButton, ThumbnailResponse};
@@ -23,7 +23,7 @@ const GAP: f32 = 4.0;
 const LINE: f32 = 22.0;
 
 /// Show the filmstrip panel.
-pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
+pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     let frame = theme::panel_frame().inner_margin(Margin::symmetric(8, 4));
     egui::Panel::bottom("filmstrip")
         .exact_size(LINE + CELL + 18.0)
@@ -125,9 +125,13 @@ fn strip(ui: &mut Ui, cx: &mut Cx<'_>) {
             }
             events
         });
+    let library = cx.ui.module == Module::Library;
     for (photo, response) in output.inner {
         if response.double_clicked {
-            dispatch::open_view(cx, View::Loupe);
+            // In Develop the first click has already opened the photo.
+            if library {
+                dispatch::open_view(cx, View::Loupe);
+            }
         } else if response.drag_started {
             drag::start(ui.ctx(), cx, photo);
         } else if response.clicked {

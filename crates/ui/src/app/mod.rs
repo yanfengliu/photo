@@ -2,12 +2,13 @@
 //!
 //! Each frame it polls the engine once, turns the engine's toasts into
 //! on-screen ones, takes the keyboard shortcuts out of the input, lays out
-//! the shell around the Library's work area and shows the open dialog.
-//! Every control that is used queues an action while the frame is drawn;
-//! once the frame is laid out each action is handed to the engine, one call
-//! per action, and the next frame shows the result.
+//! the shell around the module shown (Library or Develop) and shows the
+//! open dialog. Every control that is used queues an action while the frame
+//! is drawn; once the frame is laid out each action is handed to the
+//! engine, one call per action, and the next frame shows the result.
 
 mod actions;
+pub(crate) mod develop;
 mod dialogs;
 mod dispatch;
 mod input;
@@ -23,14 +24,17 @@ use std::time::Duration;
 use photo_engine::Engine;
 
 use self::actions::Action;
+pub use self::develop::{BeforeAfter, CanvasImage, CanvasShows, CanvasZoom};
+use self::develop::{DevelopState, Frames};
 use self::state::UiState;
 pub use self::state::{Layout, Module, View, Zoom};
 use self::textures::Textures;
 use crate::AppOptions;
 use crate::theme;
-use crate::widgets::{PanelGroup, Toasts};
+use crate::widgets::{ClippingToggles, PanelGroup, Toasts};
 
-/// The Photo app: the shell and the Library module, driving one engine.
+/// The Photo app: the shell around the Library and Develop modules, driving
+/// one engine.
 ///
 /// Holds the engine and only presentation state besides. Every user action
 /// becomes one engine call, made after the frame it was asked for in.
@@ -39,6 +43,7 @@ pub struct PhotoApp {
     options: AppOptions,
     ui: UiState,
     textures: Textures,
+    frames: Frames,
     toasts: Toasts,
     actions: Vec<Action>,
     /// Counts the changes that can make something shown stale: every action
@@ -55,6 +60,7 @@ pub(crate) struct Cx<'a> {
     pub(crate) engine: &'a mut Engine,
     pub(crate) ui: &'a mut UiState,
     pub(crate) textures: &'a mut Textures,
+    pub(crate) frames: &'a mut Frames,
     actions: &'a mut Vec<Action>,
     toasts: &'a mut Toasts,
     pub(crate) generation: u64,
@@ -81,11 +87,16 @@ impl PhotoApp {
         theme::apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         engine.set_wake(Arc::new(move || ctx.request_repaint()));
+        let ui = UiState {
+            develop: DevelopState::with_stored_panels(&engine),
+            ..UiState::default()
+        };
         Self {
             engine,
             options,
-            ui: UiState::default(),
+            ui,
             textures: Textures::default(),
+            frames: Frames::default(),
             toasts: Toasts::new(),
             actions: Vec::new(),
             generation: 0,
@@ -94,7 +105,8 @@ impl PhotoApp {
     }
 
     /// The engine, to read what it holds: the photo list, the selection,
-    /// the source and filter, the catalog's panels, running tasks.
+    /// the source and filter, the catalog's panels, running tasks, the
+    /// develop session.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
@@ -104,9 +116,9 @@ impl PhotoApp {
         &self.options
     }
 
-    /// The module shown. Only the Library exists so far.
+    /// The module shown.
     pub fn module(&self) -> Module {
-        Module::Library
+        self.ui.module
     }
 
     /// The Library view shown in the work area.
@@ -119,19 +131,56 @@ impl PhotoApp {
         self.ui.loupe.zoom
     }
 
+    /// The Develop canvas's zoom.
+    pub fn develop_zoom(&self) -> CanvasZoom {
+        self.ui.develop.canvas.zoom
+    }
+
+    /// The point of the photo at the middle of the Develop canvas, as
+    /// fractions of its width and height.
+    pub fn develop_center(&self) -> egui::Vec2 {
+        self.ui.develop.canvas.center
+    }
+
+    /// How the Develop canvas shows the before view.
+    pub fn before_after(&self) -> BeforeAfter {
+        self.ui.develop.before_after
+    }
+
+    /// Which clipping overlays the Develop canvas shows.
+    pub fn clipping(&self) -> ClippingToggles {
+        self.ui.develop.clipping
+    }
+
+    /// Whether the white-balance picker waits for a click on the photo.
+    pub fn picking_white_balance(&self) -> bool {
+        self.ui.develop.picker
+    }
+
+    /// What the Develop canvas showed in the last frame drawn.
+    pub fn canvas_shows(&self) -> CanvasShows {
+        self.frames.shows
+    }
+
     /// Which edges of the window and the toolbar are shown.
     pub fn layout(&self) -> Layout {
         self.ui.layout
     }
 
-    /// Which panels of the left column are open.
+    /// Which panels of the left column are open (the module's own).
     pub fn left_panels(&self) -> &PanelGroup {
-        &self.ui.left_panels
+        match self.ui.module {
+            Module::Library => &self.ui.left_panels,
+            Module::Develop => &self.ui.develop.left_panels,
+        }
     }
 
-    /// Which panels of the right column are open.
+    /// Which panels of the right column are open (the module's own).
     pub fn right_panels(&self) -> &PanelGroup {
-        &self.ui.right_panels
+        match self.ui.module {
+            Module::Library => &self.ui.right_panels,
+            Module::Develop => &self.ui.develop.right_panels,
+        }
     }
 
     /// Whether a dialog is up.
@@ -170,6 +219,7 @@ impl PhotoApp {
             engine: &mut self.engine,
             ui: &mut self.ui,
             textures: &mut self.textures,
+            frames: &mut self.frames,
             actions: &mut self.actions,
             toasts: &mut self.toasts,
             generation: self.generation,
@@ -217,7 +267,7 @@ impl eframe::App for PhotoApp {
         // pressed in already shows what they did.
         if self.ui.dialog.is_none() && !ctx.text_edit_focused() {
             let mut cx = self.cx();
-            for shortcut in input::take_shortcuts(&ctx) {
+            for shortcut in input::take_shortcuts(&ctx, cx.ui.module) {
                 dispatch::shortcut(&mut cx, &ctx, shortcut);
             }
         }
@@ -230,7 +280,10 @@ impl eframe::App for PhotoApp {
         let work_area = {
             let mut cx = self.cx();
             shell::top_bar(ui, &mut cx);
-            let work_area = library::show(ui, &mut cx);
+            let work_area = match cx.ui.module {
+                Module::Library => library::show(ui, &mut cx),
+                Module::Develop => develop::show(ui, &mut cx),
+            };
             dialogs::show(&ctx, &mut cx);
             work_area
         };

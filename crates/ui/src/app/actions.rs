@@ -11,9 +11,13 @@ use photo_engine::{
     TextField,
 };
 
+use super::develop::actions::DevelopAction;
+
 /// One thing the user asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Action {
+    /// A Develop or Quick Develop request.
+    Develop(DevelopAction),
     SelectOnly(PhotoId),
     ToggleSelected(PhotoId),
     ExtendSelection(PhotoId),
@@ -77,6 +81,7 @@ impl Action {
     /// Hand the action to the engine, one engine call per action.
     pub(crate) fn apply(self, engine: &mut Engine) -> Result<(), EngineError> {
         match self {
+            Self::Develop(action) => action.apply(engine)?,
             Self::SelectOnly(photo) => {
                 engine.select_only(photo);
             }
@@ -157,6 +162,7 @@ impl Action {
     /// engine's own reason.
     pub(crate) fn failure(&self) -> &'static str {
         match self {
+            Self::Develop(action) => action.failure(),
             Self::SetSource(_) => "Could not show that source",
             Self::SetFilter(_) => "Could not filter the photos",
             Self::SetSort(_) => "Could not sort the photos",

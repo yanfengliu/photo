@@ -7,6 +7,8 @@ use photo_engine::{TaskKind, TaskState};
 
 use super::Cx;
 use super::actions::Action;
+use super::dispatch;
+use super::state::Module;
 use crate::theme::{self, palette, space};
 use crate::widgets::{Icon, IconButton};
 
@@ -95,23 +97,40 @@ pub(crate) fn top_bar(ui: &mut Ui, cx: &mut Cx<'_>) {
                         cx.ui.layout.top_bar = false;
                     }
                     ui.add_space(space::LG);
-                    module_picker(ui);
+                    module_picker(ui, cx);
                 });
             });
         });
 }
 
-/// Library, and Develop shown as the module that comes next.
-fn module_picker(ui: &mut Ui) {
+/// Library and Develop: the module shown is lit.
+fn module_picker(ui: &mut Ui, cx: &mut Cx<'_>) {
     ui.spacing_mut().item_spacing.x = space::SM;
+    let current = cx.ui.module;
     // Right to left: the last module is added first.
-    ui.add_enabled(
-        false,
-        Button::selectable(false, "Develop").min_size(vec2(64.0, 22.0)),
-    )
-    .on_disabled_hover_text("Develop is the next module to be built.");
-    let library = RichText::new("Library").color(palette::TEXT_STRONG);
-    ui.add(Button::selectable(true, library).min_size(vec2(64.0, 22.0)));
+    for (module, name) in [(Module::Develop, "Develop"), (Module::Library, "Library")] {
+        let selected = current == module;
+        let color = if selected {
+            palette::TEXT_STRONG
+        } else {
+            palette::TEXT
+        };
+        let button = Button::selectable(selected, RichText::new(name).color(color))
+            .min_size(vec2(64.0, 22.0));
+        let hint = match module {
+            Module::Library => "Organise the photos (G)",
+            Module::Develop => "Develop the selected photo (D)",
+        };
+        if ui.add(button).on_hover_text(hint).clicked() && !selected {
+            match module {
+                Module::Library => {
+                    let view = cx.ui.view;
+                    dispatch::show_library(cx, view);
+                }
+                Module::Develop => dispatch::open_develop(cx),
+            }
+        }
+    }
 }
 
 /// The running background tasks: what each is doing, how far it is, and a
