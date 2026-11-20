@@ -16,6 +16,9 @@ mod groups;
 mod local;
 mod local_adjust;
 
+#[cfg(test)]
+mod format_tests;
+
 use serde::{Deserialize, Serialize};
 
 use crate::meta::FileKind;
@@ -34,6 +37,17 @@ pub use local_adjust::LocalAdj;
 /// Version of the rendering math. Stored with every photo so that a future
 /// change to the pipeline can keep old edits looking the way they did.
 pub const PROCESS_VERSION: u32 = 1;
+
+/// Version of the JSON shape [`DevelopSettings`] serialises to: its field
+/// names, its nesting and the names of its enum values. Wherever settings are
+/// stored (the catalog, sidecars, presets), this number is stored beside
+/// them, and a build refuses to overwrite settings written in a newer format,
+/// because it would silently drop what it does not understand.
+///
+/// Bump it whenever the shape changes. The test
+/// `the_settings_json_shape_is_pinned_to_its_format` fails when the shape
+/// changes, and its message says to bump this and re-pin.
+pub const SETTINGS_FORMAT: u32 = 1;
 
 /// Colour or black-and-white rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
