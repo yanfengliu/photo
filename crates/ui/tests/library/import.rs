@@ -1,12 +1,12 @@
 //! Importing a folder through the Import dialog, with its path typed in.
 
 use egui::{Key, Modifiers, Role};
-use photo_engine::Source;
+use photo_engine::{Source, TaskKind, TaskState};
 use photo_testkit::TempLibrary;
 use photo_ui::PhotoApp;
 use photo_ui::harness::Harness;
 
-use crate::{Studio, TestResult, names, restless, settle, shows};
+use crate::{Studio, TestResult, names, settle, shows};
 
 /// Open the dialog with the keyboard and look in `library`'s folder.
 fn scan(harness: &mut Harness<PhotoApp>, library: &TempLibrary) -> TestResult {
@@ -167,55 +167,66 @@ fn shows_example(harness: &Harness<PhotoApp>) -> bool {
 
 #[test]
 fn a_running_import_shows_its_progress_and_can_be_cancelled() -> TestResult {
-    const FILES: usize = 3_000;
+    const FILES: usize = 40;
     let folder = tempfile::tempdir()?;
     for index in 0..FILES {
         photo_testkit::write_jpeg(folder.path(), &format!("IMG_{index:04}.jpg"), 32, 24);
     }
     let studio = Studio::new();
-    let mut harness = studio.app_restless();
-    restless(harness.run().map(drop))?;
-    restless(harness.click(Role::Button, "Import…"))?;
+    let mut harness = studio.app();
+    harness.run()?;
+    harness.click(Role::Button, "Import…")?;
     let root = folder.path().display().to_string();
-    restless(harness.set_text(Role::TextInput, "Source folder", &root))?;
-    harness.app_mut().wait_idle(crate::PATIENCE);
-    harness.step(4);
-    assert!(shows(&harness, "3000 photos found, 3000 ticked"));
-
-    // Copying, each file written and flushed, takes seconds; adding 3000
-    // small files in place is over before a click has been answered.
+    harness.set_text(Role::TextInput, "Source folder", &root)?;
+    settle(&mut harness)?;
+    assert!(shows(&harness, "40 photos found, 40 ticked"));
     let destination = tempfile::tempdir()?;
-    restless(harness.click(Role::RadioButton, "Copy to a folder by date"))?;
+    harness.click(Role::RadioButton, "Copy to a folder by date")?;
     let target = destination.path().display().to_string();
-    restless(harness.set_text(Role::TextInput, "Destination folder", &target))?;
-    restless(harness.click(Role::Button, "Import 3000 Photos"))?;
-    let cancel = "Cancel Importing 3000 photos";
+    harness.set_text(Role::TextInput, "Destination folder", &target)?;
+
+    // With the workers' results held back the import cannot finish, however
+    // fast they are, until the Cancel click has reached the engine.
+    harness.app_mut().hold_results(true);
+    harness.click(Role::Button, "Import 40 Photos")?;
+    let cancel = "Cancel Importing 40 photos";
     assert_eq!(
         harness.count(Role::Button, cancel),
         1,
         "the import is shown running"
     );
+    assert!(shows(&harness, "Importing 40 photos"));
     assert!(
-        shows(&harness, "Importing photos…") || harness.app().engine().photo_count() > 0,
+        shows(&harness, "Importing photos…"),
         "an empty grid says photos are on their way"
     );
+    harness.pointer_leave()?;
     crate::snapshots::snap_now(&mut harness, "importing", 1)?;
-    restless(harness.click(Role::Button, cancel))?;
-    harness.app_mut().wait_idle(crate::PATIENCE);
-    harness.step(4);
+    harness.click(Role::Button, cancel)?;
+    harness.app_mut().hold_results(false);
+    settle(&mut harness)?;
 
+    let engine = harness.app().engine();
+    let import = engine
+        .tasks()
+        .iter()
+        .find(|task| task.kind == TaskKind::Import)
+        .ok_or("the import is listed")?;
+    assert_eq!(
+        import.state,
+        TaskState::Cancelled,
+        "the Cancel click reached the import"
+    );
     assert_eq!(
         harness.count(Role::Button, cancel),
         0,
         "nothing runs any more"
     );
-    let imported = harness.app().engine().source_counts().all_photos;
+    let imported = engine.source_counts().all_photos;
     assert!(imported < FILES as u64, "cancelled after {imported} photos");
+    let toast = format!("Import cancelled after {imported} photos");
     assert!(
-        harness
-            .app()
-            .toasts()
-            .any(|toast| toast.starts_with("Import cancelled after")),
+        harness.app().toasts().any(|shown| shown == toast),
         "{:?}",
         harness.app().toasts().collect::<Vec<_>>()
     );

@@ -5,7 +5,7 @@
 
 use egui::{Align, Layout, Margin, Rect, RichText, ScrollArea, Ui, UiBuilder, Vec2, vec2};
 use photo_core::meta::PhotoId;
-use photo_engine::{Engine, Filter, PreviewSize, Source};
+use photo_engine::{Engine, Filter, PreviewSize};
 
 use super::{cell, drag, grid, prefixed};
 use crate::app::actions::Action;
@@ -76,51 +76,13 @@ fn source_line(ui: &mut Ui, cx: &mut Cx<'_>) {
 /// before the filter, and the selection.
 pub(super) fn counts(engine: &Engine) -> String {
     let shown = engine.photo_count();
-    let total = if engine.filter().is_empty() {
-        shown as u64
-    } else {
-        source_total(engine).unwrap_or(shown as u64)
-    };
     let selected = engine.selection().selected().len();
     let total = text::count(
-        usize::try_from(total).unwrap_or(usize::MAX),
+        usize::try_from(engine.source_photo_count()).unwrap_or(usize::MAX),
         "photo",
         "photos",
     );
     format!("{shown} of {total}, {selected} selected")
-}
-
-/// How many photos the current source holds before any filter, from the
-/// counts the panels already have. `None` where no panel counts it.
-fn source_total(engine: &Engine) -> Option<u64> {
-    let counts = engine.source_counts();
-    match *engine.source() {
-        Source::AllPhotos => Some(counts.all_photos),
-        Source::QuickCollection => Some(counts.quick_collection),
-        Source::PreviousImport => Some(counts.previous_import),
-        Source::Collection(id) => engine
-            .collections()
-            .iter()
-            .find(|collection| collection.id == id)
-            .map(|collection| collection.photo_count),
-        Source::Folder {
-            id,
-            include_subfolders,
-        } => {
-            let folder = engine.folders().iter().find(|folder| folder.id == id)?;
-            if !include_subfolders {
-                return Some(folder.photo_count);
-            }
-            let total = engine
-                .folders()
-                .iter()
-                .filter(|other| other.path.starts_with(&folder.path))
-                .map(|other| other.photo_count)
-                .sum();
-            Some(total)
-        }
-        Source::Keyword(_) => None,
-    }
 }
 
 /// The row of cells, scrolled to the active photo when it changes.

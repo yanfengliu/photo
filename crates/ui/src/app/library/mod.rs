@@ -125,9 +125,15 @@ fn cell<'a>(
         id: shown.id,
         aspect: shown.aspect,
     });
+    // The shape the photo is shown in, rotated and cropped, so that the
+    // cell keeps its shape when the thumbnail arrives.
+    let (width, height) = cx
+        .engine
+        .displayed_size(photo.id)
+        .unwrap_or((photo.width, photo.height));
     Thumbnail::new(name, size)
         .image(image)
-        .placeholder_aspect(photo.width as f32 / photo.height.max(1) as f32)
+        .placeholder_aspect(width as f32 / height.max(1) as f32)
         .tier(tier(cx, photo.id))
         .rating(photo.rating)
         .flag(photo.flag)

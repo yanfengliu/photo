@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use photo_core::meta::{CollectionId, ColorLabel, Flag, PhotoId, Rating};
+use photo_core::meta::{CollectionId, ColorLabel, Flag, KeywordId, PhotoId, Rating};
 use photo_engine::{
     Engine, EngineError, Filter, ImportRequest, Movement, SmartRules, Sort, Source, Target, TaskId,
     TextField,
@@ -32,6 +32,7 @@ pub(crate) enum Action {
     IncreaseRating(Target),
     DecreaseRating(Target),
     SetFlag(Target, Flag),
+    SetLabel(Target, ColorLabel),
     ToggleLabel(Target, ColorLabel),
     ToggleQuickCollection(Target),
     RotateLeft(Target),
@@ -39,8 +40,11 @@ pub(crate) enum Action {
     CreateVirtualCopies(Target),
     RemoveFromCatalog(Target),
     SetText(Target, TextField, String),
+    /// Keywords by name, made if they do not exist.
     AddKeywords(Target, Vec<String>),
-    RemoveKeywords(Target, Vec<String>),
+    /// Keywords by id: exact where names are shared.
+    AddKeywordIds(Target, Vec<KeywordId>),
+    RemoveKeywordIds(Target, Vec<KeywordId>),
     AddToCollection(CollectionId, Target),
     RemoveFromCollection(CollectionId, Target),
     CreateCollection {
@@ -70,11 +74,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    /// Hand the action to the engine.
-    ///
-    /// Each action is one engine call, with one exception the engine has no
-    /// call for: making an already selected photo active without changing
-    /// the selection takes it out and puts it back in (two toggles).
+    /// Hand the action to the engine, one engine call per action.
     pub(crate) fn apply(self, engine: &mut Engine) -> Result<(), EngineError> {
         match self {
             Self::SelectOnly(photo) => {
@@ -99,6 +99,7 @@ impl Action {
             Self::IncreaseRating(target) => engine.increase_rating(target)?,
             Self::DecreaseRating(target) => engine.decrease_rating(target)?,
             Self::SetFlag(target, flag) => engine.set_flag(target, flag)?,
+            Self::SetLabel(target, label) => engine.set_label(target, label)?,
             Self::ToggleLabel(target, label) => engine.toggle_label(target, label)?,
             Self::ToggleQuickCollection(target) => engine.toggle_quick_collection(target)?,
             Self::RotateLeft(target) => engine.rotate_left(target)?,
@@ -109,7 +110,8 @@ impl Action {
             Self::RemoveFromCatalog(target) => engine.remove_from_catalog(target)?,
             Self::SetText(target, field, text) => engine.set_text(target, field, &text)?,
             Self::AddKeywords(target, names) => engine.add_keywords(target, &names)?,
-            Self::RemoveKeywords(target, names) => engine.remove_keywords(target, &names)?,
+            Self::AddKeywordIds(target, ids) => engine.add_keyword_ids(target, &ids)?,
+            Self::RemoveKeywordIds(target, ids) => engine.remove_keyword_ids(target, &ids)?,
             Self::AddToCollection(collection, target) => {
                 engine.add_to_collection(collection, target)?;
             }
@@ -162,13 +164,15 @@ impl Action {
                 "Could not change the rating"
             }
             Self::SetFlag(..) => "Could not change the flag",
-            Self::ToggleLabel(..) => "Could not change the colour label",
+            Self::SetLabel(..) | Self::ToggleLabel(..) => "Could not change the colour label",
             Self::ToggleQuickCollection(_) => "Could not change the quick collection",
             Self::RotateLeft(_) | Self::RotateRight(_) => "Could not rotate",
             Self::CreateVirtualCopies(_) => "Could not make a virtual copy",
             Self::RemoveFromCatalog(_) => "Could not remove the photos",
             Self::SetText(..) => "Could not change the metadata",
-            Self::AddKeywords(..) | Self::RemoveKeywords(..) => "Could not change the keywords",
+            Self::AddKeywords(..) | Self::AddKeywordIds(..) | Self::RemoveKeywordIds(..) => {
+                "Could not change the keywords"
+            }
             Self::AddToCollection(..) => "Could not add to the collection",
             Self::RemoveFromCollection(..) => "Could not remove from the collection",
             Self::CreateCollection { .. }
@@ -194,14 +198,12 @@ impl Action {
 }
 
 /// Make `photo` the active photo, keeping every other selected photo
-/// selected; a photo that was not selected joins the selection.
+/// selected; a photo that was not selected joins the selection (toggling
+/// it in makes it the active one).
 fn make_active(engine: &mut Engine, photo: PhotoId) {
-    if engine.active_photo() == Some(photo) {
-        return;
-    }
     if engine.selection().is_selected(photo) {
+        engine.make_active(photo);
+    } else {
         engine.toggle_selected(photo);
     }
-    // Toggling a photo into the selection makes it the active one.
-    engine.toggle_selected(photo);
 }

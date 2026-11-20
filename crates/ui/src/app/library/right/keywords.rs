@@ -9,14 +9,14 @@
 //! where only some do); clicking a tick puts the keyword on them all or
 //! takes it off.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use egui::{
     Checkbox, CornerRadius, Key, Rect, RichText, Role, Sense, TextEdit, Ui, UiBuilder, Vec2,
     WidgetInfo, pos2, vec2,
 };
 use photo_core::meta::{KeywordId, PhotoId};
-use photo_engine::{Engine, KeywordInfo, Target};
+use photo_engine::{Engine, KeywordInfo, KeywordUse, Target};
 
 use crate::app::actions::Action;
 use crate::app::{Cx, text};
@@ -52,10 +52,8 @@ struct Read {
     subject: usize,
     /// How many of them were read.
     counted: usize,
-    /// Each keyword name of the photos read, with how many carry it.
-    tags: BTreeMap<String, usize>,
     /// Each keyword of the photos read, with how many carry it.
-    carried: HashMap<KeywordId, usize>,
+    uses: Vec<KeywordUse>,
 }
 
 impl KeywordState {
@@ -85,22 +83,19 @@ fn read_keywords(engine: &Engine) -> Read {
         selection.clone()
     };
     let counted = subject.len().min(MOST_READ);
-    let mut tags = BTreeMap::new();
-    let mut carried = HashMap::new();
-    for photo in &subject[..counted] {
-        for keyword in engine.photo_keywords(*photo).unwrap_or_default() {
-            *carried.entry(keyword.id).or_insert(0) += 1;
-            *tags.entry(keyword.name).or_insert(0) += 1;
-        }
-    }
+    let uses = engine
+        .keywords_of(Target::Photos(subject[..counted].to_vec()))
+        .unwrap_or_else(|error| {
+            log::warn!("cannot read the keywords of the selected photos: {error}");
+            Vec::new()
+        });
     Read {
         selection,
         active,
         keywords: engine.keywords().to_vec(),
         subject: subject.len(),
         counted,
-        tags,
-        carried,
+        uses,
     }
 }
 
@@ -111,15 +106,16 @@ pub(super) fn keywording(ui: &mut Ui, cx: &mut Cx<'_>) {
         return;
     }
     let read = cx.ui.right.keywords.read(cx.engine).clone();
-    if read.tags.is_empty() {
+    if read.uses.is_empty() {
         ui.label(RichText::new("No keywords yet.").color(palette::TEXT_DIM));
     }
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(space::SM, space::SM);
-        for (name, carried) in &read.tags {
-            let partial = *carried < read.counted;
-            if tag(ui, name, partial) {
-                cx.act(Action::RemoveKeywords(Target::Selected, vec![name.clone()]));
+        for used in &read.uses {
+            let partial = used.photos < read.counted;
+            if tag(ui, &used.keyword.name, partial) {
+                let ids = vec![used.keyword.id];
+                cx.act(Action::RemoveKeywordIds(Target::Selected, ids));
             }
         }
     });
@@ -191,7 +187,12 @@ pub(super) fn list(ui: &mut Ui, cx: &mut Cx<'_>) {
         return;
     }
     let read = cx.ui.right.keywords.read(cx.engine);
-    let (carried, counted) = (read.carried.clone(), read.counted);
+    let counted = read.counted;
+    let carried: HashMap<KeywordId, usize> = read
+        .uses
+        .iter()
+        .map(|used| (used.keyword.id, used.photos))
+        .collect();
     for (index, depth) in tree(&keywords) {
         let keyword = &keywords[index];
         let carriers = carried.get(&keyword.id).copied().unwrap_or(0);
@@ -204,11 +205,11 @@ pub(super) fn list(ui: &mut Ui, cx: &mut Cx<'_>) {
                 .add_enabled(counted > 0, checkbox)
                 .accessible_name(format!("Keyword {}", keyword.name));
             if response.changed() {
-                let names = vec![keyword.name.clone()];
+                let ids = vec![keyword.id];
                 cx.act(if ticked {
-                    Action::AddKeywords(Target::Selected, names)
+                    Action::AddKeywordIds(Target::Selected, ids)
                 } else {
-                    Action::RemoveKeywords(Target::Selected, names)
+                    Action::RemoveKeywordIds(Target::Selected, ids)
                 });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

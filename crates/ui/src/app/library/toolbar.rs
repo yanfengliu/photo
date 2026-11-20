@@ -168,8 +168,9 @@ fn marks(ui: &mut Ui, cx: &mut Cx<'_>, room: f32) {
         }
         divider(ui);
         if color_labels(ui, "Label", &mut label).changed() {
-            // A swatch clicked off clears the label; clicked on, sets it.
-            cx.act(Action::ToggleLabel(target.clone(), label));
+            // A swatch clicked on gives every photo its label; the swatch
+            // of the label shown, clicked off, clears them all.
+            cx.act(Action::SetLabel(target.clone(), label));
         }
         if room < ALWAYS + LABELS + ROTATE {
             return;

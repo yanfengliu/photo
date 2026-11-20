@@ -92,20 +92,6 @@ impl Studio {
             .build(move |cc| PhotoApp::new(cc, engine, options))
     }
 
-    /// The app in a harness that does not wait for the UI to come to rest:
-    /// each action runs at most two frames after its input. For watching
-    /// background work, during which the UI keeps changing; actions then
-    /// report [`HarnessError::NotSettled`], which [`restless`] accepts.
-    pub fn app_restless(&self) -> Harness<PhotoApp> {
-        let engine = self.options.open_engine().expect("the catalog opens");
-        let options = self.options.clone();
-        HarnessBuilder::new()
-            .size(WINDOW)
-            .strict_glyphs(true)
-            .max_steps(2)
-            .build(move |cc| PhotoApp::new(cc, engine, options))
-    }
-
     fn harness(&self, engine: Engine, pixels_per_point: f32) -> Harness<PhotoApp> {
         let options = self.options.clone();
         HarnessBuilder::new()
@@ -114,15 +100,6 @@ impl Studio {
             .strict_glyphs(true)
             .max_steps(240)
             .build(move |cc| PhotoApp::new(cc, engine, options))
-    }
-}
-
-/// An action's result in a harness from [`Studio::app_restless`]: done,
-/// whether or not the UI came to rest after it.
-pub fn restless(result: Result<(), HarnessError>) -> Result<(), HarnessError> {
-    match result {
-        Err(HarnessError::NotSettled(_)) => Ok(()),
-        other => other,
     }
 }
 

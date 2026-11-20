@@ -44,6 +44,9 @@ pub struct PhotoApp {
     /// Counts the changes that can make something shown stale: every action
     /// applied and every poll that brought results in.
     generation: u64,
+    /// Whether the engine's background results are held back (see
+    /// [`PhotoApp::hold_results`]).
+    holding: bool,
 }
 
 /// What a part of the window draws with: the engine, the presentation
@@ -86,6 +89,7 @@ impl PhotoApp {
             toasts: Toasts::new(),
             actions: Vec::new(),
             generation: 0,
+            holding: false,
         }
     }
 
@@ -150,6 +154,17 @@ impl PhotoApp {
         idle
     }
 
+    /// Hold back (or let in again) what the engine's background work
+    /// finishes. While held, frames do not poll the engine: the workers go
+    /// on, but none of their results reaches the catalog or the screen, so
+    /// no task can progress or end; actions such as Cancel still go to the
+    /// engine at once. For tests and the automation harness, to look at and
+    /// act on work in progress at a moment of their choosing.
+    /// [`Self::wait_idle`] brings results in whether held or not.
+    pub fn hold_results(&mut self, hold: bool) {
+        self.holding = hold;
+    }
+
     fn cx(&mut self) -> Cx<'_> {
         Cx {
             engine: &mut self.engine,
@@ -192,7 +207,7 @@ impl PhotoApp {
 impl eframe::App for PhotoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.engine.poll() {
+        if !self.holding && self.engine.poll() {
             self.generation += 1;
             ctx.request_repaint();
         }
