@@ -271,6 +271,7 @@ fn writing_twice_is_the_same_as_writing_once() {
         let image = ImageInfo::new(kind).with_orientation(Orientation::new(1, false));
         let data = XmpData {
             rating: Rating::new(2),
+            flag: Flag::Rejected,
             keywords: vec!["one".to_owned(), "two".to_owned()],
             ..develop(&rich_settings(kind))
         };
@@ -290,7 +291,7 @@ fn empty_data_makes_an_empty_but_valid_packet() {
 fn descriptive_metadata_round_trips_including_awkward_text() {
     let data = XmpData {
         rating: Rating::new(3),
-        flag: Flag::Unflagged,
+        flag: Flag::Picked,
         label: ColorLabel::Blue,
         title: "Tom & Jerry <\"quoted\"> 'single' ]]> ünïcödé 日本語 🎞".to_owned(),
         caption: "line one\nline two\ttabbed\r\nwindows  two spaces ".to_owned(),
@@ -334,33 +335,6 @@ fn characters_xml_cannot_hold_are_dropped_instead_of_breaking_the_file() {
     let read = parse(&to_string(&data, RAW, None).unwrap(), RAW).unwrap();
     assert_eq!(read.title, "bellless");
     assert_eq!(read.keywords, ["ok"]);
-}
-
-#[test]
-fn rejection_travels_as_a_rating_of_minus_one() {
-    let data = XmpData {
-        flag: Flag::Rejected,
-        ..XmpData::default()
-    };
-    let xml = to_string(&data, RAW, None).unwrap();
-    assert!(xml.contains(r#"xmp:Rating="-1""#), "{xml}");
-    assert_eq!(parse(&xml, RAW).unwrap(), data);
-}
-
-#[test]
-fn stars_do_not_survive_rejection_and_a_pick_is_not_carried() {
-    let read_back = |rating: u8, flag: Flag| {
-        let data = XmpData {
-            rating: Rating::new(rating),
-            flag,
-            ..XmpData::default()
-        };
-        let read = parse(&to_string(&data, RAW, None).unwrap(), RAW).unwrap();
-        (read.rating.stars(), read.flag)
-    };
-    assert_eq!(read_back(4, Flag::Rejected), (0, Flag::Rejected));
-    assert_eq!(read_back(2, Flag::Picked), (2, Flag::Unflagged));
-    assert_eq!(read_back(5, Flag::Unflagged), (5, Flag::Unflagged));
 }
 
 #[test]

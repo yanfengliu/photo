@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use photo_core::meta::{ColorLabel, FileKind, Rating};
+use photo_core::meta::{ColorLabel, FileKind, Flag, Rating};
 use photo_core::time::DateTime;
 use photo_xmp::{ImageInfo, XmpData, XmpError, parse, to_string};
 use quick_xml::Reader;
@@ -115,6 +115,29 @@ fn changing_one_value_changes_only_that_value() {
         &updated[updated.find(rest).unwrap()..],
         &FOREIGN[FOREIGN.find(rest).unwrap()..]
     );
+}
+
+#[test]
+fn picking_and_unflagging_touch_only_the_private_flag() {
+    let picked = XmpData {
+        flag: Flag::Picked,
+        ..metadata(FOREIGN)
+    };
+    let updated = to_string(&picked, RAW, Some(FOREIGN)).unwrap();
+    assert_eq!(metadata(&updated), picked);
+
+    // The flag needs its namespace declared; nothing else is new or gone.
+    let mut without_flag = inventory(FOREIGN);
+    let declaration = "attribute xmlns:photo=http://ns.photo.invalid/1.0/";
+    without_flag.insert(declaration.to_owned(), 1);
+    let mut with_flag = without_flag.clone();
+    with_flag.insert("attribute photo:Flag=1".to_owned(), 1);
+    assert_eq!(inventory(&updated), with_flag);
+
+    // Unflagging removes the property again and leaves the declaration.
+    let unflagged = to_string(&metadata(FOREIGN), RAW, Some(&updated)).unwrap();
+    assert_eq!(inventory(&unflagged), without_flag);
+    assert_eq!(metadata(&unflagged), metadata(FOREIGN));
 }
 
 #[test]

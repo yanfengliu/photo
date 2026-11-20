@@ -11,29 +11,47 @@ use crate::math::{slider_unit, smoothstep_d};
 
 // ---- Tunable constants ----------------------------------------------------
 
-/// Shadows: a bell that rises from black to its peak and is gone by 0.85.
+/// Shadows: a bell that rises from black to its peak and is gone by 0.66.
+/// The band is kept tight on purpose (it follows the owner's rule of about
+/// one stop of width and 1.5 EV of reach): at `v = 0.5` it is down to 46% of
+/// its peak, and it does not reach the highlights at all, so a single
+/// full-strength slider reads as shadow recovery, not as an exposure shift.
 const SHADOWS: Bell = Bell {
     lo: 0.0,
     peak: 0.32,
-    hi: 0.85,
+    hi: 0.66,
 };
-/// Perceptual shift at the peak for Shadows +100 and -100. With smoothstep
-/// flanks (maximum slope 1.5 / width) the curve's slope stays above
-/// `1 - 0.18 * 1.5 / 0.53 = 0.49` and `1 - 0.14 * 1.5 / 0.32 = 0.34`.
-const SHADOWS_LIFT: f64 = 0.18;
-const SHADOWS_DROP: f64 = 0.14;
+/// Perceptual shift at the peak for Shadows +100 and -100: +1.48 and -1.49
+/// stops of display luminance. With smoothstep flanks (maximum slope
+/// 1.5 / width) the curve's slope stays above `1 - 0.19 * 1.5 / 0.34 = 0.16`
+/// and `1 - 0.12 * 1.5 / 0.32 = 0.44`.
+const SHADOWS_LIFT: f64 = 0.19;
+const SHADOWS_DROP: f64 = 0.12;
 
-/// Highlights: a bell from 0.25 to white with its peak at 0.72. It vanishes
-/// at white, so the white point itself is left to Whites.
-const HIGHLIGHTS: Bell = Bell {
-    lo: 0.25,
-    peak: 0.72,
+/// Highlights above zero: a bell from 0.45 to white with its peak at 0.80.
+/// It vanishes at white, so the white point itself is left to Whites. The
+/// slope stays above `1 - 0.10 * 1.5 / 0.20 = 0.25`.
+const HIGHLIGHTS_LIFT_BELL: Bell = Bell {
+    lo: 0.45,
+    peak: 0.80,
     hi: 1.0,
 };
-/// Slope stays above `1 - 0.14 * 1.5 / 0.28 = 0.25` (+100) and
-/// `1 - 0.20 * 1.5 / 0.47 = 0.36` (-100).
-const HIGHLIGHTS_LIFT: f64 = 0.14;
-const HIGHLIGHTS_DROP: f64 = 0.20;
+const HIGHLIGHTS_LIFT: f64 = 0.10;
+
+/// Highlights below zero: a recovery shelf. The pull-down grows from nothing
+/// at `RECOVERY_START` to `HIGHLIGHTS_DROP` at `RECOVERY_FULL` (smoothstep),
+/// then returns to zero at white along a parabola, so white stays white but
+/// everything just below it is pulled down by almost the full amount.
+///
+/// The slope at white, `1 + 2 * 0.18 / 0.02 = 19`, is the point of the
+/// shape: a base curve squeezes every scene value above the sensor's clip
+/// point into the last half percent below white, and a steep final segment
+/// is what a uniform exposure reduction of that whole range looks like in
+/// display terms (about -1.2 stops on the standard profile). On the rise the
+/// slope stays above `1 - 0.18 * 1.5 / 0.53 = 0.49`.
+const RECOVERY_START: f64 = 0.45;
+const RECOVERY_FULL: f64 = 0.98;
+const HIGHLIGHTS_DROP: f64 = 0.18;
 
 /// Blacks: the gain `1 + a (1 - v)^12`, largest at black and gone by about
 /// 0.3. The perceptual shift `a v (1 - v)^12` peaks at `v = 1/13`. The
@@ -58,11 +76,13 @@ const CONTRAST_LIMIT: f64 = 400.0;
 pub const BLACKS_PEAK: f32 = 1.0 / 13.0;
 /// The perceptual value at which Shadows shifts pixels the most.
 pub const SHADOWS_PEAK: f32 = 0.32;
-/// The perceptual value at which Highlights shifts pixels the most.
-pub const HIGHLIGHTS_PEAK: f32 = 0.72;
+/// A perceptual value inside the range where Highlights acts most in both
+/// directions (positive values peak at 0.80, negative ones keep growing to
+/// 0.98; both are within a fifth of their maximum here).
+pub const HIGHLIGHTS_PEAK: f32 = 0.85;
 /// A perceptual value just inside the range where Whites acts most (its
 /// effect keeps growing all the way to white and beyond).
-pub const WHITES_PEAK: f32 = 0.95;
+pub const WHITES_PEAK: f32 = 0.995;
 
 // ---------------------------------------------------------------------------
 
@@ -91,13 +111,34 @@ fn signed(slider: f32, up: f64, down: f64) -> f64 {
     amount * if amount >= 0.0 { up } else { down }
 }
 
+/// The shape of the negative-Highlights pull-down: zero up to
+/// `RECOVERY_START`, one at `RECOVERY_FULL`, back to zero at white with a
+/// finite slope. C1 throughout.
+fn recovery_shelf(v: f64) -> f64 {
+    if v <= RECOVERY_START || v >= 1.0 {
+        0.0
+    } else if v <= RECOVERY_FULL {
+        smoothstep_d((v - RECOVERY_START) / (RECOVERY_FULL - RECOVERY_START))
+    } else {
+        let t = (v - RECOVERY_FULL) / (1.0 - RECOVERY_FULL);
+        1.0 - t * t
+    }
+}
+
 /// The Highlights and Shadows controls as one curve on perceptual values:
-/// Shadows is applied first, Highlights to its result. Identity outside
-/// `(0, 1)`, so black and white stay put; strictly increasing for every pair
-/// of slider values. Slider values beyond ±100 are clamped.
+/// Shadows is applied first, Highlights to its result. It says where a flat
+/// neutral area of perceptual value `v` lands; the pipeline realises it as a
+/// scene-linear gain looked up from an edge-aware base (see
+/// [`crate::base::SceneToDisplay`]).
+///
+/// Identity outside `(0, 1)`, so black and white stay put; strictly
+/// increasing for every pair of slider values. Slider values beyond ±100 are
+/// clamped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoneCurve {
     shadows: f64,
+    /// Signed shift at full weight: a lift when positive, a pull-down when
+    /// negative (the two use different shapes).
     highlights: f64,
 }
 
@@ -128,17 +169,12 @@ impl ZoneCurve {
             return v;
         }
         let lifted = v + self.shadows * SHADOWS.eval(v);
-        lifted + self.highlights * HIGHLIGHTS.eval(lifted)
-    }
-
-    /// `eval(v) / v`: the perceptual gain the pipeline applies when `v` is
-    /// the edge-aware base. One wherever the curve is the identity.
-    pub(crate) fn ratio_d(&self, v: f64) -> f64 {
-        if v.is_nan() || v <= 1.0e-9 || v >= 1.0 {
-            1.0
+        let weight = if self.highlights >= 0.0 {
+            HIGHLIGHTS_LIFT_BELL.eval(lifted)
         } else {
-            self.eval_d(v) / v
-        }
+            recovery_shelf(lifted)
+        };
+        lifted + self.highlights * weight
     }
 }
 
@@ -244,12 +280,39 @@ mod tests {
 
     #[test]
     fn a_bell_is_one_at_its_peak_and_zero_outside() {
-        for bell in [SHADOWS, HIGHLIGHTS] {
+        for bell in [SHADOWS, HIGHLIGHTS_LIFT_BELL] {
             assert_eq!(bell.eval(bell.peak), 1.0);
             assert_eq!(bell.eval(bell.lo), 0.0);
             assert_eq!(bell.eval(bell.hi), 0.0);
             assert_eq!(bell.eval(bell.hi + 0.5), 0.0);
         }
+    }
+
+    #[test]
+    fn the_recovery_shelf_is_smooth_and_leaves_white_with_the_stated_slope() {
+        assert_eq!(recovery_shelf(RECOVERY_START), 0.0);
+        assert_eq!(recovery_shelf(RECOVERY_FULL), 1.0);
+        assert_eq!(recovery_shelf(1.0), 0.0);
+        assert_eq!(recovery_shelf(0.2), 0.0);
+        // C1 where the smoothstep meets the parabola: both are flat there.
+        let h = 1e-6;
+        let before = (recovery_shelf(RECOVERY_FULL) - recovery_shelf(RECOVERY_FULL - h)) / h;
+        let after = (recovery_shelf(RECOVERY_FULL + h) - recovery_shelf(RECOVERY_FULL)) / h;
+        assert!(before.abs() < 1e-3 && after.abs() < 1e-3, "{before} {after}");
+
+        let curve = ZoneCurve::new(-100.0, 0.0);
+        let at_white = (curve.eval_d(1.0) - curve.eval_d(1.0 - h)) / h;
+        let stated = 1.0 + 2.0 * HIGHLIGHTS_DROP / (1.0 - RECOVERY_FULL);
+        assert!((at_white - stated).abs() < 1e-2, "{at_white} vs {stated}");
+        // White itself and everything above it stay where they are.
+        assert_eq!(curve.eval_d(1.0), 1.0);
+        assert_eq!(curve.eval_d(1.3), 1.3);
+        let mut least = f64::MAX;
+        for step in 0..10_000 {
+            let v = f64::from(step) / 10_000.0;
+            least = least.min((curve.eval_d(v + 1e-4) - curve.eval_d(v)) * 1e4);
+        }
+        assert!(least > 0.48, "the shelf's rise flattens the curve to {least}");
     }
 
     #[test]
@@ -262,8 +325,15 @@ mod tests {
         };
         let shadows = ZoneCurve::new(0.0, 100.0);
         assert!((argmax(&|v| shadows.eval_d(v) - v) - f64::from(SHADOWS_PEAK)).abs() < 2e-3);
-        let highlights = ZoneCurve::new(-100.0, 0.0);
-        assert!((argmax(&|v| highlights.eval_d(v) - v) - f64::from(HIGHLIGHTS_PEAK)).abs() < 2e-3);
+        // Highlights peaks at a different place in each direction; the
+        // published sample point is well inside both.
+        let lift = ZoneCurve::new(100.0, 0.0);
+        let pull = ZoneCurve::new(-100.0, 0.0);
+        assert!((argmax(&|v| lift.eval_d(v) - v) - HIGHLIGHTS_LIFT_BELL.peak).abs() < 2e-3);
+        assert!((argmax(&|v| pull.eval_d(v) - v) - RECOVERY_FULL).abs() < 2e-3);
+        let sample = f64::from(HIGHLIGHTS_PEAK);
+        assert!(lift.eval_d(sample) - sample > 0.8 * HIGHLIGHTS_LIFT);
+        assert!(sample - pull.eval_d(sample) > 0.8 * HIGHLIGHTS_DROP);
         for blacks in [
             EndpointCurve::new(0.0, 100.0),
             EndpointCurve::new(0.0, -100.0),

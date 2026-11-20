@@ -13,10 +13,14 @@ photo-core = { workspace = true }
 photo-engine = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
+# The headless harness is part of the crate's public API (the `photo harness`
+# subcommand is built on it), so this is a normal dependency, not a dev one.
+egui_kittest = { workspace = true }
+# Only to name the frame type the harness renders into and to save it as PNG.
+image = { workspace = true }
 log = { workspace = true }
 rfd = { workspace = true }
 
 [dev-dependencies]
 photo-testkit = { workspace = true }
-egui_kittest = { workspace = true }
 tempfile = { workspace = true }
