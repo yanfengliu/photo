@@ -128,6 +128,11 @@ impl Packet {
         }
     }
 
+    /// Whether a property appears at all, whatever it holds.
+    pub(crate) fn has(&self, property: Property<'_>) -> bool {
+        !self.locate(property).is_empty()
+    }
+
     /// Removes a property wherever it appears.
     pub(crate) fn remove(&mut self, property: Property<'_>) {
         let locations = self.locate(property);

@@ -16,10 +16,10 @@ const LEVEL_SEPARATOR: char = '|';
 
 /// Everything a packet says, in this application's terms.
 pub(crate) fn read(packet: &Packet, image: ImageInfo) -> XmpData {
-    let (develop, newer_settings_format) = settings::read(packet, image);
+    let (develop, unreadable_settings_format) = settings::read(packet, image);
     XmpData {
         develop,
-        newer_settings_format,
+        unreadable_settings_format,
         ..read_metadata(packet)
     }
 }
@@ -115,7 +115,7 @@ fn read_metadata(packet: &Packet) -> XmpData {
         .into_iter()
         .find_map(|property| parse_date(&packet.text(property)?)),
         develop: None,
-        newer_settings_format: None,
+        unreadable_settings_format: None,
     }
 }
 

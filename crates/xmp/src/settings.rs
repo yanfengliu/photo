@@ -2,11 +2,12 @@
 //! JSON, and `photo:SettingsFormat`, the format that JSON is in
 //! ([`SETTINGS_FORMAT`] when this build wrote it).
 //!
-//! Settings in a newer format than this build's are left alone: they are not
-//! read, because this build would misread them, nor replaced by what the
-//! Camera Raw properties beside them say, because a later write would then
-//! make that the photo's settings for good. Writing develop settings over
-//! them is refused.
+//! Private settings this build cannot read are left alone, whatever format
+//! they claim and whatever form they take: of a newer format, not JSON of
+//! this build's shape, or not text at all. They are not read, because this
+//! build would misread them, nor replaced by what the Camera Raw properties
+//! beside them say, because a later write would then make that the photo's
+//! settings for good. Writing develop settings over them is refused.
 
 use photo_core::develop::{DevelopSettings, SETTINGS_FORMAT};
 
@@ -17,22 +18,44 @@ use crate::{ImageInfo, XmpError, crs};
 /// builds wrote that did not yet give it.
 const FIRST_FORMAT: u32 = 1;
 
-/// The develop settings a packet holds, sanitised for the kind of file: the
-/// private settings when they are present and parse, else the Camera Raw
-/// mapping. When the private settings are in a newer format, none, and that
-/// format.
-pub(crate) fn read(packet: &Packet, image: ImageInfo) -> (Option<DevelopSettings>, Option<u32>) {
-    if let Some(json) = packet.text(PHOTO.property("Settings")) {
-        let format = format_of(packet);
-        if format > SETTINGS_FORMAT {
-            return (None, Some(format));
-        }
-        if let Ok(mut settings) = serde_json::from_str::<DevelopSettings>(&json) {
-            settings.sanitize_for(image.kind);
-            return (Some(settings), None);
-        }
+/// What a packet's private settings are to this build.
+enum Private {
+    /// There are none.
+    Absent,
+    /// They read as these settings.
+    Read(Box<DevelopSettings>),
+    /// They are there, but this build cannot read them; they claim this
+    /// format.
+    Unreadable(u32),
+}
+
+fn private(packet: &Packet) -> Private {
+    let property = PHOTO.property("Settings");
+    if !packet.has(property) {
+        return Private::Absent;
     }
-    let settings = crs::read(packet, image).map(|mut settings| {
+    let format = format_of(packet);
+    if format > SETTINGS_FORMAT {
+        return Private::Unreadable(format);
+    }
+    let json = packet.text(property);
+    match json.and_then(|json| serde_json::from_str::<DevelopSettings>(&json).ok()) {
+        Some(settings) => Private::Read(Box::new(settings)),
+        None => Private::Unreadable(format),
+    }
+}
+
+/// The develop settings a packet holds, sanitised for the kind of file: the
+/// private settings when it has them, else the Camera Raw mapping. When the
+/// private settings are there but this build cannot read them, none, and
+/// the format they claim.
+pub(crate) fn read(packet: &Packet, image: ImageInfo) -> (Option<DevelopSettings>, Option<u32>) {
+    let settings = match private(packet) {
+        Private::Read(settings) => Some(*settings),
+        Private::Unreadable(format) => return (None, Some(format)),
+        Private::Absent => crs::read(packet, image),
+    };
+    let settings = settings.map(|mut settings| {
         settings.sanitize_for(image.kind);
         settings
     });
@@ -40,15 +63,13 @@ pub(crate) fn read(packet: &Packet, image: ImageInfo) -> (Option<DevelopSettings
 }
 
 /// The JSON for `settings`, once it is known that the packet may take them:
-/// that it holds no settings of a newer format, and that the settings read
-/// back from the JSON as they are. A number that is not finite does not:
-/// JSON cannot write one, and the encoder writes `null` in its place.
+/// that it holds no private settings this build cannot read, and that the
+/// settings read back from the JSON as they are. A number that is not
+/// finite does not: JSON cannot write one, and the encoder writes `null` in
+/// its place.
 pub(crate) fn encoded(packet: &Packet, settings: &DevelopSettings) -> Result<String, XmpError> {
-    if packet.text(PHOTO.property("Settings")).is_some() {
-        let format = format_of(packet);
-        if format > SETTINGS_FORMAT {
-            return Err(XmpError::NewerSettings { format });
-        }
+    if let Private::Unreadable(format) = private(packet) {
+        return Err(XmpError::UnreadableSettings { format });
     }
     let json = serde_json::to_string(settings)?;
     // Only a `null` where a number belongs keeps this build's own JSON from

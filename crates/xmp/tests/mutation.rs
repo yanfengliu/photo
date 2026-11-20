@@ -6,7 +6,7 @@ use photo_core::develop::{
     Treatment,
 };
 use photo_core::meta::{FileKind, Flag};
-use photo_xmp::{ImageInfo, XmpData, parse, to_string};
+use photo_xmp::{ImageInfo, XmpData, XmpError, parse, to_string};
 
 const FIXTURES: [&str; 3] = [
     include_str!("fixtures/attribute_form.xmp"),
@@ -275,6 +275,20 @@ fn altered_sidecars_are_refused_or_updated_soundly() {
             develop: Some(develop.clone()),
             ..read
         };
+        if let Some(format) = changed.unreadable_settings_format {
+            // Private settings this build cannot read are not replaced, and
+            // everything else still changes beside them.
+            let refused = to_string(&changed, image, Some(&written));
+            let expected = XmpError::UnreadableSettings { format };
+            assert_eq!(refused.unwrap_err().to_string(), expected.to_string());
+            let beside = XmpData {
+                develop: None,
+                ..changed
+            };
+            let rewritten = to_string(&beside, image, Some(&written)).unwrap();
+            assert_eq!(parse(&rewritten, image).unwrap(), beside, "{text}");
+            continue;
+        }
         let rewritten = to_string(&changed, image, Some(&written)).unwrap();
         assert_eq!(parse(&rewritten, image).unwrap(), changed, "{text}");
         if image.orientation.is_some()
