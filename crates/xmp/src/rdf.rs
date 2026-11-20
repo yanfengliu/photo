@@ -4,8 +4,9 @@
 //! A property lives on one of the `rdf:Description` elements directly inside
 //! `rdf:RDF`, as an attribute or as a child element, and a child element
 //! holds either plain text or an `rdf:Bag`, `rdf:Seq` or `rdf:Alt` of
-//! `rdf:li` items. Names are matched by namespace URI, never by prefix, and
-//! a property is read from the first place it appears.
+//! `rdf:li` items; a value with qualifiers holds the same in its
+//! `rdf:value`. Names are matched by namespace URI, never by prefix, and a
+//! property is read from the first place it appears.
 //!
 //! Setting a property changes it where it already is, in the form it already
 //! has, and leaves a single copy. Only a property that does not exist yet is
@@ -15,6 +16,7 @@
 mod edit;
 mod read;
 mod scope;
+mod value;
 
 pub(crate) use read::Values;
 use scope::Scope;

@@ -50,9 +50,12 @@ fn stored_frame(packet: &Packet, image: ImageInfo, user: Orientation) -> StoredF
 /// The stored frame's width over its height, for a file whose own
 /// orientation is `file`.
 fn stored_aspect(packet: &Packet, image: ImageInfo, file: Option<Orientation>) -> f64 {
+    // A side of less than a pixel, or of more than TIFF can count, is no
+    // size an image has; one would also make the ratio overflow.
+    let possible = 1.0..=f64::from(u32::MAX);
     let pixels = |name: &str| {
         let text = packet.text(TIFF.property(name))?;
-        parse_number::<f64>(&text).filter(|pixels| *pixels > 0.0)
+        parse_number::<f64>(&text).filter(|pixels| possible.contains(pixels))
     };
     if let (Some(width), Some(height)) = (pixels("ImageWidth"), pixels("ImageLength")) {
         return width / height;

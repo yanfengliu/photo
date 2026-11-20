@@ -140,6 +140,60 @@ fn the_shape_of_the_frame_comes_from_the_sidecar_then_the_caller_then_an_assumpt
 }
 
 #[test]
+fn an_image_size_no_file_could_have_is_not_taken_for_the_frame() {
+    let image = RASTER.with_size(3000, 2000);
+    let crop = cropped(rotated(RECT, 10.0));
+    let without = mirror_onto(&crop, image, Some(&packet("")));
+    for size in [
+        r#"tiff:ImageWidth="1e300" tiff:ImageLength="1e-300""#,
+        r#"tiff:ImageWidth="1e-300" tiff:ImageLength="1e300""#,
+        r#"tiff:ImageWidth="0.5" tiff:ImageLength="2""#,
+        r#"tiff:ImageWidth="3000" tiff:ImageLength="1e10""#,
+    ] {
+        let mirror = mirror_onto(&crop, image, Some(&packet(size)));
+        assert_eq!(read(&mirror, image), crop.crop, "{size}");
+        assert_eq!(
+            written_corners(&mirror),
+            written_corners(&without),
+            "{size}"
+        );
+    }
+}
+
+#[test]
+fn crop_numbers_too_large_for_the_settings_leave_them_finite_and_stable() {
+    let image = RASTER.with_size(3000, 2000);
+    for crop in [
+        r#"crs:CropLeft="0" crs:CropTop="0" crs:CropRight="1e40" crs:CropBottom="1""#,
+        r#"crs:CropLeft="-1e40" crs:CropTop="-1e300" crs:CropRight="1e40" crs:CropBottom="1e300""#,
+        r#"crs:CropAngle="5" crs:CropLeft="-1e300" crs:CropTop="0.1" crs:CropRight="1e300" crs:CropBottom="0.9""#,
+        r#"crs:CropAngle="1e40" crs:CropLeft="0.1" crs:CropTop="0.1" crs:CropRight="0.9" crs:CropBottom="0.9""#,
+    ] {
+        let xml = packet(&format!(r#"crs:HasCrop="True" {crop}"#));
+        let settings = parse(&xml, image).unwrap().develop.unwrap();
+        let Crop { rect, angle, .. } = settings.crop;
+        let sides = rect.map_or(Vec::new(), |rect| {
+            vec![rect.cx, rect.cy, rect.width, rect.height]
+        });
+        assert!(
+            sides
+                .iter()
+                .chain([&angle])
+                .all(|number| number.is_finite()),
+            "{crop}: {:?}",
+            settings.crop
+        );
+        let data = XmpData {
+            develop: Some(settings),
+            ..XmpData::default()
+        };
+        let written = to_string(&data, image, Some(&xml)).unwrap();
+        assert_eq!(parse(&written, image).unwrap(), data, "{crop}");
+        assert_eq!(to_string(&data, image, Some(&written)).unwrap(), written);
+    }
+}
+
+#[test]
 fn a_rotated_crop_from_another_application_is_read_through_its_image_size() {
     let expected = CropRect {
         cx: 0.52,
