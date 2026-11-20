@@ -1,9 +1,12 @@
 //! Pixels: the frame the user sees, statistics of any image on disk, the
 //! difference between two images, and the develop pipeline's own render.
 
+use std::borrow::Cow;
 use std::path::Path;
+use std::time::Instant;
 
 use image::RgbaImage;
+use photo_engine::{EngineError, StillSettings};
 use photo_ui::harness::RenderError;
 use serde_json::{Value, json};
 
@@ -100,33 +103,108 @@ fn load(path: &Path) -> Result<RgbaImage, CmdError> {
     Ok(decoded.to_rgba8())
 }
 
+/// The longest side of a render's PNG unless `max_dim` says otherwise: a
+/// standard preview's.
+const DEFAULT_MAX_DIM: u64 = 2048;
+
 /// `dump_render {source, max_dim}`: the active photo through the develop
-/// pipeline at full resolution.
+/// pipeline at full resolution, with the photo's settings (`current`) or
+/// the defaults for its kind (`original`). The statistics are of the full
+/// render, in the 8-bit sRGB encoding the user sees, as `image_stats`
+/// measures any image; the PNG artifact is scaled down to `max_dim`.
 ///
-/// Waiting on the engine: it has no full-resolution render the harness can
-/// call. The app only lends the harness `&Engine` (`PhotoApp::engine`), so
-/// the call has to take `&self`, or hand back work the harness can run or
-/// wait for.
+/// The render runs on the engine's caller, so the session answers nothing
+/// else until it is done.
 pub fn dump_render(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, CmdError> {
     params.only(&["source", "max_dim"])?;
     let source = params.opt_string("source")?.unwrap_or("current");
-    if !matches!(source, "current" | "original") {
-        return Err(CmdError::invalid(format!(
-            "`source` is `current` (the photo's settings) or `original` (the defaults), not `{source}`"
-        )));
-    }
-    if let Some(max_dim) = params.opt_u64("max_dim")?
-        && !(16..=16_384).contains(&max_dim)
-    {
+    let settings = match source {
+        "current" => StillSettings::Current,
+        "original" => StillSettings::Default,
+        other => {
+            return Err(CmdError::invalid(format!(
+                "`source` is `current` (the photo's settings) or `original` (the defaults), not `{other}`"
+            )));
+        }
+    };
+    let max_dim = params.opt_u64("max_dim")?.unwrap_or(DEFAULT_MAX_DIM);
+    if !(16..=16_384).contains(&max_dim) {
         return Err(CmdError::invalid("`max_dim` is from 16 to 16384 pixels"));
     }
-    if session.driver.engine().active_photo().is_none() {
+    let engine = session.driver.engine();
+    let Some(photo) = engine.active_photo() else {
         return Err(CmdError::unavailable("no photo is active"));
+    };
+    let file_name = engine
+        .summary(photo)
+        .map(|summary| summary.file_name.clone());
+    let started = Instant::now();
+    let rendered =
+        engine
+            .render_photo_rgba8(photo, settings, None)
+            .map_err(|error| match error {
+                EngineError::Render(reason) => CmdError::io(format!("the render failed: {reason}")),
+                other => CmdError::internal(format!("the render failed: {other}")),
+            })?;
+    let render_ms = started.elapsed().as_millis() as u64;
+    let (width, height) = (rendered.width, rendered.height);
+    let full = RgbaImage::from_raw(width, height, rendered.pixels)
+        .ok_or_else(|| CmdError::internal("the render's pixels do not fill its size"))?;
+    let measured = stats::image_stats(&full).map_err(CmdError::internal)?;
+    let shown = scaled_to(&full, max_dim as u32);
+    let (absolute, relative) = session.run.next_artifact(&format!("render-{source}"));
+    shown
+        .save_with_format(&absolute, image::ImageFormat::Png)
+        .map_err(|error| CmdError::io(format!("cannot write {}: {error}", absolute.display())))?;
+    session.run.add_artifact(json!({
+        "path": relative,
+        "kind": "render",
+        "source": source,
+        "request_id": session.request_id,
+        "width": shown.width(),
+        "height": shown.height(),
+        "render_size": [width, height],
+    }));
+    Ok(json!({
+        "source": source,
+        "photo": { "id": photo.0, "file_name": file_name },
+        "render": { "width": width, "height": height, "render_ms": render_ms },
+        "path": relative,
+        "absolute_path": absolute,
+        "artifact": { "width": shown.width(), "height": shown.height(), "max_dim": max_dim },
+        "stats": measured.to_json(),
+    }))
+}
+
+/// `image` with its longer side at most `max_dim` pixels: itself when it
+/// fits, never enlarged.
+fn scaled_to(image: &RgbaImage, max_dim: u32) -> Cow<'_, RgbaImage> {
+    let longer = image.width().max(image.height());
+    if longer <= max_dim {
+        return Cow::Borrowed(image);
     }
-    Err(CmdError::new(
-        Code::Unsupported,
-        "dump_render needs a full-resolution render from photo-engine that the harness can reach \
-         through `&Engine` (for example `Engine::render_full(&self, photo, settings) -> \
-         Result<image, EngineError>`); the engine has none yet",
+    let scale = f64::from(max_dim) / f64::from(longer);
+    let side = |length: u32| ((f64::from(length) * scale).round() as u32).clamp(1, max_dim);
+    Cow::Owned(image::imageops::resize(
+        image,
+        side(image.width()),
+        side(image.height()),
+        image::imageops::FilterType::Triangle,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_render_is_scaled_down_to_fit_and_never_enlarged() {
+        let wide = RgbaImage::new(400, 100);
+        let scaled = scaled_to(&wide, 64);
+        assert_eq!(scaled.dimensions(), (64, 16));
+        let small = RgbaImage::new(30, 20);
+        assert!(matches!(scaled_to(&small, 64), Cow::Borrowed(_)));
+        let tall = RgbaImage::new(10, 1000);
+        assert_eq!(scaled_to(&tall, 100).dimensions(), (1, 100));
+    }
 }

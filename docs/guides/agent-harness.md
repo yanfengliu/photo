@@ -64,7 +64,7 @@ An action's data can carry `warnings`: the UI was still changing when the action
 | `screenshot` | | Renders the frame the user would see at the harness's pixel density and saves it as a PNG artifact; answers its path (relative to the run directory), pixel size, `pixels_per_point` and logical size. `unavailable` without a GPU. |
 | `image_stats` | `path` | Statistics of a PNG or JPEG on disk (see below). A relative path is taken from the run directory, so a screenshot's `path` can be passed straight on. |
 | `compare_images` | `path_a`, `path_b` | How two images of one size differ (see below). |
-| `dump_render` | `source` (`current` or `original`), `max_dim` | The active photo through the develop pipeline at full resolution, statistics on the full render, the PNG downscaled to `max_dim`. Answers `unsupported` until photo-engine has a full-resolution render the harness can call. |
+| `dump_render` | `source` (`current`, the default, or `original`), `max_dim` (2048, from 16 to 16384) | The active photo through the develop pipeline at full resolution: `current` with its settings as they are now (including an edit not yet committed in Develop), `original` with the defaults a new import of its kind gets. Answers the render's size and time, the statistics of the full render (see below), and a PNG artifact scaled down so its longer side is at most `max_dim` (never enlarged). `unavailable` when no photo is active. |
 | `import_folder` | `path`, `recursive` (true), `timeout_ms` (120000) | Through the real Import dialog: opens it (its button, or ⇧⌘I when the panels are hidden), sets "Include subfolders", types the path into the folder field and presses Enter, waits for the scan, and presses `Import N Photos`. Answers what the scan found and what was ticked; with nothing to import it cancels the dialog and says why. |
 | `open` | `path` | As `photo PATH` does: starts the app again on the same storage with the photo imported in place (unless the catalog holds it), made active and shown in the loupe. |
 | `click` | `name`, `role` | Clicks the middle of the control with that accessible name. |
@@ -90,6 +90,8 @@ Coordinates and rectangles are logical points from the top left of the window. A
 
 Every statistic is computed on 8-bit sRGB-encoded values, 0 to 255, over every pixel of the image. Alpha is ignored. Percentiles are nearest-rank: `p5` is the smallest value at or below which at least 5% of the pixels lie.
 
+`dump_render` measures the same way: its statistics are of the full-resolution render in the 8-bit sRGB display encoding the user sees (the pipeline's 8-bit output, the same encoding `image_stats` reads from a PNG), not of the scaled-down PNG it saves and not of the pipeline's 16-bit export precision. So `image_stats` on its PNG will differ slightly from its own statistics wherever scaling averaged neighbouring pixels.
+
 `channels.r`, `channels.g`, `channels.b` and `channels.luma` each give `mean`, `min`, `p1`, `p5`, `p50`, `p95`, `p99`, `max`, `clip_low_fraction` (the fraction of pixels at exactly 0) and `clip_high_fraction` (at exactly 255). Luma is Rec. 709 luma of the encoded values, Y' = 0.2126 R' + 0.7152 G' + 0.0722 B' (not linear luminance); its clip fractions count pixels black or white in every channel, and its percentiles are to a hundredth of a level.
 
 `luma_histogram` has 64 bins of four levels each (bin `i` covers luma from `4i` to `4i + 4`, the last includes 255), as fractions of all pixels. `mean_saturation` is the mean HSV saturation, `(max - min) / max` per pixel.
@@ -112,13 +114,13 @@ Channel means that differ on a neutral subject are a colour cast; the white bala
 
 `compare_images` answers whether a change had an effect (`differing_fraction` above zero) and whether something that should change nothing did (zero). A `max_abs_diff` of 1 or 2 is rounding noise and does not count as differing.
 
-A screenshot is the whole window, interface included. The interface is a neutral dark grey (design §8.8), so its statistics are dominated by the chrome; judge the photo's own tones from a render (`dump_render`, once the engine provides it) or compare screenshots that differ only in the photo.
+A screenshot is the whole window, interface included. The interface is a neutral dark grey (design §8.8), so its statistics are dominated by the chrome; judge the photo's own tones from `dump_render`, and compare `current` with `original` to see what the settings did.
 
 ## The improvement loop
 
 The loop exists so the agent sees the result itself instead of asking a person how it looks. It is meant to make the agent harder to fool, not more confident.
 
-Launch and anchor: build the release binaries, start `photo --harness=0` with the fixture (a file from `test_photos/`), `ping`, `wait_idle`, then take a screenshot and its statistics as the anchor every later observation is compared with. Note the run id.
+Launch and anchor: build the release binaries, start `photo --harness=0` with the fixture (a file from `test_photos/`), `ping`, `wait_idle`, then take a screenshot and a `dump_render` with their statistics as the anchor every later observation is compared with. Note the run id.
 
 Observe both ways: read the PNG (look at it at full size) and read the numbers (`observe`, `image_stats`). Eyes alone misjudge subtle tones and numbers alone miss layout and colour mistakes; a finding needs both to agree.
 
@@ -147,6 +149,8 @@ Run directories stay local and ignored. What lasts goes into the repository as r
 ## Gotchas
 
 Always `wait_idle` after `import_folder`, `open`, and anything that renders; an answer only means the gesture was made.
+
+`dump_render` renders on the session's own thread and blocks it: a full-resolution RAW render can take seconds, during which no other request is answered and no frame runs. The first render of a file also decodes it; later ones reuse the engine's cache of decoded files.
 
 Time in the app passes only as frames run, a sixtieth of a second each. The harness runs frames between requests when the app asks for them, so a toast stays up for about 2.2 seconds of such frames; `observe` keeps the last twenty toasts in `toasts.recent` either way.
 
