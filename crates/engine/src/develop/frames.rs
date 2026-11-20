@@ -1,5 +1,6 @@
 //! Asking the render worker for the session's frames, and taking them in:
-//! the canvas, the before view and the preset hover preview.
+//! the mask overlay, the canvas, the before view and the preset hover
+//! preview.
 
 use std::sync::Arc;
 
@@ -8,15 +9,16 @@ use photo_core::develop::DevelopSettings;
 use photo_core::meta::{FileKind, PhotoId, SnapshotId};
 use photo_develop::Quality;
 
-use super::worker::{Delivery, Order, Outcome, Purpose};
-use super::{BeforeSettings, DevelopFrame, DevelopLoad, develop_view, tools};
+use super::worker::{Delivery, Order, Outcome, Purpose, Work};
+use super::{BeforeSettings, DevelopFrame, DevelopLoad, MaskOverlay, develop_view, tools};
 use crate::engine::Engine;
 use crate::error::EngineError;
 
 impl Engine {
-    /// Ask the render worker for a frame of the open photo for `purpose`.
-    /// Does nothing until the photo is decoded and the canvas has a view,
-    /// or when there is nothing to show for that purpose.
+    /// Ask the render worker for a frame of the open photo for `purpose`
+    /// (the overlay's coverage, for [`Purpose::Overlay`]). Does nothing
+    /// until the photo is decoded and the canvas has a view, or when there
+    /// is nothing to show for that purpose.
     pub(crate) fn render_session(&mut self, purpose: Purpose, quality: Quality) {
         let Some(session) = self.develop.as_mut() else {
             return;
@@ -24,7 +26,22 @@ impl Engine {
         let (Some(source), Some(canvas)) = (session.source.clone(), session.canvas) else {
             return;
         };
+        let mut work = Work::Render(quality);
         let (settings, view) = match purpose {
+            Purpose::Overlay => {
+                let Some(mask) = session.overlay_mask else {
+                    return;
+                };
+                if mask >= session.settings.masks.len() {
+                    // The mask was deleted: there is nothing left to show.
+                    session.overlay_mask = None;
+                    session.overlay = None;
+                    return;
+                }
+                work = Work::Alpha(mask);
+                let view = develop_view(&source, &session.settings, canvas);
+                (session.settings.clone(), view)
+            }
             Purpose::Main => {
                 let view = develop_view(&source, &session.settings, canvas);
                 (session.settings.clone(), view)
@@ -54,7 +71,7 @@ impl Engine {
             settings,
             version: session.version,
             view,
-            quality,
+            work,
         };
         session.counts.requested += 1;
         self.renders.insert(order.id);
@@ -74,6 +91,23 @@ impl Engine {
         };
         let frame = match delivery.outcome {
             Outcome::Rendered(frame) => *frame,
+            Outcome::Alpha(alpha) => {
+                session.counts.rendered += 1;
+                let Work::Alpha(mask) = delivery.work else {
+                    return false;
+                };
+                // An overlay of a mask no longer shown is dropped.
+                if session.overlay_mask != Some(mask) {
+                    return false;
+                }
+                session.overlay = alpha.map(|alpha| MaskOverlay {
+                    mask,
+                    alpha: Arc::new(alpha),
+                    view: delivery.view,
+                    version: delivery.version,
+                });
+                return true;
+            }
             Outcome::Cancelled => {
                 session.counts.superseded += 1;
                 return false;
@@ -86,11 +120,14 @@ impl Engine {
             }
         };
         session.counts.rendered += 1;
+        let Work::Render(quality) = delivery.work else {
+            return false;
+        };
         let shown = DevelopFrame {
             image: Arc::new(frame.image),
             view: delivery.view,
             version: delivery.version,
-            quality: delivery.quality,
+            quality,
             stage_times: frame.stage_times.into(),
             render_time: frame.render_time,
             histogram: Arc::new(frame.histogram),
@@ -106,6 +143,7 @@ impl Engine {
                     session.look_frame = Some((*key, shown));
                 }
             }
+            Purpose::Overlay => return false,
         }
         true
     }

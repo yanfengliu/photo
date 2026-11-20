@@ -14,6 +14,7 @@ use photo_develop::{Quality, Source};
 use super::worker::Purpose;
 use super::{
     CanvasView, DevelopLoad, DevelopSession, NEWER_SETTINGS, READ_ONLY_CATALOG, RenderCounts,
+    overlay,
 };
 use crate::engine::{Engine, JobFailure};
 use crate::error::EngineError;
@@ -84,6 +85,8 @@ impl Engine {
             before_frame: None,
             look: None,
             look_frame: None,
+            overlay_mask: None,
+            overlay: None,
             read_only,
             counts: RenderCounts::default(),
         });
@@ -118,6 +121,7 @@ impl Engine {
             return;
         }
         session.canvas = Some(canvas);
+        self.render_session(Purpose::Overlay, Quality::Full);
         self.render_session(Purpose::Main, Quality::Full);
         self.render_session(Purpose::Before, Quality::Full);
     }
@@ -134,9 +138,15 @@ impl Engine {
         if settings == session.committed && settings == session.settings {
             return;
         }
+        let overlay_moves = session
+            .overlay_mask
+            .is_some_and(|mask| overlay::overlay_moves(&session.settings, &settings, mask));
         session.committed = settings.clone();
         session.settings = settings;
         session.version += 1;
+        if overlay_moves {
+            self.render_session(Purpose::Overlay, Quality::Full);
+        }
         self.render_session(Purpose::Main, Quality::Full);
         self.render_session(Purpose::Before, Quality::Full);
     }
@@ -237,6 +247,7 @@ impl Engine {
             Ok(source) => {
                 session.source = Some(source);
                 session.reach(DevelopLoad::Decoded);
+                self.render_session(Purpose::Overlay, Quality::Full);
                 self.render_session(Purpose::Main, Quality::Full);
                 self.render_session(Purpose::Before, Quality::Full);
             }

@@ -7,12 +7,14 @@
 //! that into a develop view and keeps the newest frame for it, rendered by
 //! the session's own render worker (see `worker` and `frames`). Edits are in
 //! `edit`, changes to many photos at once in `batch`, the automatic and
-//! picked values and the before view in `tools`.
+//! picked values, the healing source and the before view in `tools`, the
+//! red mask overlay in `overlay`.
 
 mod batch;
 mod edit;
 mod frames;
 mod load;
+mod overlay;
 mod tools;
 pub(crate) mod worker;
 
@@ -27,6 +29,7 @@ use photo_core::meta::{FileKind, PhotoId};
 use photo_develop::{Quality, Source};
 use photo_imaging::{Geometry, Histogram, View};
 
+pub use overlay::MaskOverlay;
 pub use tools::BeforeSettings;
 
 use crate::engine::Engine;
@@ -137,14 +140,15 @@ impl DevelopFrame {
     }
 }
 
-/// What happened to the session's render requests: once the session is
-/// idle, every request was rendered, superseded by a newer one (dropped
-/// while waiting, or cancelled while running), or failed.
+/// What happened to the session's render requests (frames and mask
+/// overlays): once the session is idle, every request was rendered,
+/// superseded by a newer one (dropped while waiting, or cancelled while
+/// running), or failed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RenderCounts {
     /// Requests made.
     pub requested: u64,
-    /// Requests that produced a frame.
+    /// Requests that produced a frame or an overlay.
     pub rendered: u64,
     /// Requests a newer one replaced before they finished.
     pub superseded: u64,
@@ -173,6 +177,9 @@ pub struct DevelopSession {
     pub(crate) before_frame: Option<DevelopFrame>,
     pub(crate) look: Option<(PresetKey, DevelopSettings, (u32, u32))>,
     pub(crate) look_frame: Option<(PresetKey, DevelopFrame)>,
+    /// The mask whose overlay is shown, and its newest coverage.
+    pub(crate) overlay_mask: Option<usize>,
+    pub(crate) overlay: Option<MaskOverlay>,
     pub(crate) read_only: Option<String>,
     pub(crate) counts: RenderCounts,
 }

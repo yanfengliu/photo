@@ -82,4 +82,9 @@ pub enum EngineError {
     /// not be stored so that they read back. Nothing was changed.
     #[error("the export presets cannot be stored or read: {0}")]
     ExportPresets(String),
+
+    /// A photo could not be rendered, for this reason (its file is missing
+    /// or cannot be decoded).
+    #[error("the photo could not be rendered: {0}")]
+    Render(String),
 }

@@ -104,6 +104,23 @@ impl Engine {
         Ok(true)
     }
 
+    /// Where a new healing spot at `target` with `radius` should take its
+    /// patch from, as photo-imaging suggests it: a nearby place, inside the
+    /// photo and clear of the target, whose surroundings look like the
+    /// target's. Both points are in normalized source coordinates and the
+    /// radius a fraction of the long edge, as in a `Spot`. It reads a few
+    /// dozen samples, so it is cheap enough to call on the click that
+    /// places the spot. Fails when no photo is open or it is still loading.
+    pub fn suggest_heal_source(&self, target: Point, radius: f32) -> Result<Point, EngineError> {
+        let session = self.develop.as_ref().ok_or(EngineError::NoDevelopSession)?;
+        let source = session.decoded().ok_or(EngineError::StillLoading)?;
+        Ok(photo_imaging::suggest_heal_source(
+            source.pyramid(),
+            target,
+            radius,
+        ))
+    }
+
     /// Render the open photo with a preset applied, at most `width` x
     /// `height` pixels, for the Navigator's hover preview; `None` stops
     /// showing one. The frame arrives in

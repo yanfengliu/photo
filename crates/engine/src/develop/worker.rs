@@ -1,12 +1,14 @@
 //! The develop session's render worker: one thread that always works on the
 //! newest request.
 //!
-//! Each purpose (the canvas, the before view, the preset hover preview) has
-//! one waiting slot. A new request takes the slot, dropping the one waiting
-//! there, and cancels the render of the same purpose that is running, which
-//! photo-develop abandons within milliseconds. The canvas goes first. Each
-//! purpose keeps a renderer of its own, so moving a slider reuses the stage
-//! caches of the canvas renders before it.
+//! Each purpose (the mask overlay, the canvas, the before view, the preset
+//! hover preview) has one waiting slot. A new request takes the slot,
+//! dropping the one waiting there, and cancels the render of the same
+//! purpose that is running, which photo-develop abandons within
+//! milliseconds. The mask overlay goes first, since it is cheap and must
+//! keep up with a drag, then the canvas. Each purpose keeps a renderer of
+//! its own, so moving a slider reuses the stage caches of the canvas
+//! renders before it.
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -18,13 +20,15 @@ use photo_core::colorimetry::RgbSpace;
 use photo_core::develop::DevelopSettings;
 use photo_core::image::Rgba8Image;
 use photo_develop::{CancelToken, Quality, RenderRequest, Renderer, Source};
-use photo_imaging::{Histogram, View};
+use photo_imaging::{Histogram, Plane, View};
 
 use crate::jobs::lock;
 
 /// What a render is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Purpose {
+    /// The red overlay of one mask.
+    Overlay,
     /// The canvas: the photo as edited.
     Main,
     /// The before view.
@@ -35,15 +39,25 @@ pub(crate) enum Purpose {
 
 impl Purpose {
     /// In the order the worker serves them.
-    const ALL: [Self; 3] = [Self::Main, Self::Before, Self::Look];
+    const ALL: [Self; 4] = [Self::Overlay, Self::Main, Self::Before, Self::Look];
 
     fn index(self) -> usize {
         match self {
-            Self::Main => 0,
-            Self::Before => 1,
-            Self::Look => 2,
+            Self::Overlay => 0,
+            Self::Main => 1,
+            Self::Before => 2,
+            Self::Look => 3,
         }
     }
+}
+
+/// What an order asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Work {
+    /// A frame at this quality.
+    Render(Quality),
+    /// The coverage of the mask with this index.
+    Alpha(usize),
 }
 
 /// One render to make.
@@ -57,7 +71,7 @@ pub(crate) struct Order {
     /// The settings version the render shows.
     pub(crate) version: u64,
     pub(crate) view: View,
-    pub(crate) quality: Quality,
+    pub(crate) work: Work,
 }
 
 /// A finished render.
@@ -72,6 +86,8 @@ pub(crate) struct Frame {
 pub(crate) enum Outcome {
     /// Boxed: the histogram makes a frame large.
     Rendered(Box<Frame>),
+    /// A mask's coverage of the view; `None` when there is no such mask.
+    Alpha(Option<Plane>),
     /// A newer order of the same purpose stopped it.
     Cancelled,
     /// The renderer panicked, with this message.
@@ -85,7 +101,7 @@ pub(crate) struct Delivery {
     pub(crate) generation: u64,
     pub(crate) version: u64,
     pub(crate) view: View,
-    pub(crate) quality: Quality,
+    pub(crate) work: Work,
     pub(crate) outcome: Outcome,
 }
 
@@ -95,7 +111,7 @@ struct Running {
 }
 
 struct Slots {
-    waiting: [Option<Order>; 3],
+    waiting: [Option<Order>; Purpose::ALL.len()],
     running: Option<Running>,
     shutdown: bool,
 }
@@ -117,7 +133,7 @@ impl RenderWorker {
     pub(crate) fn start(deliver: impl Fn(Delivery) + Send + 'static) -> io::Result<Self> {
         let mailbox = Arc::new(Mailbox {
             slots: Mutex::new(Slots {
-                waiting: [None, None, None],
+                waiting: Default::default(),
                 running: None,
                 shutdown: false,
             }),
@@ -174,7 +190,7 @@ impl Drop for RenderWorker {
             if let Some(running) = &slots.running {
                 running.cancel.cancel();
             }
-            slots.waiting = [None, None, None];
+            slots.waiting = Default::default();
         }
         self.mailbox.ready.notify_all();
         if let Some(thread) = self.thread.take()
@@ -186,10 +202,13 @@ impl Drop for RenderWorker {
 }
 
 fn serve(mailbox: &Mailbox, deliver: &impl Fn(Delivery)) {
-    let mut renderers = [Renderer::new(), Renderer::new(), Renderer::new()];
+    let mut renderers: [Renderer; Purpose::ALL.len()] = std::array::from_fn(|_| Renderer::new());
     while let Some((order, cancel)) = next(mailbox) {
         let renderer = &mut renderers[order.purpose.index()];
-        let outcome = render(renderer, &order, &cancel);
+        let outcome = match order.work {
+            Work::Render(quality) => render(renderer, &order, quality, &cancel),
+            Work::Alpha(mask) => alpha(&order, mask),
+        };
         if matches!(outcome, Outcome::Failed(_)) {
             // A panic may have left the caches half-written.
             *renderer = Renderer::new();
@@ -201,13 +220,14 @@ fn serve(mailbox: &Mailbox, deliver: &impl Fn(Delivery)) {
             generation: order.generation,
             version: order.version,
             view: order.view,
-            quality: order.quality,
+            work: order.work,
             outcome,
         });
     }
 }
 
-/// Wait for the next order, canvas first; `None` at shutdown.
+/// Wait for the next order, in the order of [`Purpose::ALL`]; `None` at
+/// shutdown.
 fn next(mailbox: &Mailbox) -> Option<(Order, CancelToken)> {
     let mut slots = lock(&mailbox.slots);
     loop {
@@ -232,12 +252,17 @@ fn next(mailbox: &Mailbox) -> Option<(Order, CancelToken)> {
     }
 }
 
-fn render(renderer: &mut Renderer, order: &Order, cancel: &CancelToken) -> Outcome {
+fn render(
+    renderer: &mut Renderer,
+    order: &Order,
+    quality: Quality,
+    cancel: &CancelToken,
+) -> Outcome {
     let request = RenderRequest {
         source: &order.source,
         settings: &order.settings,
         view: order.view,
-        quality: order.quality,
+        quality,
         space: RgbSpace::Srgb,
     };
     let start = Instant::now();
@@ -249,16 +274,28 @@ fn render(renderer: &mut Renderer, order: &Order, cancel: &CancelToken) -> Outco
             image,
         })),
         Ok(None) => Outcome::Cancelled,
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|text| (*text).to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "no further detail".to_string());
-            log::error!("a develop render panicked: {message}");
-            Outcome::Failed(message)
-        }
+        Err(payload) => failed(&*payload),
     }
+}
+
+/// The coverage of mask `mask` over the order's view.
+fn alpha(order: &Order, mask: usize) -> Outcome {
+    let coverage = || photo_develop::mask_alpha(&order.source, &order.settings, mask, order.view);
+    match catch_unwind(AssertUnwindSafe(coverage)) {
+        Ok(plane) => Outcome::Alpha(plane),
+        Err(payload) => failed(&*payload),
+    }
+}
+
+/// A panic's message, logged.
+fn failed(payload: &(dyn std::any::Any + Send)) -> Outcome {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no further detail".to_string());
+    log::error!("a develop render panicked: {message}");
+    Outcome::Failed(message)
 }
 
 #[cfg(test)]
@@ -291,7 +328,7 @@ mod tests {
             settings,
             version: id,
             view,
-            quality: Quality::Draft,
+            work: Work::Render(Quality::Draft),
         }
     }
 

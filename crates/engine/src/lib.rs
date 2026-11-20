@@ -39,8 +39,10 @@
 //! [`DevelopSession`]: explicit load states, a dedicated render worker that
 //! always works on the newest request, draft renders while a control moves
 //! and one undoable commit when it is let go ([`Engine::adjust`],
-//! [`Engine::commit_edit`]). Presets, snapshots, history, copy and paste,
-//! sync, reset and Quick Develop write many photos as one undo entry.
+//! [`Engine::commit_edit`]). The same worker computes the red mask overlay
+//! ([`Engine::show_mask_overlay`]), which follows a mask's shape as it is
+//! dragged. Presets, snapshots, history, copy and paste, sync, reset and
+//! Quick Develop write many photos as one undo entry.
 //!
 //! # Export
 //!
@@ -77,6 +79,7 @@ mod selection;
 mod sidecars;
 mod sources;
 mod stamp;
+mod still;
 mod tasks;
 mod toasts;
 mod undo;
@@ -85,7 +88,8 @@ pub use browse::SourceCounts;
 pub use clipboard::SettingsClipboard;
 pub use commands::Target;
 pub use develop::{
-    BeforeSettings, CanvasView, DevelopFrame, DevelopLoad, DevelopSession, RenderCounts,
+    BeforeSettings, CanvasView, DevelopFrame, DevelopLoad, DevelopSession, MaskOverlay,
+    RenderCounts,
 };
 pub use engine::{Engine, EngineConfig, POLL_LIMIT, PendingWork};
 pub use error::EngineError;
@@ -98,6 +102,7 @@ pub use keywording::KeywordUse;
 pub use looks::{BUILT_IN_GROUP, BuiltInPreset, PresetInfo, PresetKey};
 pub use previews::{LoadState, Preview, PreviewOrigin, PreviewSize, PreviewState};
 pub use selection::{Movement, Selection};
+pub use still::StillSettings;
 pub use tasks::{TaskId, TaskInfo, TaskKind, TaskState};
 pub use toasts::{Toast, ToastKind};
 
@@ -113,4 +118,4 @@ pub use photo_export::{
     Anchor, BitDepth, ExistingFile, ExportOutcome, ExportSettings, ExtensionCase, Folder, Format,
     Location, MetadataMode, MetadataSettings, Naming, OutputSharpening, Resize, Sizing, Watermark,
 };
-pub use photo_imaging::{Geometry, Histogram, View};
+pub use photo_imaging::{Geometry, Histogram, Plane, View};

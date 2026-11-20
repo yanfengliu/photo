@@ -1,9 +1,10 @@
-//! The Develop tools: the before view, auto tone, auto white balance and
-//! the white-balance picker.
+//! The Develop tools: the before view, auto tone, auto white balance, the
+//! white-balance picker, the mask overlay and the healing source.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use photo_core::develop::{Adj, Orientation, WbPreset};
+use photo_core::develop::{Adj, Mask, MaskShape, Orientation, WbPreset};
 use photo_core::geom::Point;
 use photo_core::meta::PhotoId;
 use photo_engine::{BeforeSettings, CanvasView, DevelopFrame, EngineError};
@@ -319,4 +320,88 @@ fn the_tools_need_a_decoded_photo() {
     ));
     studio.settle();
     studio.engine.auto_white_balance().unwrap();
+}
+
+#[test]
+fn the_mask_overlay_is_the_masks_coverage_of_the_view_and_follows_a_drag() {
+    let (dir, mut studio, _photo) = studio_with_png();
+    let gradient = |end: f32| MaskShape::Linear {
+        start: Point::new(0.5, 0.2),
+        end: Point::new(0.5, end),
+    };
+    let mut settings = studio.engine.develop().unwrap().settings().clone();
+    settings.masks.push(Mask::from_shape(gradient(0.8), 1));
+    studio.engine.apply_settings(settings).unwrap();
+    assert!(matches!(
+        studio.engine.show_mask_overlay(Some(1)),
+        Err(EngineError::NoSuchMask(1))
+    ));
+    studio.engine.show_mask_overlay(Some(0)).unwrap();
+    studio.settle();
+    let decoded = photo_decode::decode(dir.path().join("scene.png")).unwrap();
+    let source = photo_develop::Source::new(decoded.image);
+    let current = |studio: &Studio| {
+        let session = studio.engine.develop().unwrap();
+        let overlay = session.mask_overlay().unwrap();
+        assert_eq!(overlay.mask(), 0);
+        assert_eq!(
+            overlay.version(),
+            session.version(),
+            "for the settings shown"
+        );
+        assert_eq!(Some(overlay.view()), session.view(), "for the canvas view");
+        let expected =
+            photo_develop::mask_alpha(&source, session.settings(), 0, overlay.view()).unwrap();
+        assert_eq!(overlay.alpha().as_slice(), expected.as_slice());
+        Arc::clone(overlay.alpha())
+    };
+    let first = current(&studio);
+
+    let mut dragged = studio.engine.develop().unwrap().settings().clone();
+    dragged.masks[0].components[0].shape = gradient(0.4);
+    studio.engine.edit_settings(dragged).unwrap();
+    studio.settle();
+    assert!(studio.engine.develop().unwrap().is_editing(), "mid-drag");
+    let moved = current(&studio);
+    assert_ne!(first.as_slice(), moved.as_slice(), "it followed the drag");
+
+    studio.engine.adjust(Adj::Exposure, 0.5).unwrap();
+    studio.settle();
+    let session = studio.engine.develop().unwrap();
+    let kept = session.mask_overlay().unwrap();
+    assert!(
+        Arc::ptr_eq(kept.alpha(), &moved),
+        "not computed again for exposure"
+    );
+    studio.engine.show_mask_overlay(None).unwrap();
+    assert!(studio.engine.develop().unwrap().mask_overlay().is_none());
+}
+
+#[test]
+fn a_healing_spot_takes_its_patch_from_nearby_inside_the_photo_and_off_an_edge() {
+    let idle = Studio::new();
+    assert!(matches!(
+        idle.engine.suggest_heal_source(Point::new(0.5, 0.5), 0.03),
+        Err(EngineError::NoDevelopSession)
+    ));
+    let (_dir, studio, _photo) = studio_with_png();
+    let (width, height) = (WIDTH as f32, HEIGHT as f32);
+    let radius = 0.03;
+    let r = radius * width;
+    let horizon = 0.56 * height;
+    // In the sky two radii above the horizon, where half the candidates
+    // would straddle the bright sky and the dark ground.
+    let target = Point::new(0.3, (horizon - 2.0 * r) / height);
+    let start = Instant::now();
+    let source = studio.engine.suggest_heal_source(target, radius).unwrap();
+    let took = start.elapsed();
+    let (x, y) = (source.x * width, source.y * height);
+    assert!(
+        x >= r && x <= width - r && y >= r && y <= height - r,
+        "inside: {source:?}"
+    );
+    let apart = (x - target.x * width).hypot(y - target.y * height);
+    assert!(apart >= 2.0 * r, "clear of the target: {apart}");
+    assert!(y + 1.25 * r < horizon, "off the horizon: {source:?}");
+    assert!(took < Duration::from_millis(100), "cheap: {took:?}");
 }

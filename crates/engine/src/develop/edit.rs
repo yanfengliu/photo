@@ -10,7 +10,7 @@ use photo_core::develop::{
 use photo_develop::Quality;
 
 use super::worker::Purpose;
-use super::{DevelopSession, READ_ONLY_CATALOG, tools};
+use super::{DevelopSession, READ_ONLY_CATALOG, overlay, tools};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::undo::Command;
@@ -147,8 +147,14 @@ impl Engine {
             return;
         }
         let moved = tools::geometry_differs(&session.settings, &settings);
+        let overlay_moves = session
+            .overlay_mask
+            .is_some_and(|mask| overlay::overlay_moves(&session.settings, &settings, mask));
         session.settings = settings;
         session.version += 1;
+        if overlay_moves {
+            self.render_session(Purpose::Overlay, Quality::Draft);
+        }
         self.render_session(Purpose::Main, Quality::Draft);
         if moved {
             self.render_session(Purpose::Before, Quality::Draft);

@@ -16,4 +16,5 @@ mod previews;
 mod protected;
 mod selection;
 mod sidecars;
+mod still;
 mod tools;
