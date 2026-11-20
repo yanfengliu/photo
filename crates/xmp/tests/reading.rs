@@ -257,14 +257,26 @@ fn as_shot_white_balance_ignores_the_numbers_beside_it() {
 #[test]
 fn everything_read_is_sanitised_for_the_kind_of_file() {
     let xml = packet(
-        r#"crs:Exposure2012="+40" crs:Clarity2012="-900" crs:SharpenRadius="9" crs:Sharpness="inf" crs:WhiteBalance="Custom" crs:IncrementalTemperature="5600""#,
+        r#"crs:Exposure2012="+40" crs:Clarity2012="-900" crs:SharpenRadius="9" crs:WhiteBalance="Custom" crs:IncrementalTemperature="5600""#,
     );
     let develop = parse(&xml, RASTER).unwrap().develop.unwrap();
     assert_eq!(develop.tone.exposure, 5.0);
     assert_eq!(develop.presence.clarity, -100.0);
     assert_eq!(develop.detail.sharpening.radius, 3.0);
-    assert_eq!(develop.detail.sharpening.amount, 0.0);
     assert_eq!(develop.white_balance, WhiteBalance::default());
+}
+
+#[test]
+fn numbers_that_are_not_finite_count_as_absent() {
+    // Sanitising would hide such a number in the value read; that the
+    // sidecar reads as holding no develop settings at all shows that the
+    // number was never taken.
+    for value in ["inf", "-inf", "NaN", "1e999", "infinity"] {
+        let xml = packet(&format!(
+            r#"crs:Sharpness="{value}" crs:Exposure2012="{value}""#
+        ));
+        assert_eq!(parse(&xml, RASTER).unwrap().develop, None, "{value}");
+    }
 }
 
 #[test]

@@ -205,6 +205,95 @@ fn a_path_that_cannot_be_read_as_a_file_is_an_io_error() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn replacing_a_sidecar_keeps_its_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("IMG_0001.xmp");
+    write_sidecar(&path, &sample(), RAW).unwrap();
+    for mode in [0o640, 0o600, 0o664] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        let changed = XmpData {
+            rating: Rating::new((mode % 5) as u8),
+            ..sample()
+        };
+        write_sidecar(&path, &changed, RAW).unwrap();
+        assert_eq!(read_sidecar(&path, RAW).unwrap(), Some(changed));
+        let kept = fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(kept, mode, "{mode:o} became {kept:o}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sidecar_reached_through_a_symbolic_link_is_written_where_the_link_leads() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let folder = directory.path().join("real");
+    fs::create_dir(&folder).unwrap();
+    let real = folder.join("IMG_0001.xmp");
+    write_sidecar(&real, &sample(), RAW).unwrap();
+    let link = directory.path().join("IMG_0001.xmp");
+    symlink(Path::new("real").join("IMG_0001.xmp"), &link).unwrap();
+    let further = directory.path().join("IMG_0001.link.xmp");
+    symlink(&link, &further).unwrap();
+
+    let changed = XmpData {
+        rating: Rating::new(1),
+        ..sample()
+    };
+    for path in [&link, &further] {
+        write_sidecar(path, &changed, RAW).unwrap();
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+    }
+    assert_eq!(read_sidecar(&real, RAW).unwrap(), Some(changed.clone()));
+    assert_eq!(entries(&folder), [real]);
+    assert_eq!(entries(directory.path()), [further, link, folder.clone()]);
+
+    // A link to a sidecar not written yet leads to where it will be.
+    let ahead = directory.path().join("IMG_0002.xmp");
+    symlink(Path::new("real").join("IMG_0002.xmp"), &ahead).unwrap();
+    write_sidecar(&ahead, &changed, RAW).unwrap();
+    assert!(
+        fs::symlink_metadata(&ahead)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let written = read_sidecar(&folder.join("IMG_0002.xmp"), RAW).unwrap();
+    assert_eq!(written, Some(changed));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_sidecar_is_refused_and_left_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("IMG_0001.xmp");
+    write_sidecar(&path, &sample(), RAW).unwrap();
+    let before = fs::read(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+    // Saying what it already says takes no write, so that is no error.
+    write_sidecar(&path, &sample(), RAW).unwrap();
+    let changed = XmpData {
+        rating: Rating::new(1),
+        ..sample()
+    };
+    let error = write_sidecar(&path, &changed, RAW).unwrap_err();
+    let denied = matches!(
+        &error,
+        XmpError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied
+    );
+    assert!(denied, "{error:?}");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(entries(directory.path()), [path]);
+}
+
 #[test]
 fn a_write_into_a_missing_folder_fails_without_creating_anything() {
     let directory = tempfile::tempdir().unwrap();
@@ -229,7 +318,9 @@ fn a_write_that_cannot_complete_leaves_the_previous_sidecar_intact() {
     let locked = fs::Permissions::from_mode(0o555);
     let unlocked = fs::Permissions::from_mode(0o755);
     fs::set_permissions(directory.path(), locked).unwrap();
-    let can_still_create = fs::write(directory.path().join("probe"), b"").is_ok();
+    let probe = directory.path().join("probe");
+    let permissions_bind = fs::write(&probe, b"").is_err();
+    let _ = fs::remove_file(&probe);
     let changed = XmpData {
         rating: Rating::new(1),
         ..sample()
@@ -237,12 +328,14 @@ fn a_write_that_cannot_complete_leaves_the_previous_sidecar_intact() {
     let result = write_sidecar(&path, &changed, RAW);
     fs::set_permissions(directory.path(), unlocked).unwrap();
 
-    if can_still_create {
-        // Running with privileges that ignore directory permissions: the
-        // failure cannot be provoked this way.
-        return;
+    if permissions_bind {
+        assert!(matches!(result, Err(XmpError::Io { .. })), "{result:?}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    } else {
+        // With privileges that ignore the folder's permissions nothing
+        // stops the write, so it has to have been made in full.
+        result.unwrap();
+        assert_eq!(read_sidecar(&path, RAW).unwrap(), Some(changed));
     }
-    assert!(matches!(result, Err(XmpError::Io { .. })), "{result:?}");
-    assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(entries(directory.path()), [path]);
 }

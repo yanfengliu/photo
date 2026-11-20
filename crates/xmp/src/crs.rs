@@ -130,6 +130,20 @@ const WHITE_BALANCE_NAMES: [(WbPreset, &str); 9] = [
 const WHITE_BALANCE: &str = "WhiteBalance";
 const GRAYSCALE: &str = "ConvertToGrayscale";
 
+/// The process version declared beside the properties written here. The
+/// 2012 names they carry (`Exposure2012` and the rest) are the ones Camera
+/// Raw reads from process version 6.7 onwards; 11.0 is the one beside them
+/// in both test fixtures written in the form Adobe software writes. Without
+/// a process version, Adobe software may take the settings for an older
+/// process, which reads other names.
+const PROCESS_VERSION: &str = "11.0";
+/// The Camera Raw version declared with [`PROCESS_VERSION`], as in the same
+/// fixtures.
+const CAMERA_RAW_VERSION: &str = "15.4";
+/// The first process version whose properties carry the 2012 names. One
+/// from there on already agrees with the names written here, and is kept.
+const FIRST_2012_PROCESS: f64 = 6.7;
+
 /// Every adjustment the table maps, with its property name.
 fn mapped() -> impl Iterator<Item = (Adj, Cow<'static, str>)> {
     let scalars = SCALARS
@@ -280,10 +294,35 @@ pub(crate) fn read(packet: &Packet, image: ImageInfo) -> Option<DevelopSettings>
     found.then_some(settings)
 }
 
+/// Writes the properties that say what the settings are: the Camera Raw and
+/// process versions, unless the packet declares a process whose properties
+/// already carry the 2012 names, and `crs:HasSettings`.
+fn write_header(packet: &mut Packet, crs: &Values) {
+    let process = crs
+        .get("ProcessVersion")
+        .and_then(|text| parse_number::<f64>(text));
+    if process.is_none_or(|process| process < FIRST_2012_PROCESS) {
+        // An older Camera Raw cannot have written the newer process.
+        packet.set_text(CRS.property("Version"), CAMERA_RAW_VERSION, Form::Attribute);
+        let property = CRS.property("ProcessVersion");
+        packet.set_text(property, PROCESS_VERSION, Form::Attribute);
+    } else if !crs.contains_key("Version") {
+        packet.set_text(CRS.property("Version"), CAMERA_RAW_VERSION, Form::Attribute);
+    }
+    if crs.get("HasSettings").and_then(|text| parse_bool(text)) != Some(true) {
+        packet.set_text(
+            CRS.property("HasSettings"),
+            format_bool(true),
+            Form::Attribute,
+        );
+    }
+}
+
 /// Writes every mapped setting, touching only the properties whose value
 /// differs from what the packet already says.
 pub(crate) fn write(packet: &mut Packet, settings: &DevelopSettings, image: ImageInfo) {
     let crs = packet.plain_values(CRS);
+    write_header(packet, &crs);
     for (adj, name) in mapped() {
         put_number(
             packet,

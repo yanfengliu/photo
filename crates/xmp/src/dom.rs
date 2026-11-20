@@ -101,6 +101,11 @@ impl Element {
         &self.name
     }
 
+    /// Whether this crate made the element, rather than read it.
+    pub(crate) fn is_built(&self) -> bool {
+        self.built
+    }
+
     pub(crate) fn attributes(&self) -> &[Attribute] {
         &self.attributes
     }
@@ -132,8 +137,18 @@ impl Element {
         }
     }
 
-    /// Adds an attribute at `index` (or at the end, if that is past it).
+    /// Adds an attribute at `index` (or at the end, if that is past it). An
+    /// attribute of that name already there is given the value where it is
+    /// instead: an element never holds one name twice.
     pub(crate) fn insert_attribute(&mut self, index: usize, name: &str, value: &str) {
+        if let Some(existing) = self
+            .attributes
+            .iter()
+            .position(|attribute| attribute.name == name)
+        {
+            self.set_attribute_at(existing, value);
+            return;
+        }
         let attribute = Attribute {
             name: name.to_owned(),
             value: value.to_owned(),
@@ -210,6 +225,13 @@ impl Element {
     pub(crate) fn set_content(&mut self, child: Element) {
         self.children.clear();
         self.children.push(Node::Element(child));
+    }
+
+    /// Puts a child element at `index` among the children (at the end, if
+    /// that is past them).
+    pub(crate) fn insert_element(&mut self, index: usize, child: Element) {
+        let index = index.min(self.children.len());
+        self.children.insert(index, Node::Element(child));
     }
 
     /// Adds a child element after the existing ones (before the white space

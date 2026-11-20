@@ -7,22 +7,21 @@
 
 use std::collections::BTreeMap;
 
-use super::read::{container_in, default_position, list_items};
 use super::scope::Scope;
 use super::value::{Holder, clear_for_value};
-use super::{Container, DEFAULT_LANGUAGE, Form, Item, LANGUAGE, Namespace, Packet, Property, RDF};
+use super::{Container, Form, Item, LANGUAGE, Namespace, Packet, Property, RDF};
 use crate::dom::{Element, Node};
 
 /// A place a property was found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Location {
+pub(super) struct Location {
     /// Position of the description among the children of `rdf:RDF`.
-    description: usize,
-    site: Site,
+    pub(super) description: usize,
+    pub(super) site: Site,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Site {
+pub(super) enum Site {
     /// Position among the description's attributes.
     Attribute(usize),
     /// Position among the description's children.
@@ -129,22 +128,6 @@ impl Packet {
         }
     }
 
-    /// Sets the text [`Self::alternative`] reads, keeping the other languages
-    /// and any qualifiers of the item.
-    pub(crate) fn set_alternative(&mut self, property: Property<'_>, text: &str) {
-        if let Some((path, holder)) = self.default_item(property)
-            && let Some(item) = self.element_at_mut(&path)
-        {
-            holder.set_text(item, text);
-            return;
-        }
-        let item = Item {
-            language: Some(DEFAULT_LANGUAGE.to_owned()),
-            text: text.to_owned(),
-        };
-        self.set_list(property, Container::Alt, &[item]);
-    }
-
     /// Removes a property wherever it appears.
     pub(crate) fn remove(&mut self, property: Property<'_>) {
         let locations = self.locate(property);
@@ -153,7 +136,7 @@ impl Packet {
 
     /// Every place a property appears, in document order (within one
     /// description, attributes before child elements).
-    fn locate(&self, property: Property<'_>) -> Vec<Location> {
+    pub(super) fn locate(&self, property: Property<'_>) -> Vec<Location> {
         let Property { namespace, name } = property;
         let mut locations = Vec::new();
         self.each_description(|description, element, scope| {
@@ -208,54 +191,9 @@ impl Packet {
         holder
     }
 
-    /// The way to the item [`Self::alternative`] reads, when the property is
-    /// written as a list, as positions among children from those of
-    /// `rdf:RDF`; and how that item keeps its value.
-    fn default_item(&self, property: Property<'_>) -> Option<(Vec<usize>, Holder)> {
-        let first = *self.locate(property).first()?;
-        let Site::Child(child) = first.site else {
-            return None;
-        };
-        let mut found = None;
-        self.each_description(|description, element, scope| {
-            if description != first.description {
-                return;
-            }
-            let Some(Node::Element(property)) = element.children.get(child) else {
-                return;
-            };
-            let scope = scope.enter(property);
-            let Some(inner) = Holder::of(property, &scope).content_path() else {
-                return;
-            };
-            let item = at_path(property, &scope, &inner, |holder, scope| {
-                let (list_index, list) = container_in(holder, scope)?;
-                let (positions, items): (Vec<usize>, Vec<Item>) =
-                    list_items(list, scope).into_iter().unzip();
-                let item_index = *positions.get(default_position(&items)?)?;
-                let Some(Node::Element(item)) = list.children.get(item_index) else {
-                    return None;
-                };
-                let list_scope = scope.enter(list);
-                Some((
-                    list_index,
-                    item_index,
-                    Holder::of(item, &list_scope.enter(item)),
-                ))
-            });
-            found = item.flatten().map(|(list_index, item_index, holder)| {
-                let mut path = vec![description, child];
-                path.extend(&inner);
-                path.extend([list_index, item_index]);
-                (path, holder)
-            });
-        });
-        found
-    }
-
     /// The element `path` leads to, as positions among children from those
     /// of `rdf:RDF`.
-    fn element_at_mut(&mut self, path: &[usize]) -> Option<&mut Element> {
+    pub(super) fn element_at_mut(&mut self, path: &[usize]) -> Option<&mut Element> {
         let (first, rest) = path.split_first()?;
         descend_mut(self.rdf.element_mut(*first)?, rest)
     }
@@ -366,7 +304,7 @@ fn unused_prefix(scope: &Scope<'_>, namespace: Namespace) -> String {
 /// What `visit` makes of the element `path` leads to from `element`, and of
 /// the scope in force there; `None` when the path leads to no element.
 /// `scope` is `element`'s own.
-fn at_path<T>(
+pub(super) fn at_path<T>(
     element: &Element,
     scope: &Scope<'_>,
     path: &[usize],
