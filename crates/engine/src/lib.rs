@@ -2,4 +2,4 @@
 //! sight. Owns the open catalog, background jobs, preview rendering, undo and
 //! the selection, and exposes them as plain method calls.
 //!
-//! See `docs/threads/current/lightroom-restart/DESIGN.md`.
+//! See `docs/work/12_lightroom-workflow-restart/design.md`.
