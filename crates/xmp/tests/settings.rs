@@ -49,7 +49,7 @@ fn settings_written_here_carry_their_format() {
     let marked = format!(r#"photo:SettingsFormat="{SETTINGS_FORMAT}""#);
     assert!(xml.contains(&marked), "{xml}");
     let read = parse(&xml, RAW).unwrap();
-    assert_eq!(read.newer_settings_format, None);
+    assert_eq!(read.unreadable_settings_format, None);
     assert!(read.develop.is_some());
 }
 
@@ -61,7 +61,7 @@ fn settings_of_a_newer_format_are_reported_rather_than_read() {
     // Camera Raw properties in their place, which a later write would make
     // the photo's settings for good.
     assert_eq!(read.develop, None);
-    assert_eq!(read.newer_settings_format, Some(format));
+    assert_eq!(read.unreadable_settings_format, Some(format));
     assert_eq!(read.rating, Rating::new(2));
 }
 
@@ -74,7 +74,7 @@ fn develop_settings_are_not_written_over_settings_of_a_newer_format() {
     };
     let refused = to_string(&data, RAW, Some(&xml));
     assert!(
-        matches!(refused, Err(XmpError::NewerSettings { format: found }) if found == format),
+        matches!(refused, Err(XmpError::UnreadableSettings { format: found }) if found == format),
         "{refused:?}"
     );
 
@@ -82,7 +82,7 @@ fn develop_settings_are_not_written_over_settings_of_a_newer_format() {
     let path = folder.path().join("IMG_0001.xmp");
     fs::write(&path, &xml).unwrap();
     let refused = write_sidecar(&path, &data, RAW);
-    assert!(matches!(refused, Err(XmpError::NewerSettings { .. })));
+    assert!(matches!(refused, Err(XmpError::UnreadableSettings { .. })));
     assert_eq!(fs::read_to_string(&path).unwrap(), xml);
     let error = refused.unwrap_err().to_string();
     assert!(error.contains(&format.to_string()), "{error}");
@@ -110,6 +110,62 @@ fn everything_else_is_still_written_beside_settings_of_a_newer_format() {
 }
 
 #[test]
+fn private_settings_this_build_cannot_read_are_kept_whatever_their_form() {
+    let current = format!(r#" photo:SettingsFormat="{SETTINGS_FORMAT}""#);
+    for (claimed, settings, format) in [
+        // Cut short, in this build's own format.
+        (
+            current.as_str(),
+            r#"<photo:Settings>{"tone":{"exposure":</photo:Settings>"#,
+            SETTINGS_FORMAT,
+        ),
+        // A value this build has no name for, in no stated format.
+        (
+            "",
+            r#"<photo:Settings>{"treatment":"sepia"}</photo:Settings>"#,
+            1,
+        ),
+        // Empty, a list, a structure: no JSON at all.
+        ("", "<photo:Settings></photo:Settings>", 1),
+        (
+            "",
+            "<photo:Settings><rdf:Bag><rdf:li>{}</rdf:li></rdf:Bag></photo:Settings>",
+            1,
+        ),
+        (
+            "",
+            r#"<photo:Settings rdf:parseType="Resource"><photo:tone>1</photo:tone></photo:Settings>"#,
+            1,
+        ),
+    ] {
+        let attributes = format!(r#"xmp:Rating="2" crs:Exposure2012="+1.00"{claimed}"#);
+        let xml = packet(&attributes, settings);
+        let read = parse(&xml, RAW).unwrap();
+        assert_eq!(read.develop, None, "{settings}");
+        assert_eq!(read.unreadable_settings_format, Some(format), "{settings}");
+
+        // Develop settings are refused, and nothing is written ...
+        let data = XmpData {
+            rating: Rating::new(4),
+            ..develop(DevelopSettings::default_for(FileKind::Raw))
+        };
+        let refused = to_string(&data, RAW, Some(&xml));
+        assert!(
+            matches!(refused, Err(XmpError::UnreadableSettings { format: found }) if found == format),
+            "{settings}: {refused:?}"
+        );
+        // ... while everything else is, beside the settings as they were.
+        let rated = XmpData {
+            rating: Rating::new(4),
+            ..read
+        };
+        let updated = to_string(&rated, RAW, Some(&xml)).unwrap();
+        assert!(updated.contains(settings), "{updated}");
+        assert_eq!(parse(&updated, RAW).unwrap(), rated);
+    }
+}
+
+#[test]
 fn settings_of_this_format_or_an_earlier_one_are_read() {
     let settings = r#"<photo:Settings>{"tone":{"exposure":1.5}}</photo:Settings>"#;
     let current = format!(r#"photo:SettingsFormat="{SETTINGS_FORMAT}""#);
@@ -123,11 +179,11 @@ fn settings_of_this_format_or_an_earlier_one_are_read() {
         let read = parse(&packet(attributes, settings), RAW).unwrap();
         let exposure = read.develop.map(|develop| develop.tone.exposure);
         assert_eq!(exposure, Some(1.5), "{attributes}");
-        assert_eq!(read.newer_settings_format, None, "{attributes}");
+        assert_eq!(read.unreadable_settings_format, None, "{attributes}");
     }
     let far = r#"photo:SettingsFormat="99999999999999999999""#;
     let read = parse(&packet(far, settings), RAW).unwrap();
-    assert_eq!(read.newer_settings_format, Some(u32::MAX));
+    assert_eq!(read.unreadable_settings_format, Some(u32::MAX));
 }
 
 #[test]
@@ -222,7 +278,7 @@ fn a_sidecar_file_with_newer_settings_is_read_and_left_alone() {
     let path = folder.path().join("IMG_0001.xmp");
     fs::write(&path, &xml).unwrap();
     let read = read_sidecar(&path, RAW).unwrap().unwrap();
-    assert_eq!(read.newer_settings_format, Some(format));
+    assert_eq!(read.unreadable_settings_format, Some(format));
     write_sidecar(&path, &read, RAW).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), xml);
 }

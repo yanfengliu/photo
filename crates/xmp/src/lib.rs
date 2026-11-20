@@ -44,11 +44,12 @@
 //! promise the same picture. Local corrections, retouching and lens
 //! profiles are no part of it: they are not read and never written.
 //!
-//! On reading, `photo:Settings` wins whenever it is present and parses;
-//! otherwise the Camera Raw properties are laid over the starting settings
+//! On reading, `photo:Settings` wins whenever it is present; a sidecar
+//! without it has the Camera Raw properties laid over the starting settings
 //! for the kind of file. `photo:SettingsFormat` gives the format of the
-//! private settings, and settings of a newer format than this build's are
-//! neither read nor overwritten (see [`XmpData::newer_settings_format`]).
+//! private settings. Private settings this build cannot read, of a newer
+//! format or not readable at all, are neither read nor overwritten (see
+//! [`XmpData::unreadable_settings_format`]).
 //!
 //! - The Camera Raw properties come with `crs:ProcessVersion` 11.0 and
 //!   `crs:Version` 15.4, the pair beside the 2012 names in the test
@@ -203,7 +204,7 @@ impl ImageInfo {
 ///
 /// Reading a sidecar this crate wrote gives back the data it was written
 /// from, with the exceptions noted on [`Self::capture_time`] and
-/// [`Self::newer_settings_format`]. Empty strings and empty lists mean
+/// [`Self::unreadable_settings_format`]. Empty strings and empty lists mean
 /// "absent": they are what a missing property reads as, and writing them
 /// removes the property (or, for text held in other languages too, empties
 /// it; see [`Self::title`]).
@@ -275,29 +276,34 @@ pub struct XmpData {
     /// Written twice: completely, as JSON in `photo:Settings`, and as the
     /// Camera Raw properties other applications read (everything but the
     /// profile, the crop tool's aspect lock, healing spots and masks). On
-    /// reading, `photo:Settings` is authoritative whenever it is present and
-    /// parses, even if the Camera Raw properties beside it were changed
-    /// since; otherwise the Camera Raw properties are laid over the starting
-    /// settings for the kind of file.
+    /// reading, `photo:Settings` is authoritative whenever it is present,
+    /// even if the Camera Raw properties beside it were changed since; only
+    /// a sidecar without it is read through the Camera Raw properties, laid
+    /// over the starting settings for the kind of file.
     ///
     /// `photo:SettingsFormat` beside the JSON gives its format,
     /// [`SETTINGS_FORMAT`] when this build wrote it; without it the format
-    /// is the first. Settings of a newer format are not read: see
-    /// [`Self::newer_settings_format`]. Settings holding a number that is not
-    /// finite are refused on writing, since JSON cannot hold one.
+    /// is the first. Private settings this build cannot read are not read
+    /// at all: see [`Self::unreadable_settings_format`]. Settings holding a
+    /// number that is not finite are refused on writing, since JSON cannot
+    /// hold one.
     pub develop: Option<DevelopSettings>,
-    /// The format of develop settings this build cannot read, written by a
-    /// newer one; `None` otherwise.
+    /// Set when the sidecar holds private develop settings (`photo:Settings`)
+    /// this build cannot read: the format they claim, which is
+    /// `photo:SettingsFormat`, or the first format when that does not say.
+    /// So it is for settings of a newer format than [`SETTINGS_FORMAT`], and
+    /// for settings that are not this build's JSON or not text at all,
+    /// whatever format they claim. `None` otherwise.
     ///
     /// When it is set, [`Self::develop`] is `None`: the settings are not
     /// read, because this build would misread them, nor replaced by the
     /// Camera Raw properties beside them, because the next write would then
     /// make those the photo's settings for good. Writing develop settings to
-    /// such a sidecar fails with [`XmpError::NewerSettings`] and writes
-    /// nothing; writing with `develop` left `None` updates everything else
-    /// and leaves the settings as they are. This field is only ever read: it
-    /// plays no part in writing.
-    pub newer_settings_format: Option<u32>,
+    /// such a sidecar fails with [`XmpError::UnreadableSettings`] and writes
+    /// nothing, until the property is removed; writing with `develop` left
+    /// `None` updates everything else and leaves the settings as they are.
+    /// This field is only ever read: it plays no part in writing.
+    pub unreadable_settings_format: Option<u32>,
 }
 
 /// Why a sidecar could not be read or written.
@@ -333,15 +339,17 @@ pub enum XmpError {
     /// [`MAX_SIDECAR_BYTES`]. Such a sidecar is neither read nor written.
     #[error("the sidecar is larger than the {MAX_SIDECAR_BYTES} bytes accepted")]
     TooLarge,
-    /// The sidecar holds develop settings in a format newer than this build
-    /// understands, and writing develop settings would replace them; nothing
-    /// was written. See [`XmpData::newer_settings_format`].
+    /// The sidecar holds private develop settings this build cannot read, of
+    /// a newer format or not readable at all, and writing develop settings
+    /// would replace them; nothing was written. See
+    /// [`XmpData::unreadable_settings_format`].
     #[error(
-        "the sidecar holds develop settings in format {format}, newer than this build's {}",
+        "the sidecar holds develop settings this build cannot read (format {format}; this build \
+         reads up to {})",
         SETTINGS_FORMAT
     )]
-    NewerSettings {
-        /// The format the sidecar's settings are in.
+    UnreadableSettings {
+        /// The format the sidecar's settings claim.
         format: u32,
     },
     /// The develop settings hold a number that is not finite (NaN or an
@@ -408,9 +416,9 @@ pub fn parse(xml: &str, image: ImageInfo) -> Result<XmpData, XmpError> {
 ///
 /// Either way, an `existing` or a result longer than [`MAX_SIDECAR_BYTES`]
 /// is refused with [`XmpError::TooLarge`]. Develop settings are refused, and
-/// nothing written, when `existing` holds settings of a newer format
-/// ([`XmpError::NewerSettings`]) or when they hold a number that is not
-/// finite ([`XmpError::NotFinite`]).
+/// nothing written, when `existing` holds private settings this build
+/// cannot read ([`XmpError::UnreadableSettings`]) or when they hold a number
+/// that is not finite ([`XmpError::NotFinite`]).
 pub fn to_string(
     data: &XmpData,
     image: ImageInfo,

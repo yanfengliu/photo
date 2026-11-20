@@ -3,12 +3,12 @@
 
 use photo_core::develop::{
     Adj, Crop, CropConstraint, CropRect, CurvePoint, DevelopSettings, Mask, MaskShape, Orientation,
-    PointCurve, Profile, Spot, SpotMode, Treatment, WbPreset,
+    PointCurve, Profile, SETTINGS_FORMAT, Spot, SpotMode, Treatment, WbPreset,
 };
 use photo_core::geom::Point;
 use photo_core::meta::{ColorLabel, FileKind, Flag, Rating};
 use photo_core::time::DateTime;
-use photo_xmp::{ImageInfo, XmpData, parse, to_string};
+use photo_xmp::{ImageInfo, XmpData, XmpError, parse, to_string};
 
 const KINDS: [FileKind; 2] = [FileKind::Raw, FileKind::Raster];
 const RAW: ImageInfo = ImageInfo::new(FileKind::Raw);
@@ -160,15 +160,21 @@ fn the_private_form_wins_over_the_camera_raw_mapping() {
 }
 
 #[test]
-fn private_settings_that_do_not_parse_fall_back_to_the_camera_raw_mapping() {
+fn private_settings_that_do_not_parse_are_neither_read_nor_replaced() {
     let image = RAW.with_orientation(Orientation::new(1, false));
     let settings = rich_settings(FileKind::Raw);
     let xml = to_string(&develop(&settings), image, None).unwrap();
     let broken = xml.replace("<photo:Settings>{", "<photo:Settings>{{");
     assert_ne!(broken, xml);
-    assert_eq!(
-        parse(&broken, image).unwrap().develop,
-        Some(mapped_part(&settings))
+    // Not the Camera Raw mapping in their place: a later write would make
+    // that the photo's settings for good.
+    let read = parse(&broken, image).unwrap();
+    assert_eq!(read.develop, None);
+    assert_eq!(read.unreadable_settings_format, Some(SETTINGS_FORMAT));
+    let refused = to_string(&develop(&settings), image, Some(&broken));
+    assert!(
+        matches!(refused, Err(XmpError::UnreadableSettings { .. })),
+        "{refused:?}"
     );
 }
 
@@ -317,7 +323,7 @@ fn descriptive_metadata_round_trips_including_awkward_text() {
         ],
         capture_time: DateTime::new(2026, 11, 19, 20, 44, 5),
         develop: None,
-        newer_settings_format: None,
+        unreadable_settings_format: None,
     };
     for kind in KINDS {
         let image = ImageInfo::new(kind);

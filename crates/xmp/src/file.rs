@@ -68,7 +68,10 @@ pub fn read_sidecar(path: &Path, image: ImageInfo) -> Result<Option<XmpData>, Xm
 /// The replacement keeps the sidecar's permissions. Its owner, and any
 /// extended attributes or access lists, are those of a new file this process
 /// writes. A symbolic link is written through: the file it leads to is
-/// replaced, or created, and the link stays as it was. A read-only sidecar is
+/// replaced, or created, and the link stays as it was. The link is followed
+/// afresh for every attempt and once more before the rename, so a link led
+/// elsewhere meanwhile counts as a change: the update is merged again into
+/// the file the link now leads to. A read-only sidecar is
 /// not replaced: writing anything it does not already say fails with
 /// [`XmpError::Io`] of kind [`std::io::ErrorKind::PermissionDenied`], and the
 /// file is left as it is.
@@ -100,9 +103,11 @@ fn write_sidecar_with(
     mut meanwhile: impl FnMut(),
 ) -> Result<(), XmpError> {
     let failed = |source| io_error("write", path, source);
-    // The file the path stands for: a link is written through, not replaced.
-    let target = followed(path).map_err(failed)?;
     for _ in 0..MERGE_ATTEMPTS {
+        // The file the path stands for: a link is written through, not
+        // replaced. It is found again every time, since the link may have
+        // been led elsewhere meanwhile.
+        let target = followed(path).map_err(failed)?;
         let existing = read_bytes(&target)?;
         let current = existing.as_deref().map(text_of).transpose()?;
         let text = to_string(data, image, current)?;
@@ -112,7 +117,12 @@ fn write_sidecar_with(
         let permissions = replaceable(&target).map_err(failed)?;
         let temporary = write_beside(&target, &text, permissions).map_err(failed)?;
         meanwhile();
-        let unchanged = read_bytes(&target).map(|now| now == existing);
+        // Still the same file, still holding what was merged into.
+        let unchanged = match followed(path).map_err(failed) {
+            Ok(now) if now == target => read_bytes(&target).map(|now| now == existing),
+            Ok(_) => Ok(false),
+            Err(error) => Err(error),
+        };
         if !matches!(unchanged, Ok(true)) {
             // Best effort: what is worth reporting is why the update stops,
             // or nothing when it is merged again.
@@ -346,6 +356,44 @@ mod tests {
         assert!(matches!(written, Err(XmpError::Io { .. })), "{written:?}");
         assert_eq!(while_writing.len(), 2, "{while_writing:?}");
         assert_eq!(entries(folder.path()), [path]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_led_elsewhere_while_writing_is_written_where_it_now_leads() {
+        use std::os::unix::fs::symlink;
+
+        let folder = tempfile::tempdir().unwrap();
+        let (first, second) = (folder.path().join("A.xmp"), folder.path().join("B.xmp"));
+        write_sidecar(&first, &rated(1), RAW).unwrap();
+        write_sidecar(&second, &rated(2), RAW).unwrap();
+        let theirs = noted(&fs::read_to_string(&second).unwrap(), "theirs");
+        fs::write(&second, &theirs).unwrap();
+        let before = fs::read(&first).unwrap();
+        let link = folder.path().join("photo.xmp");
+        symlink("A.xmp", &link).unwrap();
+
+        let mut moments = 0;
+        let written = write_sidecar_with(&link, &rated(4), RAW, || {
+            if moments == 0 {
+                fs::remove_file(&link).unwrap();
+                symlink("B.xmp", &link).unwrap();
+            }
+            moments += 1;
+        });
+        written.unwrap();
+        assert_eq!(moments, 2, "the new target was found, and merged into");
+        assert_eq!(fs::read(&first).unwrap(), before, "the old target is left");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(read_sidecar(&link, RAW).unwrap(), Some(rated(4)));
+        let text = fs::read_to_string(&second).unwrap();
+        assert!(text.contains(r#"acme:Note="theirs""#), "{text}");
+        assert_eq!(entries(folder.path()), [first, second, link]);
     }
 
     #[test]
