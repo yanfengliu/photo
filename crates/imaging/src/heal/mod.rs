@@ -33,6 +33,9 @@ pub use suggest::suggest_heal_source;
 
 const CHANNELS: usize = SourceImage::CHANNELS;
 const WHITE: f32 = SourceImage::WHITE as f32;
+/// Spot radii are held at this many long edges: a spot that large covers
+/// the whole picture from anywhere on it.
+const MAX_RADIUS: f64 = 1.0;
 
 /// How normalized spot coordinates turn into pixels of the image being
 /// healed (the source itself, or one level of its pyramid).
@@ -81,14 +84,19 @@ impl Stamp {
             (f64::from(spot.source.x) - f64::from(spot.target.x)) * frame.per_unit.0,
             (f64::from(spot.source.y) - f64::from(spot.target.y)) * frame.per_unit.1,
         );
-        let radius = f64::from(spot.radius) * frame.long_edge;
         let opacity = fraction(spot.opacity) as f32;
-        let finite = [centre.0, centre.1, offset.0, offset.1, radius]
+        let finite = [centre.0, centre.1, offset.0, offset.1]
             .iter()
             .all(|v| v.is_finite());
-        if !finite || radius <= 0.0 || opacity <= 0.0 {
+        if !finite || spot.radius.is_nan() || spot.radius <= 0.0 || opacity <= 0.0 {
             return None;
         }
+        let radius = f64::from(spot.radius).min(MAX_RADIUS) * frame.long_edge;
+        // Any source farther away than this reads nothing but the
+        // replicated edge, for every pixel the spot and its sampling ring
+        // touch; holding the offset here keeps it a reasonable integer.
+        let reach = frame.per_unit.0 + frame.per_unit.1 + 4.0 * radius + 8.0;
+        let offset = (offset.0.clamp(-reach, reach), offset.1.clamp(-reach, reach));
         let hardness = 1.0 - fraction(spot.feather);
         let (mut inner, mut outer) = (radius * hardness, radius);
         if outer - inner < 1.0 {
@@ -129,14 +137,14 @@ impl Stamp {
 }
 
 /// The pixel at `(x, y)`, replicating the edge for positions outside.
-fn pixel_clamped(image: &SourceImage, x: i64, y: i64) -> [f32; 3] {
+fn pixel_clamped(image: &SourceImage, x: i64, y: i64) -> [u16; 3] {
     let x = x.clamp(0, i64::from(image.width) - 1) as usize;
     let y = y.clamp(0, i64::from(image.height) - 1) as usize;
     let index = (y * image.width as usize + x) * CHANNELS;
     [
-        f32::from(image.pixels[index]),
-        f32::from(image.pixels[index + 1]),
-        f32::from(image.pixels[index + 2]),
+        image.pixels[index],
+        image.pixels[index + 1],
+        image.pixels[index + 2],
     ]
 }
 
@@ -146,9 +154,10 @@ fn apply(image: &mut SourceImage, stamp: &Stamp) {
         return;
     };
     // Read everything this spot needs before writing anything: the source
-    // disc may overlap the target disc.
+    // disc may overlap the target disc. Kept as `u16`, so even a spot the
+    // size of the picture costs no more memory than the picture.
     let patch_width = x1 - x0 + 1;
-    let patch: Vec<[f32; 3]> = (y0..=y1)
+    let patch: Vec<[u16; 3]> = (y0..=y1)
         .flat_map(|y| (x0..=x1).map(move |x| (x, y)))
         .map(|(x, y)| pixel_clamped(image, x as i64 + stamp.offset.0, y as i64 + stamp.offset.1))
         .collect();
@@ -168,6 +177,7 @@ fn apply(image: &mut SourceImage, stamp: &Stamp) {
                 if alpha <= 0.0 {
                     continue;
                 }
+                let source = source.map(f32::from);
                 let repair = match &membrane {
                     Some(membrane) => membrane.matched(source, dx, dy),
                     None => source,
@@ -209,14 +219,17 @@ fn heal(image: &SourceImage, frame: Frame, spots: &[Spot]) -> SourceImage {
 /// a repair taken from the same position relative to `source`:
 ///
 /// - **Clone**: the source pixel itself.
-/// - **Heal**: the source pixel times a per-channel factor that varies
-///   smoothly across the spot. The factor is the harmonic interpolation,
-///   over the disc, of the ratio between the target's surroundings and the
-///   source's surroundings, each averaged in small windows just outside the
-///   spot. The repair therefore has the source's texture at the target's
-///   own low-frequency tone and colour, and meets its surroundings without a
-///   seam. Ratios are computed with a floor of 1/256 of white and limited to
-///   16x either way.
+/// - **Heal**: the source pixel scaled, per channel, by a factor that
+///   varies smoothly across the spot: `(source + f) * gain - f`, with `f`
+///   1/256 of white so that near black the correction becomes an offset
+///   rather than a large gain on noise. The gain is the harmonic
+///   interpolation, over the disc, of the ratio between the target's
+///   surroundings and the source's surroundings, each averaged in windows
+///   on a ring just outside the spot. The repair therefore has the source's
+///   texture at the target's own low-frequency tone and colour, and meets
+///   its surroundings without a seam. Gains are limited to 16x either way,
+///   and each window mean reads at most about a thousand pixels however
+///   large the spot.
 ///
 /// The blend weight is `opacity / 100` times a falloff that is 1 out to
 /// `1 - feather / 100` of the radius and eases to 0 at the radius (feather 0
@@ -225,15 +238,17 @@ fn heal(image: &SourceImage, frame: Frame, spots: &[Spot]) -> SourceImage {
 /// Details a caller can rely on:
 ///
 /// - Positions are normalized to the image and `radius` to its long edge,
-///   as `photo_core` defines them.
+///   as `photo_core` defines them. Radii above 1 (the whole long edge) are
+///   held at 1, which bounds the work a spot can ask for.
 /// - The source offset is rounded to whole pixels, so cloned texture is
 ///   never softened by interpolation. With opacity 100, pixels at least half
 ///   a pixel inside the hard edge are exact copies of their source pixels;
 ///   pixels at least half a pixel outside the radius are untouched.
 /// - A later spot sees the result of earlier ones, and a spot whose source
 ///   overlaps its own target reads the pixels as they were before it.
-/// - Source positions outside the image read the replicated edge. Spots
-///   with a non-finite position, no radius or no opacity are skipped.
+/// - Source positions outside the image read the replicated edge, however
+///   far out. Spots with a non-finite position, no radius or no opacity
+///   are skipped.
 /// - The result does not depend on the thread count.
 ///
 /// # Panics

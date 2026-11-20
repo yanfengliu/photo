@@ -4,7 +4,7 @@
 //!
 //! This crate knows nothing about the order of the pipeline's stages or
 //! about what a tone or colour slider means; `photo-develop` composes these
-//! primitives. See `docs/threads/current/lightroom-workflow-restart/DESIGN.md`
+//! primitives. See `docs/work/12_lightroom-workflow-restart/design.md`
 //! (§5.1, §5.2, §5.7, §5.9).
 //!
 //! Conventions shared by everything here:
@@ -16,8 +16,14 @@
 //!   [`grain_plane`]) share one layout: the view's pixels surrounded by
 //!   `padding` extra pixels on every side, each of which is a real render of
 //!   the output position it stands for.
+//! - Tile a render with [`View::tile`]: a tile is a window onto its parent's
+//!   pixel grid, so [`resample`], [`rasterize_mask`] and [`grain_plane`]
+//!   give it exactly the bits of that region of the whole (contract R1).
 //! - Every spatial filter documents its support radius, so a caller can pad
 //!   a region by that much and crop the result (contract R1).
+//! - Settings arriving from outside are read defensively: values beyond
+//!   their range are clamped, and no finite or non-finite setting produces
+//!   a NaN in a buffer.
 //! - Results are bit-identical on any number of threads (contract R4).
 //!
 //! What the pipeline's stages find here:

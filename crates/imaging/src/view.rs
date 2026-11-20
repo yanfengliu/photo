@@ -291,14 +291,24 @@ mod tests {
     fn tiles_share_their_parents_scale_and_positions_bit_for_bit() {
         // A pitch that no f32 rectangle of a tile could reproduce.
         let view = View::new(Rect::new(0.0, 0.0, 1998.6143, 1333.3157), 1000, 667);
-        for (x, y, w, h) in [(333u32, 333u32, 100u32, 100u32), (7, 660, 13, 7), (999, 0, 1, 1)] {
+        for (x, y, w, h) in [
+            (333u32, 333u32, 100u32, 100u32),
+            (7, 660, 13, 7),
+            (999, 0, 1, 1),
+        ] {
             let tile = view.tile(x, y, w, h);
             assert_eq!(tile.scale().to_bits(), view.scale().to_bits());
-            assert_eq!(tile.grid(0).pitch().to_bits(), view.grid(0).pitch().to_bits());
+            assert_eq!(
+                tile.grid(0).pitch().to_bits(),
+                view.grid(0).pitch().to_bits()
+            );
             for (column, row) in [(0usize, 0usize), (w as usize - 1, h as usize - 1)] {
                 let own = centre(&tile, 0, column, row);
                 let parents = centre(&view, 0, x as usize + column, y as usize + row);
-                assert_eq!((own.0.to_bits(), own.1.to_bits()), (parents.0.to_bits(), parents.1.to_bits()));
+                assert_eq!(
+                    (own.0.to_bits(), own.1.to_bits()),
+                    (parents.0.to_bits(), parents.1.to_bits())
+                );
             }
         }
     }
@@ -309,7 +319,10 @@ mod tests {
         assert_eq!(view.to_output(0.0, 0.0), Point::new(100.0, 50.0));
         assert_eq!(view.to_output(0.5, 0.5), Point::new(101.0, 51.0));
         assert_eq!(view.to_output(500.0, 250.0), Point::new(1100.0, 550.0));
-        assert_eq!(view.tile(10, 20, 5, 5).to_output(0.0, 0.0), Point::new(120.0, 90.0));
+        assert_eq!(
+            view.tile(10, 20, 5, 5).to_output(0.0, 0.0),
+            Point::new(120.0, 90.0)
+        );
     }
 
     #[test]

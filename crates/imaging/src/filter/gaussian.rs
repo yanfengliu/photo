@@ -95,7 +95,10 @@ mod tests {
 
     #[test]
     fn an_infinite_sigma_is_the_largest_sigma() {
-        assert_eq!(kernel_for_sigma(f32::INFINITY), kernel_for_sigma(MAX_RADIUS));
+        assert_eq!(
+            kernel_for_sigma(f32::INFINITY),
+            kernel_for_sigma(MAX_RADIUS)
+        );
         assert_eq!(gaussian_support(f32::INFINITY), gaussian_support(1.0e30));
     }
 
@@ -104,8 +107,14 @@ mod tests {
         for step in 1..4000 {
             let sigma = step as f32 * 0.01;
             let ratio = gaussian_support(sigma) as f32 / sigma;
-            assert!(ratio >= 2.12, "sigma {sigma}: support is only {ratio} sigma");
-            assert!(sigma < 1.0 || ratio <= 3.0 + 3.0 / sigma, "sigma {sigma}: {ratio}");
+            assert!(
+                ratio >= 2.12,
+                "sigma {sigma}: support is only {ratio} sigma"
+            );
+            assert!(
+                sigma < 1.0 || ratio <= 3.0 + 3.0 / sigma,
+                "sigma {sigma}: {ratio}"
+            );
         }
     }
 }

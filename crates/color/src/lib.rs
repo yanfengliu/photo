@@ -32,4 +32,3 @@ pub mod temperature;
 pub mod tone;
 
 pub use pipeline::{LocalDelta, PixelPipeline, displayed_white_balance, pick_white_balance};
-pub use tone::tone_base_value;

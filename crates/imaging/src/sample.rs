@@ -42,16 +42,16 @@ pub(crate) struct Kernel {
     /// Share of the triangle in the mix: 0 is the cubic alone, 1 the
     /// triangle alone.
     triangle: f32,
-    /// Half-width of the triangle, in pixels, 1 to 2.
-    radius: f32,
+    /// One over the half-width of the triangle in pixels (1 to 2), worked
+    /// out once rather than for every sample.
+    inverse_radius: f32,
 }
 
 impl Kernel {
     /// The cubic alone.
-    #[cfg(test)]
-    pub(crate) const CUBIC: Self = Self {
+    const CUBIC: Self = Self {
         triangle: 0.0,
-        radius: 1.0,
+        inverse_radius: 1.0,
     };
 
     /// The kernel for an output pixel that covers `footprint` pixels of the
@@ -63,13 +63,10 @@ impl Kernel {
         if over > 0.0 {
             Self {
                 triangle: (over * over * (3.0 - 2.0 * over)) as f32,
-                radius: footprint.clamp(1.0, MAX_TRIANGLE_RADIUS) as f32,
+                inverse_radius: 1.0 / footprint.clamp(1.0, MAX_TRIANGLE_RADIUS) as f32,
             }
         } else {
-            Self {
-                triangle: 0.0,
-                radius: 1.0,
-            }
+            Self::CUBIC
         }
     }
 
@@ -147,7 +144,7 @@ fn weights(t: f32, kernel: Kernel) -> [f32; 4] {
         ]
     };
     let triangle = || {
-        let inverse = 1.0 / kernel.radius;
+        let inverse = kernel.inverse_radius;
         let raw =
             [t + 1.0, t, 1.0 - t, 2.0 - t].map(|distance| (1.0 - distance * inverse).max(0.0));
         let normalize = 1.0 / (raw[0] + raw[1] + raw[2] + raw[3]);
@@ -243,18 +240,37 @@ pub(crate) fn sample4(image: &SourceImage, x: f64, y: f64, kernel: Kernel) -> [f
         // the four pixels around the position (the middle two of the middle
         // two rows). As the triangle takes over, which legitimately averages
         // more than those four, the allowed range widens to all sixteen.
+        // Ranges are taken across the rows sample by sample first, in plain
+        // loops over arrays the compiler can do in vector registers.
+        let (mut near_low, mut near_high) = (lines[1], lines[1]);
+        for k in 0..TAP_SAMPLES {
+            near_low[k] = near_low[k].min(lines[2][k]);
+            near_high[k] = near_high[k].max(lines[2][k]);
+        }
+        let (mut all_low, mut all_high) = (near_low, near_high);
+        if kernel.triangle > 0.0 {
+            for line in [&lines[0], &lines[3]] {
+                for k in 0..TAP_SAMPLES {
+                    all_low[k] = all_low[k].min(line[k]);
+                    all_high[k] = all_high[k].max(line[k]);
+                }
+            }
+        }
         for (channel, value) in out.iter_mut().enumerate() {
-            let near = [
-                lines[1][CHANNELS + channel],
-                lines[1][2 * CHANNELS + channel],
-                lines[2][CHANNELS + channel],
-                lines[2][2 * CHANNELS + channel],
-            ];
-            let mut low = f32::from(near[0].min(near[1]).min(near[2]).min(near[3]));
-            let mut high = f32::from(near[0].max(near[1]).max(near[2]).max(near[3]));
+            let (a, b, c, d) = (
+                channel,
+                CHANNELS + channel,
+                2 * CHANNELS + channel,
+                3 * CHANNELS + channel,
+            );
+            let mut low = f32::from(near_low[b].min(near_low[c]));
+            let mut high = f32::from(near_high[b].max(near_high[c]));
             if kernel.triangle > 0.0 {
-                let all = lines.iter().flat_map(|line| line.iter().skip(channel).step_by(CHANNELS));
-                let (lowest, highest) = all.fold((u16::MAX, 0), |(l, h), &v| (l.min(v), h.max(v)));
+                let lowest = all_low[a].min(all_low[b]).min(all_low[c]).min(all_low[d]);
+                let highest = all_high[a]
+                    .max(all_high[b])
+                    .max(all_high[c])
+                    .max(all_high[d]);
                 low += (f32::from(lowest) - low) * kernel.triangle;
                 high += (f32::from(highest) - high) * kernel.triangle;
             }
@@ -381,7 +397,11 @@ mod tests {
         // Magnifying, 1:1 and an exact size that has been through f32 all
         // get the cubic alone.
         for footprint in [0.25, 1.0, 1.0005] {
-            assert_eq!(Kernel::for_footprint(footprint), Kernel::CUBIC, "{footprint}");
+            assert_eq!(
+                Kernel::for_footprint(footprint),
+                Kernel::CUBIC,
+                "{footprint}"
+            );
         }
         assert!(Kernel::CUBIC.interpolates());
         // From there the triangle fades in; it is alone from 1.5 and as wide
@@ -390,15 +410,18 @@ mod tests {
         assert!(share(1.0025) > 0.0 && share(1.0025) < 1e-4);
         assert!(share(1.1) < share(1.25) && share(1.25) < share(1.4));
         assert_eq!((share(1.5), share(1.9), share(40.0)), (1.0, 1.0, 1.0));
-        assert_eq!(Kernel::for_footprint(1.7).radius, 1.7);
-        assert_eq!(Kernel::for_footprint(40.0).radius, 2.0);
+        assert_eq!(Kernel::for_footprint(1.7).inverse_radius, 1.0 / 1.7f32);
+        assert_eq!(Kernel::for_footprint(40.0).inverse_radius, 0.5);
         assert!(!Kernel::for_footprint(1.0025).interpolates());
         // Neighbouring footprints give neighbouring weights, all the way.
         let mut previous = weights(0.3, Kernel::for_footprint(0.9));
         for step in 0..=1200 {
             let current = weights(0.3, Kernel::for_footprint(0.9 + step as f64 * 0.001));
             for (a, b) in previous.iter().zip(current) {
-                assert!((a - b).abs() < 3e-3, "step {step}: {previous:?} -> {current:?}");
+                assert!(
+                    (a - b).abs() < 3e-3,
+                    "step {step}: {previous:?} -> {current:?}"
+                );
             }
             previous = current;
         }

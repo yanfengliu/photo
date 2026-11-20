@@ -1,28 +1,47 @@
 //! Mask rasterization: a [`Mask`]'s coverage as an alpha plane for a view.
 
 mod brush;
+mod path;
 
 use photo_core::develop::{Mask, MaskComponent, MaskShape};
+use rayon::prelude::*;
 
 use crate::buffer::Plane;
 use crate::geometry::Geometry;
 use crate::slider::fraction;
-use crate::view::View;
+use crate::view::{PixelGrid, View};
 
 use brush::BrushBitmap;
 
-/// Hermite smoothstep: 0 at or below `low`, 1 at or above `high`.
+/// Hermite smoothstep: 0 at or below `low`, 1 at or above `high`. A band
+/// of no width (or a NaN one) is a step at `low`.
 fn smoothstep(low: f64, high: f64, x: f64) -> f64 {
+    if low.is_nan() || high.is_nan() || high <= low {
+        return if x < low { 0.0 } else { 1.0 };
+    }
     let t = ((x - low) / (high - low)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
+/// `(low, high)`, or the band one `pixel` wide around its middle when it is
+/// narrower than that: how hard edges keep one view pixel of antialiasing.
+fn at_least(low: f64, high: f64, pixel: f64) -> (f64, f64) {
+    if high - low < pixel {
+        let middle = (low + high) / 2.0;
+        (middle - pixel / 2.0, middle + pixel / 2.0)
+    } else {
+        (low, high)
+    }
+}
+
 /// One component's shape, converted to source pixels once per call.
 enum Shape {
-    /// `t = (p - start) . along`; coverage is `1 - smoothstep(t)`.
+    /// `t = (p - start) . along`; coverage is `1 - smoothstep(low, high, t)`.
     Linear {
         start: (f64, f64),
         along: (f64, f64),
+        low: f64,
+        high: f64,
     },
     Radial {
         centre: (f64, f64),
@@ -30,9 +49,12 @@ enum Shape {
         cos: f64,
         sin: f64,
         inverse_radii: (f64, f64),
-        /// Normalized radii between which coverage falls from 1 to 0.
+        /// Normalized radii between which coverage falls from 1 to 0, as
+        /// the feather sets them.
         inner: f64,
         outer: f64,
+        /// Source pixels per view pixel.
+        footprint: f64,
         invert: bool,
     },
     Brush(BrushBitmap),
@@ -43,8 +65,10 @@ enum Shape {
 
 impl Shape {
     /// `footprint` is the size of a view pixel in source pixels, which sets
-    /// the width of the antialiased rim on hard edges.
-    fn new(shape: &MaskShape, source_size: (u32, u32), footprint: f64) -> Self {
+    /// the width of the antialiased rim on hard edges. `extent` is
+    /// `[x0, y0, x1, y1]` around every source position the shape will be
+    /// evaluated at, which bounds what a brush needs to stamp.
+    fn new(shape: &MaskShape, source_size: (u32, u32), footprint: f64, extent: [f64; 4]) -> Self {
         let (width, height) = (f64::from(source_size.0), f64::from(source_size.1));
         let long_edge = width.max(height);
         match shape {
@@ -53,12 +77,18 @@ impl Shape {
                 let end = (f64::from(end.x) * width, f64::from(end.y) * height);
                 let (dx, dy) = (end.0 - start.0, end.1 - start.1);
                 let length_squared = dx * dx + dy * dy;
-                if !length_squared.is_finite() || length_squared < 1e-12 {
+                let usable = start.0.is_finite() && start.1.is_finite();
+                if !usable || !length_squared.is_finite() || length_squared < 1e-12 {
                     return Self::Constant(0.0);
                 }
+                // A gradient shorter than a view pixel is an edge, and gets
+                // a pixel of antialiasing like any other.
+                let (low, high) = at_least(0.0, 1.0, footprint / length_squared.sqrt());
                 Self::Linear {
                     start,
                     along: (dx / length_squared, dy / length_squared),
+                    low,
+                    high,
                 }
             }
             MaskShape::Radial {
@@ -86,25 +116,21 @@ impl Shape {
                     return Self::Constant(if *invert { 1.0 } else { 0.0 });
                 }
                 let (sin, cos) = f64::from(*angle).to_radians().sin_cos();
-                let (mut inner, mut outer) = (1.0 - fraction(*feather), 1.0);
-                // Keep the transition at least one view pixel wide.
-                let rim = 0.5 * footprint / radii.0.min(radii.1);
-                if outer - inner < 2.0 * rim {
-                    let middle = (inner + outer) / 2.0;
-                    (inner, outer) = (middle - rim, middle + rim);
-                }
                 Self::Radial {
                     centre: (f64::from(center.x) * width, f64::from(center.y) * height),
                     cos,
                     sin,
                     inverse_radii: (1.0 / radii.0, 1.0 / radii.1),
-                    inner,
-                    outer,
+                    inner: 1.0 - fraction(*feather),
+                    outer: 1.0,
+                    footprint,
                     invert: *invert,
                 }
             }
-            MaskShape::Brush { strokes } => BrushBitmap::stamp(strokes, source_size, footprint)
-                .map_or(Self::Constant(0.0), Self::Brush),
+            MaskShape::Brush { strokes } => {
+                BrushBitmap::stamp(strokes, source_size, footprint, extent)
+                    .map_or(Self::Constant(0.0), Self::Brush)
+            }
         }
     }
 
@@ -112,9 +138,14 @@ impl Shape {
     #[inline]
     fn coverage(&self, x: f64, y: f64) -> f32 {
         match self {
-            Self::Linear { start, along } => {
+            Self::Linear {
+                start,
+                along,
+                low,
+                high,
+            } => {
                 let t = (x - start.0) * along.0 + (y - start.1) * along.1;
-                (1.0 - smoothstep(0.0, 1.0, t)) as f32
+                (1.0 - smoothstep(*low, *high, t)) as f32
             }
             Self::Radial {
                 centre,
@@ -123,12 +154,25 @@ impl Shape {
                 inverse_radii,
                 inner,
                 outer,
+                footprint,
                 invert,
             } => {
                 let (dx, dy) = (x - centre.0, y - centre.1);
                 let u = (dx * cos + dy * sin) * inverse_radii.0;
                 let v = (dy * cos - dx * sin) * inverse_radii.1;
-                let inside = 1.0 - smoothstep(*inner, *outer, (u * u + v * v).sqrt());
+                let distance = (u * u + v * v).sqrt();
+                // One view pixel, in units of the normalized distance, here:
+                // the footprint times the length of that distance's gradient.
+                // Measured per pixel, so a long thin ellipse is as sharp
+                // along its length as across it.
+                let pixel = if distance > 0.0 {
+                    let (gu, gv) = (u * inverse_radii.0, v * inverse_radii.1);
+                    footprint * (gu * gu + gv * gv).sqrt() / distance
+                } else {
+                    0.0
+                };
+                let (low, high) = at_least(*inner, *outer, pixel);
+                let inside = 1.0 - smoothstep(low, high, distance);
                 (if *invert { 1.0 - inside } else { inside }) as f32
             }
             Self::Brush(bitmap) => bitmap.sample(x, y),
@@ -142,13 +186,36 @@ struct Component {
     subtract: bool,
 }
 
-impl Component {
-    fn new(component: &MaskComponent, source_size: (u32, u32), footprint: f64) -> Self {
-        Self {
-            shape: Shape::new(&component.shape, source_size, footprint),
-            subtract: component.subtract,
-        }
-    }
+/// Every source position a padded view grid is evaluated at, mapped and
+/// clamped exactly as [`rasterize_mask`] does, reduced to its bounding box
+/// `[x0, y0, x1, y1]`. Rows are scanned in parallel; minima and maxima do
+/// not depend on the order they are taken in.
+fn source_extent(geometry: &Geometry, grid: &PixelGrid, source: (f64, f64)) -> [f64; 4] {
+    let empty = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    let merge = |a: [f64; 4], b: [f64; 4]| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    };
+    (0..grid.height)
+        .into_par_iter()
+        .map(|row| {
+            let y = grid.y(row);
+            (0..grid.width).fold(empty, |extent, column| {
+                let (x, y) = geometry.map_out_to_src(grid.x(column), y);
+                let (x, y) = (x.clamp(0.0, source.0), y.clamp(0.0, source.1));
+                merge(extent, [x, y, x, y])
+            })
+        })
+        .reduce(|| empty, merge)
 }
 
 /// The coverage of `mask` over `view`, as an alpha plane in `0..=1`,
@@ -185,13 +252,21 @@ impl Component {
 ///   and falling with a smoothstep to 0 at the radius, times `flow / 100`.
 ///   A stroke never builds on itself, however its path overlaps. Strokes
 ///   apply in order: paint accumulates as `a + c * (1 - a)`, an erasing
-///   stroke removes as `a * (1 - c)`. Strokes are stamped into a bitmap in
-///   source space whose cells are a power-of-two number of source pixels:
-///   as fine as the view (never finer than the source), and at most about
-///   four million cells.
+///   stroke removes as `a * (1 - c)`. Radii are held at twice the long
+///   edge.
 ///
-/// Hard edges are antialiased over one view pixel (one bitmap cell for
-/// brushes).
+///   Strokes are stamped into square cells in source space, a power-of-two
+///   number of source pixels wide: as fine as the view can show (never
+///   finer than a source pixel), on one lattice for every view at that
+///   scale. Only the cells this view reads are stamped, so the work and
+///   memory follow the view (fewer than four cells per view pixel where the
+///   geometry keeps its scale), and a stroke renders the same however many
+///   others there are. A stroke's path is drawn simplified, but never more
+///   than a quarter of a cell from where it was painted.
+///
+/// Edges are antialiased over one view pixel (one cell for brushes): a
+/// feather or gradient narrower than that is widened to it, centred on the
+/// edge, so a hard edge reaches half a view pixel beyond its nominal place.
 ///
 /// # Combination
 ///
@@ -205,18 +280,34 @@ impl Component {
 /// # Guarantees
 ///
 /// Every pixel depends only on its own output position, the mask, the
-/// geometry and the view's scale, so a tile equals the same region of the
-/// whole view (R1), and the result is the same on any number of threads
-/// (R4).
+/// geometry and the view's scale, so a tile made with [`View::tile`] gets
+/// the same bits as that region of the whole view (R1), and the result is
+/// the same on any number of threads (R4). Non-finite shape parameters
+/// never produce a NaN.
 pub fn rasterize_mask(mask: &Mask, geometry: &Geometry, view: &View, padding: u32) -> Plane {
     let source_size = geometry.source_size();
+    let source = (f64::from(source_size.0), f64::from(source_size.1));
     let grid = view.grid(padding);
     // Source pixels per view pixel: the same for every tile of a view.
     let footprint = geometry.footprint() * grid.pitch();
+    let has_brush = mask
+        .components
+        .iter()
+        .any(|component| matches!(component.shape, MaskShape::Brush { .. }));
+    // Only a brush needs to know where the view reads; finding out costs a
+    // pass over the view.
+    let extent = if has_brush {
+        source_extent(geometry, &grid, source)
+    } else {
+        [0.0, 0.0, source.0, source.1]
+    };
     let components: Vec<Component> = mask
         .components
         .iter()
-        .map(|component| Component::new(component, source_size, footprint))
+        .map(|component: &MaskComponent| Component {
+            shape: Shape::new(&component.shape, source_size, footprint, extent),
+            subtract: component.subtract,
+        })
         .collect();
 
     let background = if mask.invert { 1.0 } else { 0.0 };
@@ -224,13 +315,12 @@ pub fn rasterize_mask(mask: &Mask, geometry: &Geometry, view: &View, padding: u3
     if components.is_empty() {
         return out;
     }
-    let (source_w, source_h) = (f64::from(source_size.0), f64::from(source_size.1));
     out.par_rows_mut(|row_index, row| {
         let y = grid.y(row_index);
         for (column, value) in row.iter_mut().enumerate() {
             let (source_x, source_y) = geometry.map_out_to_src(grid.x(column), y);
             let (source_x, source_y) =
-                (source_x.clamp(0.0, source_w), source_y.clamp(0.0, source_h));
+                (source_x.clamp(0.0, source.0), source_y.clamp(0.0, source.1));
             let mut alpha = 0.0f32;
             for component in &components {
                 let coverage = component.shape.coverage(source_x, source_y);

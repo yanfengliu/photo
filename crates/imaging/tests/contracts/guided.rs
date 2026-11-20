@@ -78,7 +78,10 @@ fn the_guided_filter_smooths_the_flats_and_keeps_the_step() {
 
     let out = self_guided_filter(&input, 6.0, 0.004);
     let noise_out = flat_noise(&out, 20);
-    assert!(noise_out < noise_in / 4.0, "noise {noise_in} -> {noise_out}");
+    assert!(
+        noise_out < noise_in / 4.0,
+        "noise {noise_in} -> {noise_out}"
+    );
     // Adjacent columns either side of the 0.6 step still differ by most of it.
     let edge = edge_height(&out);
     assert!(edge > 0.85 * 0.6, "the 0.6 step is now {edge}");
@@ -168,9 +171,16 @@ fn the_fast_guided_filter_sees_detail_finer_than_its_cells() {
     for radius in [7.0f32, 8.0, 12.5, 33.0] {
         let fast = fast_self_guided_filter(&checker, radius, 0.01, (0, 0));
         let exact = self_guided_filter(&checker, radius, 0.01);
-        assert!((exact.get(160, 128) - 0.55).abs() < 2e-3, "{}", exact.get(160, 128));
+        assert!(
+            (exact.get(160, 128) - 0.55).abs() < 2e-3,
+            "{}",
+            exact.get(160, 128)
+        );
         let diff = interior_diff(&fast, &exact, radius);
-        assert!(diff < 1e-3, "radius {radius}: fast and exact differ by {diff}");
+        assert!(
+            diff < 1e-3,
+            "radius {radius}: fast and exact differ by {diff}"
+        );
     }
     // The same with a separate guide: the input here is the guide's negative.
     let negative = checker.map(|v| 1.0 - v);

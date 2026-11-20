@@ -10,11 +10,15 @@ const CHANNELS: usize = Rgba8Image::CHANNELS;
 /// overlaps and the weights of the input positions from there on. Weights
 /// are the fraction of the output pixel's footprint each input pixel
 /// covers, and sum to 1.
+///
+/// Weights and the sums they feed are `f64`: a thumbnail pixel can gather a
+/// million source pixels, and single-precision sums of that many terms
+/// drift by more than a code value.
 struct Coverage {
     starts: Vec<usize>,
     /// `weights[offsets[i]..offsets[i + 1]]` belongs to output position `i`.
     offsets: Vec<usize>,
-    weights: Vec<f32>,
+    weights: Vec<f64>,
 }
 
 impl Coverage {
@@ -36,9 +40,9 @@ impl Coverage {
             let begin = coverage.weights.len();
             for position in first..last {
                 let overlap = (high.min(position as f64 + 1.0) - low.max(position as f64)).max(0.0);
-                coverage.weights.push(overlap as f32);
+                coverage.weights.push(overlap);
             }
-            let total: f32 = coverage.weights[begin..].iter().sum();
+            let total: f64 = coverage.weights[begin..].iter().sum();
             if total > 0.0 {
                 coverage.weights[begin..]
                     .iter_mut()
@@ -54,7 +58,7 @@ impl Coverage {
         coverage
     }
 
-    fn span(&self, index: usize) -> (usize, &[f32]) {
+    fn span(&self, index: usize) -> (usize, &[f64]) {
         (
             self.starts[index],
             &self.weights[self.offsets[index]..self.offsets[index + 1]],
@@ -143,7 +147,7 @@ pub fn downscale_rgba8(image: &Rgba8Image, width: u32, height: u32) -> Rgba8Imag
         .par_chunks_exact_mut(out_w * CHANNELS)
         .enumerate()
         .for_each_init(
-            || vec![[0.0f32; CHANNELS]; out_w],
+            || vec![[0.0f64; CHANNELS]; out_w],
             |sums, (y, out_row)| {
                 sums.fill([0.0; CHANNELS]);
                 let (first_row, row_weights) = rows.span(y);
@@ -154,18 +158,19 @@ pub fn downscale_rgba8(image: &Rgba8Image, width: u32, height: u32) -> Rgba8Imag
                         let pixels = source[first_column * CHANNELS..].chunks_exact(CHANNELS);
                         for (pixel, &column_weight) in pixels.zip(column_weights) {
                             let weight = row_weight * column_weight;
-                            sum[0] += weight * codec.decode[usize::from(pixel[0])];
-                            sum[1] += weight * codec.decode[usize::from(pixel[1])];
-                            sum[2] += weight * codec.decode[usize::from(pixel[2])];
-                            sum[3] += weight * f32::from(pixel[3]) / 255.0;
+                            let linear = |code: u8| f64::from(codec.decode[usize::from(code)]);
+                            sum[0] += weight * linear(pixel[0]);
+                            sum[1] += weight * linear(pixel[1]);
+                            sum[2] += weight * linear(pixel[2]);
+                            sum[3] += weight * f64::from(pixel[3]) / 255.0;
                         }
                     }
                 }
                 for (pixel, sum) in out_row.chunks_exact_mut(CHANNELS).zip(sums.iter()) {
-                    pixel[0] = codec.encode(sum[0]);
-                    pixel[1] = codec.encode(sum[1]);
-                    pixel[2] = codec.encode(sum[2]);
-                    pixel[3] = encode_alpha(sum[3]);
+                    pixel[0] = codec.encode(sum[0] as f32);
+                    pixel[1] = codec.encode(sum[1] as f32);
+                    pixel[2] = codec.encode(sum[2] as f32);
+                    pixel[3] = encode_alpha(sum[3] as f32);
                 }
             },
         );
@@ -178,16 +183,22 @@ mod tests {
 
     #[test]
     fn coverage_weights_are_the_overlap_fractions() {
+        let close = |coverage: &Coverage, index: usize, start: usize, wanted: &[f64]| {
+            let (first, weights) = coverage.span(index);
+            assert_eq!((first, weights.len()), (start, wanted.len()), "{index}");
+            for (got, want) in weights.iter().zip(wanted) {
+                assert!((got - want).abs() < 1e-12, "{index}: {weights:?}");
+            }
+            assert!((weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        };
         let coverage = Coverage::new(5, 2);
-        assert_eq!(coverage.span(0), (0, &[0.4, 0.4, 0.2][..]));
-        assert_eq!(coverage.span(1), (2, &[0.2, 0.4, 0.4][..]));
-        let whole = Coverage::new(6, 3);
-        assert_eq!(whole.span(2), (4, &[0.5, 0.5][..]));
-        let same = Coverage::new(4, 4);
-        assert_eq!(same.span(3), (3, &[1.0][..]));
+        close(&coverage, 0, 0, &[0.4, 0.4, 0.2]);
+        close(&coverage, 1, 2, &[0.2, 0.4, 0.4]);
+        close(&Coverage::new(6, 3), 2, 4, &[0.5, 0.5]);
+        close(&Coverage::new(4, 4), 3, 3, &[1.0]);
         let enlarging = Coverage::new(2, 5);
-        assert_eq!(enlarging.span(2), (0, &[0.5, 0.5][..]));
-        assert_eq!(enlarging.span(4), (1, &[1.0][..]));
+        close(&enlarging, 2, 0, &[0.5, 0.5]);
+        close(&enlarging, 4, 1, &[1.0]);
     }
 
     #[test]
