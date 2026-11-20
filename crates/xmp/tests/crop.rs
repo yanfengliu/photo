@@ -195,27 +195,49 @@ fn crop_numbers_too_large_for_the_settings_leave_them_finite_and_stable() {
 
 #[test]
 fn a_rotated_crop_from_another_application_is_read_through_its_image_size() {
-    let expected = CropRect {
-        cx: 0.52,
-        cy: 0.47,
-        width: 0.8,
-        height: 0.7,
+    // How darktable's Lightroom importer reads the corners
+    // (src/develop/lightroom.c): centred on the picture and scaled by its
+    // size in pixels, they are turned through the crop angle by its
+    // `rotate_xy` into the straightened picture, where they are the corners
+    // of an upright rectangle. The sidecar here is made the other way round
+    // from such a rectangle, with those formulas rather than this crate's.
+    let (width, height) = (6000.0_f64, 4000.0_f64);
+    let angle = -6.25_f64;
+    let turn = angle.to_radians();
+    let rotate_xy = |x: f64, y: f64, by: f64| {
+        let (sin, cos) = by.sin_cos();
+        (x * cos + y * sin, -x * sin + y * cos)
     };
-    let [top_left, _, bottom_right, _] = expected.corners(-6.25, 1.5);
+    // The upright rectangle, in pixels from the centre of the picture.
+    let (left, top, right, bottom) = (-2000.0, -1300.0, 2400.0, 1500.0);
+    let corner = |x: f64, y: f64| {
+        let (x, y) = rotate_xy(x, y, -turn);
+        (0.5 + x / width, 0.5 + y / height)
+    };
+    let (crop_left, crop_top) = corner(left, top);
+    let (crop_right, crop_bottom) = corner(right, bottom);
     let xml = packet(&format!(
-        r#"tiff:ImageWidth="6000" tiff:ImageLength="4000" crs:HasCrop="True" crs:CropAngle="-6.25" crs:CropLeft="{}" crs:CropTop="{}" crs:CropRight="{}" crs:CropBottom="{}""#,
-        top_left.x, top_left.y, bottom_right.x, bottom_right.y
+        r#"tiff:ImageWidth="6000" tiff:ImageLength="4000" crs:HasCrop="True" crs:CropAngle="{angle}" crs:CropLeft="{crop_left}" crs:CropTop="{crop_top}" crs:CropRight="{crop_right}" crs:CropBottom="{crop_bottom}""#
     ));
+
+    // The settings hold that rectangle turned back by the angle: its centre
+    // moves with the turn, its sides stay as long as they are.
+    let (cx, cy) = rotate_xy((left + right) / 2.0, (top + bottom) / 2.0, -turn);
+    let expected = [
+        0.5 + cx / width,
+        0.5 + cy / height,
+        (right - left) / width,
+        (bottom - top) / height,
+    ];
     let crop = read(&xml, RASTER);
-    assert_eq!(crop.angle, -6.25);
+    assert_eq!(f64::from(crop.angle), angle);
     let rect = crop.rect.unwrap();
-    for (read, wanted) in [
-        (rect.cx, expected.cx),
-        (rect.cy, expected.cy),
-        (rect.width, expected.width),
-        (rect.height, expected.height),
-    ] {
-        assert!((read - wanted).abs() < 1e-5, "{rect:?}");
+    let found = [rect.cx, rect.cy, rect.width, rect.height];
+    for (found, wanted) in found.into_iter().zip(expected) {
+        assert!(
+            (f64::from(found) - wanted).abs() < 1e-5,
+            "{rect:?} against {expected:?}"
+        );
     }
 }
 

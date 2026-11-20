@@ -13,6 +13,7 @@
 //! added, to the first description, under whichever prefix the document
 //! already binds to the namespace.
 
+mod alternative;
 mod edit;
 mod read;
 mod scope;
@@ -228,14 +229,18 @@ impl Packet {
         })
     }
 
-    /// The packet as text.
+    /// The packet as text. An `rdf:RDF` this crate created and nothing was
+    /// put into is left out, so that a packet that had none and gained no
+    /// property comes out as it went in.
     pub(crate) fn into_string(self) -> String {
         let root = match self.wrapper {
             None => self.rdf,
             Some(wrapper) => {
                 let mut root = wrapper.element;
                 root.children = wrapper.before;
-                root.children.push(Node::Element(self.rdf));
+                if !(self.rdf.is_built() && self.rdf.children.is_empty()) {
+                    root.children.push(Node::Element(self.rdf));
+                }
                 root.children.extend(wrapper.after);
                 root
             }

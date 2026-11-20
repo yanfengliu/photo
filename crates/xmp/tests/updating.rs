@@ -81,14 +81,20 @@ fn block<'a>(xml: &'a str, open: &str, close: &str) -> &'a str {
 
 #[test]
 fn writing_back_what_was_read_changes_nothing() {
-    assert_eq!(
-        to_string(&metadata(FOREIGN), RAW, Some(FOREIGN)).unwrap(),
-        FOREIGN
-    );
-    assert_eq!(
-        to_string(&metadata(ELEMENT_FORM), RAW, Some(ELEMENT_FORM)).unwrap(),
-        ELEMENT_FORM
-    );
+    // Without the develop settings, for sidecars other applications wrote.
+    for xml in [FOREIGN, ELEMENT_FORM] {
+        assert_eq!(to_string(&metadata(xml), RAW, Some(xml)).unwrap(), xml);
+    }
+
+    // With them, for a sidecar that already holds all this crate writes for
+    // them: one it wrote, which another application then added to.
+    let written = to_string(&parse(FOREIGN, RAW).unwrap(), RAW, Some(FOREIGN)).unwrap();
+    let added = r#"<acme:Later acme:by="another application">kept</acme:Later>"#;
+    let edited = written.replacen("<dc:title>", &format!("{added}\n      <dc:title>"), 1);
+    assert_ne!(edited, written);
+    let read = parse(&edited, RAW).unwrap();
+    assert!(read.develop.is_some());
+    assert_eq!(to_string(&read, RAW, Some(&edited)).unwrap(), edited);
 }
 
 #[test]
@@ -293,21 +299,30 @@ fn a_title_in_several_languages_keeps_the_others() {
     assert!(updated.contains(r#"<rdf:li xml:lang="x-default">Harbour at night</rdf:li>"#));
     assert!(updated.contains(r#"<rdf:li xml:lang="de">Hafen</rdf:li>"#));
 
+    // Cleared, the title reads as none, and the German one stays.
     let untitled = XmpData {
         title: String::new(),
         keywords: Vec::new(),
         ..metadata(FOREIGN)
     };
     let updated = to_string(&untitled, RAW, Some(FOREIGN)).unwrap();
-    assert!(
-        !updated.contains("dc:title") && !updated.contains("dc:subject"),
-        "{updated}"
-    );
-    assert_eq!(parse(&updated, RAW).unwrap().title, "");
+    assert!(updated.contains(r#"<rdf:li xml:lang="de">Hafen</rdf:li>"#));
+    assert!(!updated.contains("dc:subject"), "{updated}");
+    assert_eq!(metadata(&updated), untitled);
 }
 
 #[test]
 fn a_capture_time_is_added_when_new_and_otherwise_left_as_written() {
+    // A sidecar that gives no time gains the one the data gives.
+    assert_eq!(metadata(FOREIGN).capture_time, None);
+    let timed = XmpData {
+        capture_time: DateTime::new(2025, 3, 9, 6, 30, 0),
+        ..metadata(FOREIGN)
+    };
+    let updated = to_string(&timed, RAW, Some(FOREIGN)).unwrap();
+    assert!(updated.contains(r#"exif:DateTimeOriginal="2025-03-09T06:30:00""#));
+    assert_eq!(metadata(&updated), timed);
+
     let attribute_form = include_str!("fixtures/attribute_form.xmp");
     let read = metadata(attribute_form);
     assert_eq!(read.capture_time, DateTime::new(2024, 6, 1, 18, 22, 7));

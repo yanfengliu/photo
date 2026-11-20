@@ -72,6 +72,9 @@ fn a_rating_is_rounded_to_whole_stars_and_capped_at_five() {
         ("255", 5),
         ("256", 5),
         ("1e9", 5),
+        // Finite as written, though too large for single precision.
+        ("1e39", 5),
+        ("1e300", 5),
     ] {
         let xml = packet(&format!(r#"xmp:Rating="{text}""#));
         assert_eq!(marks(&xml), (stars, Flag::Unflagged), "{text:?}");
@@ -83,7 +86,7 @@ fn a_negative_rating_means_rejected_and_has_no_stars() {
     // The specification writes -1 for a rejected file and allows no other
     // negative value; all of them are read alike.
     for text in [
-        "-1", "-1.0", " -1 ", "-0.01", "-0.5", "-2", "-5", "-1000", "-1e9",
+        "-1", "-1.0", " -1 ", "-0.01", "-0.5", "-2", "-5", "-1000", "-1e9", "-1e39", "-1e300",
     ] {
         let xml = packet(&format!(r#"xmp:Rating="{text}""#));
         assert_eq!(marks(&xml), (0, Flag::Rejected), "{text:?}");
@@ -241,8 +244,7 @@ fn a_flag_held_in_an_element_is_changed_and_removed_where_it_is() {
 fn marks_that_already_read_right_are_left_as_written() {
     for (attributes, stars, flag) in [
         (r#"xmp:Rating="-1""#, 0, Flag::Rejected),
-        (r#"xmp:Rating="-1" photo:Flag="0""#, 0, Flag::Unflagged),
-        (r#"xmp:Rating="-1" photo:Flag="1""#, 0, Flag::Picked),
+        (r#"xmp:Rating="-1" photo:Flag="-1""#, 0, Flag::Rejected),
         (r#"xmp:Rating="3.2" photo:Flag=" +1 ""#, 3, Flag::Picked),
         (r#"xmp:Rating="2" photo:Flag="0""#, 2, Flag::Unflagged),
         (
@@ -255,6 +257,33 @@ fn marks_that_already_read_right_are_left_as_written() {
         assert_eq!(marks(&xml), (stars, flag), "{attributes}");
         let written = to_string(&marked(stars, flag), RAW, Some(&xml)).unwrap();
         assert_eq!(written, xml, "{attributes}");
+    }
+}
+
+#[test]
+fn a_rejection_made_elsewhere_over_a_flag_made_here_does_not_outlive_the_flag() {
+    for (flag, attribute) in [(Flag::Picked, "photo:Flag=\"1\""), (Flag::Unflagged, "")] {
+        // Flagged here, then rejected by an application that knows only
+        // `xmp:Rating`; the private flag, which wins, still says otherwise.
+        let here = to_string(&marked(3, flag), RAW, None).unwrap();
+        let elsewhere = here.replace(r#"xmp:Rating="3""#, r#"xmp:Rating="-1""#);
+        let elsewhere = match flag {
+            Flag::Unflagged => elsewhere.replace(
+                r#"xmp:Rating="-1""#,
+                r#"xmp:Rating="-1" xmlns:photo="http://ns.photo.invalid/1.0/" photo:Flag="0""#,
+            ),
+            _ => elsewhere,
+        };
+        assert!(elsewhere.contains(r#"xmp:Rating="-1""#), "{elsewhere}");
+        let read = parse(&elsewhere, RAW).unwrap();
+        assert_eq!((read.rating.stars(), read.flag), (0, flag));
+
+        // Writing back what was read leaves no rating that says otherwise.
+        let written = to_string(&read, RAW, Some(&elsewhere)).unwrap();
+        assert!(written.contains(r#"xmp:Rating="0""#), "{written}");
+        assert!(written.contains(attribute), "{written}");
+        assert_eq!(parse(&written, RAW).unwrap(), read);
+        assert_eq!(to_string(&read, RAW, Some(&written)).unwrap(), written);
     }
 }
 
@@ -281,6 +310,10 @@ fn marks_in_any_state_are_put_right_once_they_change() {
                     updated,
                     "{step}"
                 );
+                // A rating of -1 is left only where it still tells the truth.
+                if updated.contains(r#"Rating="-1""#) {
+                    assert_eq!((stars, flag), (0, Flag::Rejected), "{step}");
+                }
                 if marks(&xml) == (stars, flag) {
                     continue;
                 }

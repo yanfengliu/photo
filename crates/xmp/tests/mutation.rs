@@ -145,6 +145,38 @@ fn level(x: u8, y: u8) -> CurvePoint {
     CurvePoint::new(f32::from(x) / 255.0, f32::from(y) / 255.0)
 }
 
+/// `text` as a write that changes nothing gives it back: without a leading
+/// byte-order mark, and without white space inside end tags, which are the
+/// two things the writer does not keep. Comments, character data and
+/// processing instructions are kept as they are, whatever they hold.
+fn normalized(text: &str) -> String {
+    let mut rest = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut out = String::with_capacity(rest.len());
+    let verbatim = [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")];
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let section = verbatim.iter().find(|(open, _)| rest.starts_with(open));
+        let end = match section {
+            Some((open, close)) => rest[open.len()..]
+                .find(close)
+                .map_or(rest.len(), |end| open.len() + end + close.len()),
+            None => rest.find('>').map_or(rest.len(), |end| end + 1),
+        };
+        let piece = &rest[..end];
+        match piece.strip_suffix('>') {
+            Some(tag) if section.is_none() && tag.starts_with("</") => {
+                out.push_str(tag.trim_end());
+                out.push('>');
+            }
+            _ => out.push_str(piece),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `xml` without the element holding the private settings, or `None` when
 /// they are not held in an element of the usual name.
 fn without_private_settings(xml: &str) -> Option<String> {
@@ -182,12 +214,18 @@ fn altered_sidecars_are_refused_or_updated_soundly() {
         };
         accepted += 1;
 
-        // Writing back what was read, without develop settings, is not a change.
+        // Writing back what was read, without develop settings, is not a
+        // change: it gives back the very text, but for what the writer does
+        // not keep, unless the text contradicts itself about the flag, which
+        // the write puts right.
         let metadata = XmpData {
             develop: None,
             ..read.clone()
         };
         let untouched = to_string(&metadata, image, Some(&text)).unwrap();
+        if !text.contains("Flag") {
+            assert_eq!(untouched, normalized(&text), "{text}");
+        }
         assert_eq!(parse(&untouched, image).unwrap(), read, "{text}");
         assert_eq!(
             to_string(&metadata, image, Some(&untouched)).unwrap(),

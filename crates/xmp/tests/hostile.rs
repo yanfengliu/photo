@@ -7,7 +7,7 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use photo_core::develop::DevelopSettings;
-use photo_core::meta::{FileKind, Rating};
+use photo_core::meta::{FileKind, Flag, Rating};
 use photo_xmp::{
     ImageInfo, MAX_SIDECAR_BYTES, XmpData, XmpError, parse, read_sidecar, to_string, write_sidecar,
 };
@@ -96,6 +96,43 @@ fn a_sidecar_holding_a_character_xml_forbids_is_refused_rather_than_rewritten() 
     fs::write(&path, &forbidden).unwrap();
     assert!(is_malformed(write_sidecar(&path, &data, RAW)));
     assert_eq!(fs::read_to_string(&path).unwrap(), forbidden);
+}
+
+#[test]
+fn a_packet_without_rdf_that_gains_no_property_comes_back_as_it_was() {
+    let data = XmpData::default();
+    for xml in [
+        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#,
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <x:other/>\n</x:xmpmeta>",
+        // An `rdf:RDF` whose namespace is mistyped is not RDF.
+        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns"/></x:xmpmeta>"#,
+    ] {
+        assert_eq!(parse(xml, RAW).unwrap(), data);
+        assert_eq!(to_string(&data, RAW, Some(xml)).unwrap(), xml);
+        // Given something to hold, it gains the element it lacked.
+        let rated = XmpData {
+            rating: Rating::new(2),
+            ..XmpData::default()
+        };
+        let updated = to_string(&rated, RAW, Some(xml)).unwrap();
+        assert_eq!(parse(&updated, RAW).unwrap(), rated, "{updated}");
+    }
+}
+
+#[test]
+fn a_prefix_declared_empty_is_bound_again_rather_than_declared_twice() {
+    let xml = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:photo="" xmlns:xmp="" xmlns:dc=""/></rdf:RDF>"#;
+    let data = XmpData {
+        rating: Rating::new(3),
+        flag: Flag::Picked,
+        keywords: vec!["quay".to_owned()],
+        ..XmpData::default()
+    };
+    let updated = to_string(&data, RAW, Some(xml)).unwrap();
+    for declaration in ["xmlns:photo=", "xmlns:xmp=", "xmlns:dc="] {
+        assert_eq!(updated.matches(declaration).count(), 1, "{updated}");
+    }
+    assert_eq!(parse(&updated, RAW).unwrap(), data);
 }
 
 #[test]

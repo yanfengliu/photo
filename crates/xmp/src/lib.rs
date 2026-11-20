@@ -46,8 +46,16 @@
 //!
 //! On reading, `photo:Settings` wins whenever it is present and parses;
 //! otherwise the Camera Raw properties are laid over the starting settings
-//! for the kind of file.
+//! for the kind of file. `photo:SettingsFormat` gives the format of the
+//! private settings, and settings of a newer format than this build's are
+//! neither read nor overwritten (see [`XmpData::newer_settings_format`]).
 //!
+//! - The Camera Raw properties come with `crs:ProcessVersion` 11.0 and
+//!   `crs:Version` 15.4, the pair beside the 2012 names in the test
+//!   fixtures written in Adobe's form (a process version from 6.7 on, which
+//!   reads the same names, is kept), and with `crs:HasSettings`. They tell
+//!   other applications which names to read, not that the picture renders
+//!   alike.
 //! - Scalar adjustments are one property each, written in the shortest form
 //!   that reads back as the same number.
 //! - White balance is `crs:WhiteBalance` with `crs:Temperature` and
@@ -110,11 +118,12 @@ mod fields;
 mod file;
 mod geometry;
 mod rdf;
+mod settings;
 mod values;
 
 use std::path::PathBuf;
 
-use photo_core::develop::{DevelopSettings, Orientation};
+use photo_core::develop::{DevelopSettings, Orientation, SETTINGS_FORMAT};
 use photo_core::meta::{ColorLabel, FileKind, Flag, Rating};
 use photo_core::time::DateTime;
 
@@ -193,9 +202,11 @@ impl ImageInfo {
 /// What a sidecar says about a photo.
 ///
 /// Reading a sidecar this crate wrote gives back the data it was written
-/// from, with the exception noted on [`Self::capture_time`]. Empty strings
-/// and empty lists mean "absent": they are what a missing property reads
-/// as, and writing them removes the property.
+/// from, with the exceptions noted on [`Self::capture_time`] and
+/// [`Self::newer_settings_format`]. Empty strings and empty lists mean
+/// "absent": they are what a missing property reads as, and writing them
+/// removes the property (or, for text held in other languages too, empties
+/// it; see [`Self::title`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XmpData {
     /// The stars: `xmp:Rating`, 0 to 5, written whatever the flag is.
@@ -225,13 +236,19 @@ pub struct XmpData {
     /// the photo stays rejected and without stars. This crate never writes
     /// that rating itself: once the stars or the flag change, the rating
     /// holds the stars and a rejection is in `photo:Flag`, where other
-    /// applications do not look for it.
+    /// applications do not look for it. A rating of -1 beside a `photo:Flag`
+    /// that overrules it (another application rejected a photo picked here)
+    /// is replaced by the stars on the next write.
     pub flag: Flag,
     /// `xmp:Label`, by colour name. A label under any other name reads as
     /// [`ColorLabel::None`], and writing `None` back leaves that name alone.
     pub label: ColorLabel,
     /// `dc:title` in the default language (`x-default`), else the first
-    /// language. Other languages are kept when the title changes.
+    /// language. Other languages are kept when the title changes: a new
+    /// title goes into the default language, which is added in front of the
+    /// others when there is none, and a title cleared while other languages
+    /// remain leaves them beside an empty default, so that it reads back as
+    /// no title. With no other language, clearing removes the property.
     pub title: String,
     /// `dc:description`, read and written like the title.
     pub caption: String,
@@ -262,7 +279,25 @@ pub struct XmpData {
     /// parses, even if the Camera Raw properties beside it were changed
     /// since; otherwise the Camera Raw properties are laid over the starting
     /// settings for the kind of file.
+    ///
+    /// `photo:SettingsFormat` beside the JSON gives its format,
+    /// [`SETTINGS_FORMAT`] when this build wrote it; without it the format
+    /// is the first. Settings of a newer format are not read: see
+    /// [`Self::newer_settings_format`]. Settings holding a number that is not
+    /// finite are refused on writing, since JSON cannot hold one.
     pub develop: Option<DevelopSettings>,
+    /// The format of develop settings this build cannot read, written by a
+    /// newer one; `None` otherwise.
+    ///
+    /// When it is set, [`Self::develop`] is `None`: the settings are not
+    /// read, because this build would misread them, nor replaced by the
+    /// Camera Raw properties beside them, because the next write would then
+    /// make those the photo's settings for good. Writing develop settings to
+    /// such a sidecar fails with [`XmpError::NewerSettings`] and writes
+    /// nothing; writing with `develop` left `None` updates everything else
+    /// and leaves the settings as they are. This field is only ever read: it
+    /// plays no part in writing.
+    pub newer_settings_format: Option<u32>,
 }
 
 /// Why a sidecar could not be read or written.
@@ -298,6 +333,22 @@ pub enum XmpError {
     /// [`MAX_SIDECAR_BYTES`]. Such a sidecar is neither read nor written.
     #[error("the sidecar is larger than the {MAX_SIDECAR_BYTES} bytes accepted")]
     TooLarge,
+    /// The sidecar holds develop settings in a format newer than this build
+    /// understands, and writing develop settings would replace them; nothing
+    /// was written. See [`XmpData::newer_settings_format`].
+    #[error(
+        "the sidecar holds develop settings in format {format}, newer than this build's {}",
+        SETTINGS_FORMAT
+    )]
+    NewerSettings {
+        /// The format the sidecar's settings are in.
+        format: u32,
+    },
+    /// The develop settings hold a number that is not finite (NaN or an
+    /// infinity). JSON has no way to write one, so the settings could not
+    /// be read back; nothing was written.
+    #[error("the develop settings hold a number that is not finite")]
+    NotFinite,
     /// The sidecar kept changing while it was being updated, so the update
     /// was given up rather than written over what another application had
     /// just saved. The file holds that application's last version.
@@ -336,17 +387,30 @@ pub fn parse(xml: &str, image: ImageInfo) -> Result<XmpData, XmpError> {
 ///
 /// With `existing` (the sidecar's current text) the result is that text
 /// with only the properties this crate owns changed, and of those only the
-/// ones whose value differs. Everything else is carried over as it was, so
-/// writing back what was read returns `existing` itself (less a leading
-/// byte-order mark and white space inside end tags, which are not kept). An
+/// ones whose value differs; everything else is carried over as it was. An
 /// `existing` that is empty or blank counts as none; one that is not a
 /// well-formed XMP packet is refused with an error rather than replaced.
+///
+/// Writing back what was read returns `existing` itself (less a leading
+/// byte-order mark and white space inside end tags, which are not kept),
+/// with two exceptions:
+///
+/// - Develop settings are written whole. Where the sidecar lacks some of
+///   what this crate writes for them (`photo:Settings` and its format, a
+///   Camera Raw property, the Camera Raw header), the first write of what
+///   was read adds it; a second write changes nothing. Data read with
+///   [`XmpData::develop`] set to `None` touches none of it.
+/// - A rating of -1 that `photo:Flag` overrules is replaced by the stars,
+///   so that other applications stop taking the photo for rejected.
 ///
 /// Without `existing` the result is a new packet in the standard
 /// `<?xpacket?>` wrapper.
 ///
 /// Either way, an `existing` or a result longer than [`MAX_SIDECAR_BYTES`]
-/// is refused with [`XmpError::TooLarge`].
+/// is refused with [`XmpError::TooLarge`]. Develop settings are refused, and
+/// nothing written, when `existing` holds settings of a newer format
+/// ([`XmpError::NewerSettings`]) or when they hold a number that is not
+/// finite ([`XmpError::NotFinite`]).
 pub fn to_string(
     data: &XmpData,
     image: ImageInfo,

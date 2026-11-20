@@ -4,21 +4,22 @@
 //! only the properties that differ, so a value another application wrote
 //! keeps its exact spelling until the value itself changes.
 
-use photo_core::develop::DevelopSettings;
 use photo_core::meta::{ColorLabel, Flag, Rating};
 use photo_core::time::DateTime;
 
 use crate::rdf::{Container, DC, EXIF, Form, Item, LR, PHOTO, Packet, Property, XMP};
 use crate::values::parse_number;
-use crate::{ImageInfo, XmpData, XmpError, crs};
+use crate::{ImageInfo, XmpData, XmpError, crs, settings};
 
 /// What separates the levels of a hierarchical keyword.
 const LEVEL_SEPARATOR: char = '|';
 
 /// Everything a packet says, in this application's terms.
 pub(crate) fn read(packet: &Packet, image: ImageInfo) -> XmpData {
+    let (develop, newer_settings_format) = settings::read(packet, image);
     XmpData {
-        develop: read_develop(packet, image),
+        develop,
+        newer_settings_format,
         ..read_metadata(packet)
     }
 }
@@ -26,8 +27,10 @@ pub(crate) fn read(packet: &Packet, image: ImageInfo) -> XmpData {
 /// How a packet marks a photo: the two properties its stars and its flag
 /// are read from.
 struct Marks {
-    /// `xmp:Rating`, when it holds a finite number.
-    rating: Option<f32>,
+    /// `xmp:Rating`, when it holds a finite number. Read in double
+    /// precision, so that a number too large for single precision still
+    /// counts as the number it is.
+    rating: Option<f64>,
     /// `photo:Flag`, when it holds a flag.
     flag: Option<Flag>,
 }
@@ -112,22 +115,19 @@ fn read_metadata(packet: &Packet) -> XmpData {
         .into_iter()
         .find_map(|property| parse_date(&packet.text(property)?)),
         develop: None,
+        newer_settings_format: None,
     }
 }
 
-/// The private settings when they are present and parse, else the Camera Raw
-/// mapping; either way sanitised for the kind of file.
-fn read_develop(packet: &Packet, image: ImageInfo) -> Option<DevelopSettings> {
-    let own = packet
-        .text(PHOTO.property("Settings"))
-        .and_then(|json| serde_json::from_str::<DevelopSettings>(&json).ok());
-    let mut settings = own.or_else(|| crs::read(packet, image))?;
-    settings.sanitize_for(image.kind);
-    Some(settings)
-}
-
-/// Makes the packet say what `data` says.
+/// Makes the packet say what `data` says, or leaves it as it was and says
+/// why not.
 pub(crate) fn write(packet: &mut Packet, data: &XmpData, image: ImageInfo) -> Result<(), XmpError> {
+    // Whatever refuses the develop settings refuses them before anything
+    // else has changed.
+    let develop = match &data.develop {
+        Some(develop) => Some((develop, settings::encoded(packet, develop)?)),
+        None => None,
+    };
     let current = read_metadata(packet);
 
     write_marks(packet, data.rating, data.flag);
@@ -180,15 +180,9 @@ pub(crate) fn write(packet: &mut Packet, data: &XmpData, image: ImageInfo) -> Re
         packet.set_text(property, &time.to_string(), Form::Attribute);
     }
 
-    if let Some(settings) = &data.develop {
-        crs::write(packet, settings, image);
-        let json = serde_json::to_string(settings)?;
-        let property = PHOTO.property("Settings");
-        if packet.text(property).as_deref() != Some(json.as_str()) {
-            // An element, because quoting JSON inside an attribute would
-            // escape every one of its quotation marks.
-            packet.set_text(property, &json, Form::Element);
-        }
+    if let Some((develop, json)) = develop {
+        crs::write(packet, develop, image);
+        settings::write(packet, &json);
     }
     Ok(())
 }
@@ -199,10 +193,13 @@ pub(crate) fn write(packet: &mut Packet, data: &XmpData, image: ImageInfo) -> Re
 /// is `photo:Flag`, and an unflagged photo has no such property. A packet
 /// that already reads this way is left alone, so a rejection another
 /// application wrote as a rating of -1 stays as it is until the stars or
-/// the flag change; this crate itself never writes that rating.
+/// the flag change; this crate itself never writes that rating. A rating
+/// of -1 that `photo:Flag` overrules is not left, since other applications
+/// would go on taking the photo for rejected.
 fn write_marks(packet: &mut Packet, rating: Rating, flag: Flag) {
     let current = Marks::of(packet);
-    if (current.stars(), current.flag()) == (rating, flag) {
+    let truthful = !current.rejects() || flag == Flag::Rejected;
+    if truthful && (current.stars(), current.flag()) == (rating, flag) {
         return;
     }
     if current.rejects() || current.stars() != rating {
@@ -224,7 +221,7 @@ fn write_alternative(packet: &mut Packet, property: Property<'_>, current: &str,
         return;
     }
     if wanted.is_empty() {
-        packet.remove(property);
+        packet.clear_alternative(property);
     } else {
         packet.set_alternative(property, wanted);
     }

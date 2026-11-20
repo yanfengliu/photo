@@ -17,6 +17,10 @@ const TEMPORARY_NAME_ATTEMPTS: u32 = 16;
 /// saved by someone else meanwhile, before it is given up.
 const MERGE_ATTEMPTS: u32 = 4;
 
+/// How many symbolic links in a row are followed before a path counts as a
+/// loop, as operating systems count them.
+const LINKS_FOLLOWED: u32 = 40;
+
 /// The sidecar that belongs to the image at `image_path`.
 ///
 /// A RAW file's sidecar replaces the extension (`IMG_0001.ARW` has
@@ -57,8 +61,17 @@ pub fn read_sidecar(path: &Path, image: ImageInfo) -> Result<Option<XmpData>, Xm
 /// file in the same folder, which is then renamed over the old one. Whatever
 /// goes wrong (the existing sidecar cannot be parsed, the disk is full, the
 /// folder is read-only) the previous sidecar is left exactly as it was, and
-/// the temporary file is removed again. A sidecar that already says what
-/// `data` says is not rewritten at all.
+/// the temporary file is removed again. A sidecar whose text the update
+/// would leave as it is (see [`to_string`] for when that is) is not
+/// rewritten at all.
+///
+/// The replacement keeps the sidecar's permissions. Its owner, and any
+/// extended attributes or access lists, are those of a new file this process
+/// writes. A symbolic link is written through: the file it leads to is
+/// replaced, or created, and the link stays as it was. A read-only sidecar is
+/// not replaced: writing anything it does not already say fails with
+/// [`XmpError::Io`] of kind [`std::io::ErrorKind::PermissionDenied`], and the
+/// file is left as it is.
 ///
 /// Another application may save the sidecar while the update is being made.
 /// So just before the rename the sidecar is read again, and if it is no
@@ -86,17 +99,20 @@ fn write_sidecar_with(
     image: ImageInfo,
     mut meanwhile: impl FnMut(),
 ) -> Result<(), XmpError> {
+    let failed = |source| io_error("write", path, source);
+    // The file the path stands for: a link is written through, not replaced.
+    let target = followed(path).map_err(failed)?;
     for _ in 0..MERGE_ATTEMPTS {
-        let existing = read_bytes(path)?;
+        let existing = read_bytes(&target)?;
         let current = existing.as_deref().map(text_of).transpose()?;
         let text = to_string(data, image, current)?;
         if current == Some(text.as_str()) {
             return Ok(());
         }
-        let temporary =
-            write_beside(path, &text).map_err(|source| io_error("write", path, source))?;
+        let permissions = replaceable(&target).map_err(failed)?;
+        let temporary = write_beside(&target, &text, permissions).map_err(failed)?;
         meanwhile();
-        let unchanged = read_bytes(path).map(|now| now == existing);
+        let unchanged = read_bytes(&target).map(|now| now == existing);
         if !matches!(unchanged, Ok(true)) {
             // Best effort: what is worth reporting is why the update stops,
             // or nothing when it is merged again.
@@ -104,14 +120,50 @@ fn write_sidecar_with(
             unchanged?;
             continue;
         }
-        return fs::rename(&temporary, path).map_err(|source| {
+        return fs::rename(&temporary, &target).map_err(|source| {
             let _ = fs::remove_file(&temporary);
-            io_error("write", path, source)
+            failed(source)
         });
     }
     Err(XmpError::Conflict {
         path: path.to_owned(),
     })
+}
+
+/// The file `path` stands for once the symbolic links it is are followed.
+/// The file need not exist yet.
+fn followed(path: &Path) -> io::Result<PathBuf> {
+    let mut current = path.to_owned();
+    for _ in 0..LINKS_FOLLOWED {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(folder) if target.is_relative() => folder.join(target),
+                    _ => target,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    let reason = "the sidecar path is a loop of symbolic links";
+    Err(io::Error::other(reason))
+}
+
+/// The permissions a replacement for the file at `path` takes: the file's
+/// own, if there is one. A read-only file is not to be replaced.
+fn replaceable(path: &Path) -> io::Result<Option<fs::Permissions>> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.permissions().readonly() => {
+            let reason = "the sidecar is read-only";
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
+        }
+        Ok(metadata) => Ok(Some(metadata.permissions())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn io_error(action: &'static str, path: &Path, source: io::Error) -> XmpError {
@@ -149,12 +201,22 @@ fn text_of(bytes: &[u8]) -> Result<&str, XmpError> {
     })
 }
 
-/// Puts `contents` in a new temporary file beside `path`, on disk, and
-/// returns the file's path. The file is removed again if that fails.
-fn write_beside(path: &Path, contents: &str) -> io::Result<PathBuf> {
+/// Puts `contents` in a new temporary file beside `path`, on disk and with
+/// `permissions` when given, and returns the file's path. The file is
+/// removed again if that fails.
+fn write_beside(
+    path: &Path,
+    contents: &str,
+    permissions: Option<fs::Permissions>,
+) -> io::Result<PathBuf> {
     let (temporary, mut file) = create_beside(path)?;
+    let permitted = |file: &File| match permissions {
+        Some(permissions) => file.set_permissions(permissions),
+        None => Ok(()),
+    };
     let written = file
         .write_all(contents.as_bytes())
+        .and_then(|()| permitted(&file))
         .and_then(|()| file.sync_all());
     // Closed before any rename: Windows will not rename an open file.
     drop(file);
@@ -265,6 +327,24 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#"acme:Note="theirs""#), "{text}");
         assert_eq!(read_sidecar(&path, RAW).unwrap(), Some(rated(4)));
+        assert_eq!(entries(folder.path()), [path]);
+    }
+
+    #[test]
+    fn a_write_that_fails_once_its_replacement_is_made_removes_the_replacement() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("IMG_0001.xmp");
+        write_sidecar(&path, &rated(1), RAW).unwrap();
+
+        let mut while_writing = Vec::new();
+        let written = write_sidecar_with(&path, &rated(4), RAW, || {
+            while_writing = entries(folder.path());
+            // A sidecar that turned into a folder cannot be checked again.
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        });
+        assert!(matches!(written, Err(XmpError::Io { .. })), "{written:?}");
+        assert_eq!(while_writing.len(), 2, "{while_writing:?}");
         assert_eq!(entries(folder.path()), [path]);
     }
 

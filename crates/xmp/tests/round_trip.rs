@@ -136,7 +136,7 @@ fn the_camera_raw_mapping_alone_carries_every_mapped_setting() {
             let settings = rich_settings(kind);
             let xml =
                 without_private_settings(&to_string(&develop(&settings), image, None).unwrap());
-            assert!(!xml.contains("photo:Settings"));
+            assert!(!xml.contains("<photo:Settings"));
             let read = parse(&xml, image).unwrap().develop.unwrap();
             assert_eq!(
                 read,
@@ -317,6 +317,7 @@ fn descriptive_metadata_round_trips_including_awkward_text() {
         ],
         capture_time: DateTime::new(2026, 11, 19, 20, 44, 5),
         develop: None,
+        newer_settings_format: None,
     };
     for kind in KINDS {
         let image = ImageInfo::new(kind);

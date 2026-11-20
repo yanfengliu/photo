@@ -88,6 +88,18 @@ fn many_attributes_are_written_one_to_a_line() {
 }
 
 #[test]
+fn an_attribute_is_never_added_twice() {
+    let mut document = Document::parse("<a xmlns:p='' b='1'/>").unwrap();
+    document.root.insert_attribute(2, "xmlns:p", "urn:p");
+    document.root.insert_attribute(0, "c", "2");
+    document.root.set_attribute("b", "3");
+    assert_eq!(
+        document.write(),
+        "<a c=\"2\"\n  xmlns:p=\"urn:p\"\n  b=\"3\"/>"
+    );
+}
+
+#[test]
 fn many_attributes_or_children_go_in_one_removal() {
     let mut document =
         Document::parse("<r a='1' b='2' c='3' d='4'>\n  <a/>\n  <b/>keep<c/>\n  <d/>\n</r>")
