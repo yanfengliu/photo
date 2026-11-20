@@ -53,11 +53,21 @@ publish = false
 [lints]
 workspace = true
 
+# The library and the binary share the name `photo`; only the library is
+# documented, so `cargo doc` has one page per name.
+[[bin]]
+name = "photo"
+path = "src/main.rs"
+doc = false
+
 [dependencies]
 photo-ui = { workspace = true }
 directories = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 # Third-party crates (rawler and the image codecs especially) are pathologically
 # slow unoptimized, so dependencies are always optimized.

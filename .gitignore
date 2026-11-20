@@ -8,9 +8,12 @@
 # Local photo fixtures for harness and tuning sessions (RAWs, XMP settings, JPGs). Never committed.
 /test_photos/
 
+# The app's stores when it runs from a checkout (src/repo.rs): the catalog with its previews, and exports. Never committed.
+/catalog/
+/edited/
+
 # Data stores and build leftovers of the previous app, still on disk in older checkouts. Never committed.
 /decoded-cache
-/edited/
 /local-edits/
 /local-edits.json
 /code_review/
