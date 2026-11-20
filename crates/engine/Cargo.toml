@@ -10,11 +10,8 @@ workspace = true
 
 [dependencies]
 photo-catalog = { workspace = true }
-photo-color = { workspace = true }
 photo-core = { workspace = true }
 photo-decode = { workspace = true }
-photo-develop = { workspace = true }
-photo-export = { workspace = true }
 photo-imaging = { workspace = true }
 photo-xmp = { workspace = true }
 image = { workspace = true }
