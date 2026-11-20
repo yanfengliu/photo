@@ -1,0 +1,4 @@
+# Test fixtures are compared byte for byte, so git must never convert their
+# line endings: with Windows' default core.autocrlf, an LF fixture checked out
+# as CRLF failed photo-xmp's updating test on CI (run 44742053959).
+crates/*/tests/fixtures/** -text
