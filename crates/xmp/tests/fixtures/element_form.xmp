@@ -1,0 +1,75 @@
+<?xpacket begin='﻿' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<meta:xmpmeta xmlns:meta='adobe:ns:meta/' meta:xmptk='Image::ExifTool 12.76'>
+<r:RDF xmlns:r='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+
+ <r:Description r:about=''
+  xmlns:cr='http://ns.adobe.com/camera-raw-settings/1.0/'>
+  <cr:WhiteBalance>Daylight</cr:WhiteBalance>
+  <cr:Exposure2012>-1.25</cr:Exposure2012>
+  <cr:Contrast2012>+30</cr:Contrast2012>
+  <cr:ConvertToGrayscale>True</cr:ConvertToGrayscale>
+  <cr:GrayMixerRed>-20</cr:GrayMixerRed>
+  <cr:ToneCurvePV2012Blue>
+   <r:Seq>
+    <r:li>0, 10</r:li>
+    <r:li>255, 245</r:li>
+   </r:Seq>
+  </cr:ToneCurvePV2012Blue>
+  <cr:HasCrop>False</cr:HasCrop>
+  <cr:RetouchInfo>
+   <r:Seq>
+    <r:li>centerX = 0.25, centerY = 0.75, radius = 0.01, sourceState = sourceSetExplicitly</r:li>
+   </r:Seq>
+  </cr:RetouchInfo>
+ </r:Description>
+
+ <r:Description r:about=''
+  xmlns:purl='http://purl.org/dc/elements/1.1/'>
+  <purl:creator>
+   <r:Seq>
+    <r:li>Ada Example</r:li>
+    <r:li>Ben Example</r:li>
+   </r:Seq>
+  </purl:creator>
+  <purl:description>
+   <r:Alt>
+    <r:li xml:lang='x-default'>Fog &amp; frost &lt;morning&gt;</r:li>
+   </r:Alt>
+  </purl:description>
+  <purl:rights>
+   <r:Alt>
+    <r:li xml:lang='de'>Alle Rechte vorbehalten</r:li>
+    <r:li xml:lang='x-default'>© 2023 Ada Example</r:li>
+   </r:Alt>
+  </purl:rights>
+  <purl:subject>
+   <r:Bag>
+    <r:li>Zürich</r:li>
+    <r:li>雪</r:li>
+   </r:Bag>
+  </purl:subject>
+  <purl:title>
+   <r:Alt>
+    <r:li xml:lang='x-default'>Morning</r:li>
+   </r:Alt>
+  </purl:title>
+ </r:Description>
+
+ <r:Description r:about=''
+  xmlns:xap='http://ns.adobe.com/xap/1.0/'>
+  <xap:CreateDate>2023-12-24T07:15+01:00</xap:CreateDate>
+  <xap:Label>Purple</xap:Label>
+  <xap:Rating>-1</xap:Rating>
+ </r:Description>
+
+ <r:Description r:about=''>
+  <hierarchicalSubject xmlns='http://ns.adobe.com/lightroom/1.0/'>
+   <r:Bag>
+    <r:li>Places|Europe|Zürich</r:li>
+    <r:li>Weather|Snow</r:li>
+   </r:Bag>
+  </hierarchicalSubject>
+ </r:Description>
+</r:RDF>
+</meta:xmpmeta>
+<?xpacket end='w'?>

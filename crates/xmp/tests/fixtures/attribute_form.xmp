@@ -1,0 +1,145 @@
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        ">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:tiff="http://ns.adobe.com/tiff/1.0/"
+    xmlns:exif="http://ns.adobe.com/exif/1.0/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+   xmp:Rating="4"
+   xmp:Label="Green"
+   xmp:CreateDate="2024-06-01T18:22:07.31+02:00"
+   tiff:Orientation="1"
+   exif:DateTimeOriginal="2024-06-01T18:22:07"
+   crs:Version="15.4"
+   crs:ProcessVersion="11.0"
+   crs:WhiteBalance="Custom"
+   crs:Temperature="5350"
+   crs:Tint="+12"
+   crs:Exposure2012="+0.35"
+   crs:Contrast2012="-12"
+   crs:Highlights2012="-80"
+   crs:Shadows2012="+45"
+   crs:Whites2012="+10"
+   crs:Blacks2012="-5"
+   crs:Texture="+8"
+   crs:Clarity2012="+15"
+   crs:Dehaze="+6"
+   crs:Vibrance="+20"
+   crs:Saturation="-3"
+   crs:ParametricShadows="-10"
+   crs:ParametricDarks="+5"
+   crs:ParametricLights="+7"
+   crs:ParametricHighlights="-4"
+   crs:ParametricShadowSplit="20"
+   crs:ParametricMidtoneSplit="55"
+   crs:ParametricHighlightSplit="80"
+   crs:Sharpness="60"
+   crs:SharpenRadius="+1.2"
+   crs:SharpenDetail="30"
+   crs:SharpenEdgeMasking="15"
+   crs:LuminanceSmoothing="22"
+   crs:LuminanceNoiseReductionDetail="55"
+   crs:LuminanceNoiseReductionContrast="5"
+   crs:ColorNoiseReduction="30"
+   crs:ColorNoiseReductionDetail="45"
+   crs:ColorNoiseReductionSmoothness="60"
+   crs:HueAdjustmentBlue="-20"
+   crs:SaturationAdjustmentOrange="+12"
+   crs:LuminanceAdjustmentGreen="+9"
+   crs:GrayMixerAqua="-7"
+   crs:SplitToningShadowHue="220"
+   crs:SplitToningShadowSaturation="18"
+   crs:SplitToningHighlightHue="45"
+   crs:SplitToningHighlightSaturation="9"
+   crs:SplitToningBalance="-15"
+   crs:ColorGradeMidtoneHue="30"
+   crs:ColorGradeMidtoneSat="5"
+   crs:ColorGradeShadowLum="-6"
+   crs:ColorGradeMidtoneLum="+2"
+   crs:ColorGradeHighlightLum="+4"
+   crs:ColorGradeBlending="60"
+   crs:ColorGradeGlobalHue="140"
+   crs:ColorGradeGlobalSat="3"
+   crs:ColorGradeGlobalLum="-1"
+   crs:LensManualDistortionAmount="+3"
+   crs:VignetteAmount="+10"
+   crs:VignetteMidpoint="40"
+   crs:PerspectiveVertical="-8"
+   crs:PerspectiveHorizontal="+2"
+   crs:PerspectiveRotate="-0.5"
+   crs:PerspectiveAspect="+4"
+   crs:PerspectiveScale="102"
+   crs:PerspectiveX="-1.5"
+   crs:PerspectiveY="+0.5"
+   crs:PostCropVignetteAmount="-25"
+   crs:PostCropVignetteMidpoint="45"
+   crs:PostCropVignetteFeather="70"
+   crs:PostCropVignetteRoundness="+10"
+   crs:PostCropVignetteHighlightContrast="20"
+   crs:GrainAmount="12"
+   crs:GrainSize="30"
+   crs:GrainFrequency="65"
+   crs:ShadowTint="-2"
+   crs:RedHue="+4"
+   crs:RedSaturation="-3"
+   crs:GreenHue="+1"
+   crs:GreenSaturation="+6"
+   crs:BlueHue="-5"
+   crs:BlueSaturation="-6"
+   crs:ConvertToGrayscale="False"
+   crs:ToneCurveName2012="Custom"
+   crs:CameraProfile="Adobe Standard"
+   crs:LensProfileEnable="1"
+   crs:CropTop="0.1"
+   crs:CropLeft="0.2"
+   crs:CropBottom="0.9"
+   crs:CropRight="0.8"
+   crs:CropAngle="0"
+   crs:CropConstrainToWarp="0"
+   crs:HasCrop="True"
+   crs:AlreadyApplied="False"
+   crs:HasSettings="True">
+   <dc:subject>
+    <rdf:Bag>
+     <rdf:li>harbour</rdf:li>
+     <rdf:li>blue hour</rdf:li>
+    </rdf:Bag>
+   </dc:subject>
+   <lr:hierarchicalSubject>
+    <rdf:Bag>
+     <rdf:li>Places|Harbour</rdf:li>
+     <rdf:li>Light|blue hour</rdf:li>
+    </rdf:Bag>
+   </lr:hierarchicalSubject>
+   <crs:ToneCurvePV2012>
+    <rdf:Seq>
+     <rdf:li>0, 0</rdf:li>
+     <rdf:li>64, 51</rdf:li>
+     <rdf:li>192, 204</rdf:li>
+     <rdf:li>255, 255</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012>
+   <crs:ToneCurvePV2012Red>
+    <rdf:Seq>
+     <rdf:li>0, 0</rdf:li>
+     <rdf:li>255, 255</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012Red>
+   <crs:ToneCurvePV2012Green>
+    <rdf:Seq>
+     <rdf:li>0, 0</rdf:li>
+     <rdf:li>128, 140</rdf:li>
+     <rdf:li>255, 255</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012Green>
+   <crs:ToneCurvePV2012Blue>
+    <rdf:Seq>
+     <rdf:li>0, 0</rdf:li>
+     <rdf:li>255, 255</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012Blue>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
