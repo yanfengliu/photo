@@ -31,6 +31,14 @@ pub const PREVIEWS_DIR_NAME: &str = "Photo Catalog.previews";
 /// Photo does not run from a checkout.
 pub const USER_FOLDER_NAME: &str = "Photo";
 
+/// Where harness runs are kept in a checkout: `tmp/harness-runs/`, which git
+/// ignores.
+pub const HARNESS_RUNS_PATH: [&str; 2] = ["tmp", "harness-runs"];
+
+/// The folder under the system temporary directory that holds harness runs
+/// when Photo does not run from a checkout.
+pub const TEMP_HARNESS_RUNS_NAME: &str = "photo-harness-runs";
+
 static RUNTIME_STORAGE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// Points every store at `root` for the rest of the process. Only the first
@@ -99,6 +107,39 @@ pub fn resolve_storage_root(
 
 fn pictures_dir() -> Option<PathBuf> {
     directories::UserDirs::new().and_then(|dirs| dirs.picture_dir().map(Path::to_path_buf))
+}
+
+/// Where harness run directories go, and whether that is inside a checkout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HarnessRuns {
+    /// The folder holding one directory per run.
+    pub dir: PathBuf,
+    /// False when Photo does not run from a checkout and the runs are kept
+    /// in the system temporary directory instead.
+    pub in_checkout: bool,
+}
+
+/// Where this process keeps harness runs: `tmp/harness-runs/` in the
+/// checkout, else a folder in the system temporary directory. The same
+/// answer tells `harnessctl` where to look for sessions.
+pub fn harness_runs() -> HarnessRuns {
+    resolve_harness_runs(repo_root(), std::env::temp_dir())
+}
+
+/// The rule [`harness_runs`] applies, as a pure function of its inputs.
+pub fn resolve_harness_runs(repo_root: Option<PathBuf>, temp_dir: PathBuf) -> HarnessRuns {
+    match repo_root {
+        Some(root) => HarnessRuns {
+            dir: HARNESS_RUNS_PATH
+                .iter()
+                .fold(root, |path, part| path.join(part)),
+            in_checkout: true,
+        },
+        None => HarnessRuns {
+            dir: temp_dir.join(TEMP_HARNESS_RUNS_NAME),
+            in_checkout: false,
+        },
+    }
 }
 
 /// The location of every store under one storage root. Building it creates
@@ -300,5 +341,34 @@ mod tests {
     fn this_checkout_is_found_from_the_test_binary() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(repo_root(), Some(manifest_dir));
+    }
+
+    /// Harness runs are evidence an agent reads back, so they follow the same
+    /// rule as the stores: visible, in the checkout, one `ls` away; and in a
+    /// folder git ignores, since screenshots and logs are never committed.
+    #[test]
+    fn harness_runs_go_to_the_checkout_tmp_folder_or_the_system_temp_folder() {
+        let checkout = PathBuf::from("/checkout");
+        let temp = PathBuf::from("/var/tmp");
+        let runs = resolve_harness_runs(Some(checkout.clone()), temp.clone());
+        assert_eq!(runs.dir, checkout.join("tmp").join("harness-runs"));
+        assert!(runs.in_checkout);
+        for part in HARNESS_RUNS_PATH {
+            assert!(!part.is_empty() && !part.starts_with('.'), "{part:?}");
+        }
+        let elsewhere = resolve_harness_runs(None, temp.clone());
+        assert_eq!(elsewhere.dir, temp.join(TEMP_HARNESS_RUNS_NAME));
+        assert!(!elsewhere.in_checkout);
+    }
+
+    #[test]
+    fn the_checkout_ignores_its_harness_runs() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        let ignored = format!("/{}/", HARNESS_RUNS_PATH[0]);
+        assert!(
+            ignore.lines().any(|line| line.trim() == ignored),
+            "{ignored} is not in .gitignore, so run artifacts could be committed"
+        );
     }
 }

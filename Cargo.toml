@@ -61,12 +61,21 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
+photo-engine = { workspace = true }
 photo-ui = { workspace = true }
 directories = { workspace = true }
+# The agent harness (`photo --harness`) drives the app through photo-ui's
+# headless driver, so it names egui's input types and eframe's app trait and
+# wgpu setup; `image` reads and writes the PNG and JPEG files it measures.
+eframe = { workspace = true }
+egui = { workspace = true }
 env_logger = { workspace = true }
+image = { workspace = true }
 log = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
+photo-testkit = { workspace = true }
 tempfile = { workspace = true }
 
 # Third-party crates (rawler and the image codecs especially) are pathologically
