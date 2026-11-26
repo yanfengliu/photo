@@ -27,6 +27,14 @@ pub struct ExportItem<'a> {
     pub attributes: ExportAttributes,
     /// This item's number in the export run, for the `{seq}` token.
     pub sequence: u32,
+    /// Other files this export must never replace, whatever name they are
+    /// reached by when the export finishes: they are compared by file
+    /// identity, not by path, with the file the export would replace. A
+    /// path that leads to no file when the export starts is looked at
+    /// again when the file is placed. Replacing one of them is refused
+    /// with [`ExportError::WouldOverwriteProtected`]. Only the overwrite
+    /// policy replaces anything, so only it reads this.
+    pub protected: &'a [PathBuf],
 }
 
 /// The catalog's descriptive fields for a photo, written as metadata. A
@@ -102,6 +110,11 @@ pub enum ExportError {
     /// replaces.
     #[error("{0} is the original photo; an export never replaces it")]
     WouldOverwriteSource(PathBuf),
+    /// The file the export would replace is one of the item's
+    /// [protected](ExportItem::protected) files. The path is where that
+    /// file is.
+    #[error("{0} is protected; this export never replaces it")]
+    WouldOverwriteProtected(PathBuf),
     /// The settings ask for something this crate cannot write, such as a
     /// size of zero pixels or a JPEG wider than 65535 pixels.
     #[error("cannot export: {0}")]

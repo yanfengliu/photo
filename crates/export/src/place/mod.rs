@@ -9,57 +9,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use same_file::Handle;
+mod guard;
+
+pub(crate) use guard::Guarded;
 
 use crate::item::ExportError;
-use crate::naming::{NamePlan, occupied};
+use crate::naming::NamePlan;
 use crate::settings::ExistingFile;
 
 /// Distinguishes temporary files made by one process.
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
-
-/// The original photo's file, recognised by identity (device and inode on
-/// Unix, volume serial number and file index on Windows) rather than by
-/// name, as it was when the export started. Its handle stays open for the
-/// whole export, which keeps the identity valid on Windows; it is opened
-/// for reading and shared, so the original can still be read, moved or
-/// renamed meanwhile.
-pub(crate) struct Original {
-    path: PathBuf,
-    handle: Option<Handle>,
-}
-
-impl Original {
-    /// The file at `path` now. When it cannot be opened (it is missing, say),
-    /// it is recognised later by its path alone.
-    pub(crate) fn capture(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            handle: Handle::from_path(path).ok(),
-        }
-    }
-
-    /// Whether `target` is the original: the same file, under whatever name
-    /// it has by now, through a hard link, a symbolic link or a name that
-    /// differs only in case. A name that leads to no file is never the
-    /// original. An error means `target` exists but its identity cannot be
-    /// read, so nothing should replace it unverified.
-    pub(crate) fn is(&self, target: &Path) -> io::Result<bool> {
-        if !occupied(target) {
-            return Ok(false);
-        }
-        let candidate = match Handle::from_path(target) {
-            Ok(handle) => handle,
-            // A dangling symbolic link leads to no file.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        Ok(match &self.handle {
-            Some(original) => *original == candidate,
-            None => Handle::from_path(&self.path).is_ok_and(|original| original == candidate),
-        })
-    }
-}
 
 /// A file under a hidden temporary name, removed when dropped unless it has
 /// been placed.
@@ -121,25 +80,25 @@ impl TempFile {
     }
 
     /// Gives the finished file its name under `policy`, trying candidates
-    /// of `plan` from number `first` on. The `original` is never replaced,
-    /// whatever its name is by now.
+    /// of `plan` from number `first` on. A `guarded` file is never
+    /// replaced, whatever its name is by now.
     pub(crate) fn place(
         mut self,
         plan: &NamePlan,
         first: u32,
         policy: ExistingFile,
-        original: &Original,
+        guarded: &Guarded,
     ) -> Result<Placed, ExportError> {
         // Closed before it is renamed: Windows cannot rename an open file.
         drop(self.file.take());
         match policy {
             ExistingFile::Overwrite => {
                 let target = plan.candidate(first);
-                if original
-                    .is(&target)
+                if let Some(guard) = guarded
+                    .guards(&target)
                     .map_err(|error| ExportError::io(&target, error))?
                 {
-                    return Err(ExportError::WouldOverwriteSource(target));
+                    return Err(guard.refusal(target));
                 }
                 fs::rename(&self.path, &target).map_err(|error| ExportError::io(&target, error))?;
                 self.placed = true;
@@ -244,6 +203,7 @@ fn claim_by_reservation(temporary: &Path, target: &Path) -> io::Result<bool> {
 mod tests {
     use std::io::Write;
 
+    use super::guard::Guard;
     use super::*;
 
     fn file_with(path: &Path, bytes: &[u8]) {
@@ -314,7 +274,7 @@ mod tests {
             stem: "x".into(),
             extension: "jpg".into(),
         };
-        let original = Original::capture(&dir.path().join("absent.tif"));
+        let original = Guarded::capture(&dir.path().join("absent.tif"), &[]);
         let export = |bytes: &[u8]| finished(dir.path(), bytes).without_hard_links();
         // The name was free when the export was planned; then this appeared.
         file_with(&plan.candidate(1), b"theirs");
@@ -342,7 +302,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (original, destination) = (dir.path().join("a.tif"), dir.path().join("b.tif"));
         file_with(&original, b"the only copy");
-        let identity = Original::capture(&original);
+        let identity = Guarded::capture(&original, &[]);
         let temporary = finished(dir.path(), b"an export");
         fs::rename(&original, &destination).unwrap();
         let plan = NamePlan {
@@ -366,19 +326,29 @@ mod tests {
         let (original, other) = (dir.path().join("a.tif"), dir.path().join("b.tif"));
         file_with(&original, b"original");
         file_with(&other, b"original");
-        let identity = Original::capture(&original);
-        assert!(identity.is(&original).unwrap());
-        assert!(
-            !identity.is(&other).unwrap(),
+        let identity = Guarded::capture(&original, &[]);
+        assert_eq!(identity.guards(&original).unwrap(), Some(Guard::Source));
+        assert_eq!(
+            identity.guards(&other).unwrap(),
+            None,
             "equal bytes are not the same file"
         );
-        assert!(!identity.is(&dir.path().join("absent.tif")).unwrap());
+        assert_eq!(
+            identity.guards(&dir.path().join("absent.tif")).unwrap(),
+            None
+        );
         fs::hard_link(&original, dir.path().join("link.tif")).unwrap();
-        assert!(identity.is(&dir.path().join("link.tif")).unwrap());
+        assert_eq!(
+            identity.guards(&dir.path().join("link.tif")).unwrap(),
+            Some(Guard::Source)
+        );
         // An original that was missing at the start is looked up by name.
-        let late = Original::capture(&dir.path().join("late.tif"));
-        assert!(!late.is(&other).unwrap());
+        let late = Guarded::capture(&dir.path().join("late.tif"), std::slice::from_ref(&other));
+        assert_eq!(late.guards(&other).unwrap(), Some(Guard::Protected));
         file_with(&dir.path().join("late.tif"), b"late");
-        assert!(late.is(&dir.path().join("late.tif")).unwrap());
+        assert_eq!(
+            late.guards(&dir.path().join("late.tif")).unwrap(),
+            Some(Guard::Source)
+        );
     }
 }

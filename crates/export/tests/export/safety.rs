@@ -75,6 +75,88 @@ fn an_original_moved_onto_the_destination_during_the_export_survives() {
     assert_eq!(names(fixture.dir.path()), ["b.tif"]);
 }
 
+/// The engine names files an export must never replace (catalogued
+/// originals). Under the overwrite policy each is refused by identity:
+/// under its own name, through a hard link and through a symbolic link.
+#[test]
+fn a_protected_file_is_never_replaced_whatever_name_reaches_it() {
+    let mut fixture = Fixture::named("photo.tif", 64, 48);
+    let elsewhere = fixture.dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(fixture.out_dir()).unwrap();
+    let protected = elsewhere.join("keep.tif");
+    fs::write(&protected, b"a catalogued original").unwrap();
+    fixture.protected = vec![protected.clone()];
+    let cancel = CancelToken::new();
+    let mut settings = fixture.settings_out();
+    settings.format = Format::Tiff {
+        depth: BitDepth::Eight,
+    };
+    settings.location.existing = ExistingFile::Overwrite;
+    let intact = || assert_eq!(fs::read(&protected).unwrap(), b"a catalogued original");
+    let refused = |settings: &photo_export::ExportSettings, destination: &std::path::Path| {
+        let result = export(&fixture.item(), settings, &cancel);
+        assert!(
+            matches!(&result, Err(ExportError::WouldOverwriteProtected(path)) if path == destination),
+            "{}: {result:?}",
+            destination.display()
+        );
+        intact();
+    };
+
+    // Under its own name.
+    settings.location.folder = Folder::Specific(elsewhere.clone());
+    settings.naming.template = "keep".into();
+    refused(&settings, &protected);
+
+    // Through a hard link in the export folder.
+    settings.location.folder = Folder::Specific(fixture.out_dir());
+    let linked = fixture.out_dir().join("linked.tif");
+    fs::hard_link(&protected, &linked).unwrap();
+    settings.naming.template = "linked".into();
+    refused(&settings, &linked);
+
+    // Through a symbolic link, which stays a link.
+    #[cfg(unix)]
+    {
+        let symbolic = fixture.out_dir().join("symbolic.tif");
+        std::os::unix::fs::symlink(&protected, &symbolic).unwrap();
+        settings.naming.template = "symbolic".into();
+        refused(&settings, &symbolic);
+        assert!(fs::symlink_metadata(&symbolic).unwrap().is_symlink());
+        fs::remove_file(&symbolic).unwrap();
+    }
+
+    // The other policies never replace anything, protected or not.
+    settings.naming.template = "linked".into();
+    settings.location.existing = ExistingFile::Skip;
+    let skipped = export(&fixture.item(), &settings, &cancel).unwrap();
+    assert_eq!(
+        skipped,
+        ExportOutcome::Skipped {
+            path: linked.clone()
+        }
+    );
+    settings.location.existing = ExistingFile::UniqueName;
+    let (path, _, _) = written(&export(&fixture.item(), &settings, &cancel).unwrap());
+    assert_eq!(path, fixture.out_dir().join("linked-2.tif"));
+    intact();
+
+    // A file that is not protected is still replaced.
+    let plain = fixture.out_dir().join("plain.tif");
+    fs::write(&plain, b"an older export").unwrap();
+    settings.naming.template = "plain".into();
+    settings.location.existing = ExistingFile::Overwrite;
+    let (path, _, _) = written(&export(&fixture.item(), &settings, &cancel).unwrap());
+    assert_eq!(path, plain);
+    assert_ne!(fs::read(&plain).unwrap(), b"an older export");
+    intact();
+    assert_eq!(
+        names(&fixture.out_dir()),
+        ["linked-2.tif", "linked.tif", "plain.tif"]
+    );
+}
+
 #[test]
 fn the_original_is_never_the_file_written_under_any_policy() {
     let fixture = Fixture::named("photo.tif", 64, 48);

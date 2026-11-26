@@ -75,7 +75,7 @@ pub use settings::{
 
 use crate::metadata::Metadata;
 use crate::naming::{NamePlan, occupied};
-use crate::place::{Original, Placed, TempFile};
+use crate::place::{Guarded, Placed, TempFile};
 use crate::sharpen::Sharpener;
 use crate::strips::Producer;
 use crate::watermark::WatermarkLayer;
@@ -93,9 +93,9 @@ pub fn export(
     settings: &ExportSettings,
     cancel: &CancelToken,
 ) -> Result<ExportOutcome, ExportError> {
-    // Captured first, so the original is recognised even if it is moved or
-    // renamed while the export runs.
-    let original = Original::capture(item.source_path);
+    // Captured first, so the original and the protected files are
+    // recognised even if they are moved or renamed while the export runs.
+    let guarded = Guarded::capture(item.source_path, item.protected);
     let plan = NamePlan::new(item, settings);
     let policy = settings.location.existing;
     let first = match policy {
@@ -107,12 +107,14 @@ pub fn export(
         ExistingFile::Skip if occupied(&target) => {
             return Ok(ExportOutcome::Skipped { path: target });
         }
-        ExistingFile::Overwrite
-            if original
-                .is(&target)
-                .map_err(|error| ExportError::io(&target, error))? =>
-        {
-            return Err(ExportError::WouldOverwriteSource(target));
+        ExistingFile::Overwrite => {
+            // Refused before anything is rendered.
+            if let Some(guard) = guarded
+                .guards(&target)
+                .map_err(|error| ExportError::io(&target, error))?
+            {
+                return Err(guard.refusal(target));
+            }
         }
         _ => {}
     }
@@ -158,7 +160,7 @@ pub fn export(
         cancel,
     )?;
     proceed(cancel)?;
-    match temporary.place(&plan, first, policy, &original)? {
+    match temporary.place(&plan, first, policy, &guarded)? {
         Placed::At(path) => Ok(ExportOutcome::Written {
             path,
             width: size.0,

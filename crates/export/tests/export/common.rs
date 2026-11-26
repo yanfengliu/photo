@@ -25,6 +25,7 @@ pub struct Fixture {
     pub metadata: PhotoMetadata,
     pub attributes: ExportAttributes,
     pub sequence: u32,
+    pub protected: Vec<PathBuf>,
 }
 
 impl Fixture {
@@ -55,6 +56,7 @@ impl Fixture {
             metadata: decoded.metadata,
             attributes: ExportAttributes::default(),
             sequence: 1,
+            protected: Vec::new(),
         }
     }
 
@@ -79,6 +81,7 @@ impl Fixture {
             metadata: decoded.metadata,
             attributes: ExportAttributes::default(),
             sequence: 1,
+            protected: Vec::new(),
         }
     }
 
@@ -91,6 +94,7 @@ impl Fixture {
             metadata: &self.metadata,
             attributes: self.attributes.clone(),
             sequence: self.sequence,
+            protected: &self.protected,
         }
     }
 

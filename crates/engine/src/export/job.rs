@@ -34,6 +34,7 @@ impl Pending {
             metadata: &self.metadata,
             attributes: self.attributes.clone(),
             sequence: self.sequence,
+            protected: &[],
         }
     }
 }
