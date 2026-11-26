@@ -2,6 +2,9 @@
 //! preview is looked at again, and what happens while its workers are held.
 
 mod closing;
+// Its one test needs a symbolic link, which Windows gives only to
+// administrators; elsewhere its helpers would be unused.
+#[cfg(unix)]
 mod exports;
 mod imports;
 mod loading;
