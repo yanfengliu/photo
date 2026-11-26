@@ -191,14 +191,30 @@ pub fn icc_profile(path: &Path) -> Option<Vec<u8>> {
     decoder.icc_profile().unwrap()
 }
 
-/// Every name in `dir`, sorted.
+/// Every name in `dir`, sorted. The `._name` companions that macOS keeps
+/// beside files on a volume without extended attributes (FAT, exFAT) are
+/// its own business and are left out, so that these tests can be run with
+/// `TMPDIR` on such a volume.
 pub fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with("._"))
         .collect();
     names.sort();
     names
+}
+
+/// Gives `file` a second name, `link`: a real hard link wherever the
+/// volume has them, and a symbolic link on one that has none (FAT, exFAT).
+pub fn second_name(file: &Path, link: &Path) {
+    if fs::hard_link(file, link).is_ok() {
+        return;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(file, link).unwrap();
+    #[cfg(not(unix))]
+    panic!("{} has no hard links", link.display());
 }
 
 /// A raster source made directly from linear sRGB values.

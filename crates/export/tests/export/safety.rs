@@ -10,7 +10,7 @@ use photo_export::{
     BitDepth, ExistingFile, ExportError, ExportOutcome, Folder, Format, export, planned_path,
 };
 
-use crate::common::{Fixture, linear_source, names, written};
+use crate::common::{Fixture, linear_source, names, second_name, written};
 
 /// Runs `action` from another thread as soon as an export's temporary file
 /// appears in `folder`; true when it ran.
@@ -75,6 +75,46 @@ fn an_original_moved_onto_the_destination_during_the_export_survives() {
     assert_eq!(names(fixture.dir.path()), ["b.tif"]);
 }
 
+/// Review findings F29 and F33 through the public API: a protected file is
+/// moved onto the destination while the export renders, after the check
+/// made before rendering. It is recognised when the export comes to place
+/// its file, and survives where it is.
+#[test]
+fn a_protected_file_moved_onto_the_destination_during_the_export_survives() {
+    let mut fixture = Fixture::named("a.tif", 64, 48);
+    fixture.source = linear_source(3000, 2000, |x, y| {
+        [(x % 97) as f32 / 97.0, (y % 89) as f32 / 89.0, 0.5]
+    });
+    let protected = fixture.dir.path().join("catalogued.tif");
+    fs::write(&protected, b"a catalogued original").unwrap();
+    fixture.protected = vec![protected.clone()];
+    let mut settings = fixture.settings_out();
+    settings.location.existing = ExistingFile::Overwrite;
+    settings.naming.template = "b".into();
+    settings.format = Format::Tiff {
+        depth: BitDepth::Sixteen,
+    };
+    fs::create_dir_all(fixture.out_dir()).unwrap();
+    let destination = fixture.out_dir().join("b.tif");
+    fs::write(&destination, b"an older export").unwrap();
+    let mover = {
+        let (from, to) = (protected.clone(), destination.clone());
+        when_writing_starts(fixture.out_dir(), move || fs::rename(from, to).unwrap())
+    };
+    let result = export(&fixture.item(), &settings, &CancelToken::new());
+    assert!(mover.join().unwrap(), "the temporary file was never seen");
+    assert!(
+        matches!(&result, Err(ExportError::WouldOverwriteProtected(path)) if *path == destination),
+        "{result:?}"
+    );
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"a catalogued original",
+        "the protected file survives"
+    );
+    assert_eq!(names(&fixture.out_dir()), ["b.tif"]);
+}
+
 /// The engine names files an export must never replace (catalogued
 /// originals). Under the overwrite policy each is refused by identity:
 /// under its own name, through a hard link and through a symbolic link.
@@ -112,7 +152,7 @@ fn a_protected_file_is_never_replaced_whatever_name_reaches_it() {
     // Through a hard link in the export folder.
     settings.location.folder = Folder::Specific(fixture.out_dir());
     let linked = fixture.out_dir().join("linked.tif");
-    fs::hard_link(&protected, &linked).unwrap();
+    second_name(&protected, &linked);
     settings.naming.template = "linked".into();
     refused(&settings, &linked);
 
@@ -210,13 +250,30 @@ fn another_name_for_the_original_is_still_the_original() {
 
     // A hard link elsewhere.
     fs::create_dir_all(fixture.out_dir()).unwrap();
-    fs::hard_link(&fixture.original, fixture.out_dir().join("linked.tif")).unwrap();
+    second_name(&fixture.original, &fixture.out_dir().join("linked.tif"));
     settings.naming.template = "linked".into();
     let result = export(&fixture.item(), &settings, &cancel);
     assert!(
         matches!(result, Err(ExportError::WouldOverwriteSource(_))),
         "{result:?}"
     );
+
+    // The other two policies never replace anything: the link is left
+    // alone, or the export takes the next name.
+    let linked = fixture.out_dir().join("linked.tif");
+    settings.location.existing = ExistingFile::Skip;
+    let skipped = export(&fixture.item(), &settings, &cancel).unwrap();
+    assert_eq!(
+        skipped,
+        ExportOutcome::Skipped {
+            path: linked.clone()
+        }
+    );
+    settings.location.existing = ExistingFile::UniqueName;
+    let (path, _, _) = written(&export(&fixture.item(), &settings, &cancel).unwrap());
+    assert_eq!(path, fixture.out_dir().join("linked-2.tif"));
+    assert_eq!(fs::read(&linked).unwrap(), before);
+    settings.location.existing = ExistingFile::Overwrite;
 
     // The same name in another case: the original on a file system that
     // ignores case, a different file on one that does not.

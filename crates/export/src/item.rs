@@ -88,8 +88,9 @@ impl ExportOutcome {
     }
 }
 
-/// Why an export failed. A failed export leaves no file behind, neither at
-/// the planned name nor under a temporary one.
+/// Why an export failed. A failed export leaves no file of its own behind,
+/// neither at the planned name nor under a temporary one; the crate
+/// documentation says what becomes of a file it had moved aside.
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     /// The original could not be decoded.
@@ -106,13 +107,18 @@ pub enum ExportError {
         /// What went wrong.
         source: io::Error,
     },
-    /// The planned file is the original photo itself, which an export never
-    /// replaces.
+    /// The file the export would replace is the original photo itself,
+    /// which an export never replaces. The path is where the original is:
+    /// the planned destination or, when another program took that name
+    /// while the file was being identified, the visible name beside it
+    /// that the original was given instead (or, in the few cases the crate
+    /// documentation lists, the hidden name it could not be moved back
+    /// from).
     #[error("{0} is the original photo; an export never replaces it")]
     WouldOverwriteSource(PathBuf),
     /// The file the export would replace is one of the item's
     /// [protected](ExportItem::protected) files. The path is where that
-    /// file is.
+    /// file is, as for [`Self::WouldOverwriteSource`].
     #[error("{0} is protected; this export never replaces it")]
     WouldOverwriteProtected(PathBuf),
     /// The settings ask for something this crate cannot write, such as a

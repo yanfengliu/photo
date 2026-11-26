@@ -32,15 +32,101 @@
 //!
 //! # Safety of the originals
 //!
-//! An export never opens the original for writing. It writes a temporary
-//! file in the destination folder and gives it its name only when it is
-//! complete; on failure or cancellation the temporary file is removed. A
-//! destination that is the original itself is never written: the original
-//! is recognised by file identity taken when the export starts, so a hard
-//! link, a name differing in case, or the original moved onto the
-//! destination meanwhile all count. The overwrite policy refuses it, the
-//! unique-name policy moves on to the next name and the skip policy skips
-//! it; those two never replace any file, with or without hard links.
+//! An export never opens the original for writing. It writes a hidden
+//! temporary file in the destination folder and gives it its name only
+//! when it is complete; on failure or cancellation the temporary file is
+//! removed.
+//!
+//! Guaranteed, whatever other programs do in the folder while the export
+//! runs (the `place` module; its tests act between every two steps, and
+//! pass on APFS and, with `TMPDIR` set there, on FAT32 and exFAT volumes
+//! under macOS; nothing here has been run on Windows):
+//!
+//! - **Skip and unique name** never replace or remove a file the export
+//!   did not create. The name is taken by a hard link or an exclusive
+//!   rename, which fail when the name is taken, so a reader never sees an
+//!   unfinished file under the final name. On a file system with neither
+//!   (measured: FAT32 and exFAT under macOS; some network shares may be
+//!   alike) the name is created exclusively and the bytes are copied into
+//!   it: still nothing is replaced, but every export is written twice
+//!   there and a reader can see the file grow under its final name. The
+//!   unique-name policy fails, rather than going on without end, when a
+//!   hundred names in a row are each taken in the instant before it can
+//!   have them.
+//! - **Overwrite** replaces what has the name, except the original photo
+//!   and the files in [`ExportItem::protected`]. Those are recognised by
+//!   file identity, as they were when the export started and as their
+//!   paths lead when the file is replaced, so a hard link, a symbolic
+//!   link, a name differing in case, a file moved onto the destination
+//!   meanwhile and a folder that was away and has come back all count.
+//!   The files are kept open and their identity is read afresh at every
+//!   comparison, because on FAT and exFAT a file's identity changes over
+//!   its life (with its first bytes, with a rename, with being rewritten).
+//!   The check and the replacement are not two steps on a name: what has
+//!   the name is moved aside in one rename, identified, and removed only
+//!   once the export has the name, which it takes without replacing, as
+//!   under the other policies. The export is refused with
+//!   [`ExportError::WouldOverwriteSource`] or
+//!   [`ExportError::WouldOverwriteProtected`]: before anything is rendered
+//!   when the guarded file has the name as the export starts, and without
+//!   moving it when it has the name as the export comes to place its file.
+//!   Only a guarded file that takes the name in the instant after that
+//!   last look is moved aside with it; it is then put back. A file that
+//!   cannot be opened to be identified is refused in the same way. So is
+//!   a file moved aside from the very place a guarded path names (the same
+//!   folder and the same name, ignoring case), which on a file system that
+//!   tells such names apart can be another file: the doubt goes to the
+//!   guarded file.
+//! - **A failure loses nothing.** A failed, refused or cancelled export
+//!   removes the files it created and nothing else (a destination folder
+//!   it had to make stays). A file it had moved aside is put back without
+//!   replacing anything: under its own name or, if another program has
+//!   taken that meanwhile, under a visible name beside it
+//!   (`name-kept.ext`, then `name-kept-2.ext` and so on). For the original
+//!   or a protected file the error carries the path it now has; for any
+//!   other file that path is logged.
+//!
+//! Not guaranteed:
+//!
+//! - Another program writing to this export's own hidden names
+//!   (`.photo-export-<process>-<number>.<role>` in the destination folder)
+//!   is out of scope: a file put under such a name can be replaced or
+//!   removed.
+//! - Under the overwrite policy every other file with the export's name is
+//!   replaced, one that another program put there a moment before
+//!   included: only the original and the protected files are guarded.
+//! - A protected path protects the file it leads to when the export starts
+//!   and the file it leads to when the export identifies what has its
+//!   name. A path that only begins to lead to that file later does not
+//!   protect it: nothing then tells the file from any other. A path that
+//!   reaches the file only through the export's own name (a symbolic link
+//!   to that name, say) must lead there by the export's last look at the
+//!   name, because moving the file aside breaks such a path. A path that
+//!   cannot be opened protects nothing while it cannot.
+//! - An original or protected file that takes the export's name in the
+//!   instant between the export's last look at the name and its move is
+//!   moved aside with it: until it is put back it is whole, but under a
+//!   hidden name. A process that stops there, or between any other two
+//!   steps, leaves the hidden files that `place` lists step by step, and
+//!   nothing picks them up later. It never leaves a file both gone and not
+//!   yet replaced.
+//! - A file that cannot be put back stays whole under its hidden name,
+//!   which the error or the log then gives. That happens when the folder
+//!   can no longer be written, when its name and the ninety-nine names
+//!   tried beside it are all taken, when there is no room for the copy
+//!   described next, or when it is a folder that took the name at that
+//!   very instant on a file system without an exclusive rename.
+//! - On a file system with neither hard links nor exclusive renames, a
+//!   file that is put back comes back as a new file with the same bytes,
+//!   modification time and permissions (a symbolic link is made anew and
+//!   leads where it led). On Windows without hard links (FAT, exFAT) a
+//!   file that is put back has its attributes (read-only, hidden, system)
+//!   cleared, which the exclusive rename used there does.
+//! - Power loss, as opposed to this process stopping: an export is not
+//!   synced to the disk before it takes its name (only a copy made where
+//!   there is neither move is), so a file reported as written can be
+//!   incomplete afterwards, and under the overwrite policy the file it
+//!   replaced is gone by then.
 //!
 //! See `docs/work/12_lightroom-workflow-restart/design.md` (§5.8, §5.9,
 //! §8.4).
@@ -84,8 +170,10 @@ use crate::watermark::WatermarkLayer;
 ///
 /// Returns where the file went and its size, or that it was skipped because
 /// a file with its name exists and the policy is
-/// [`ExistingFile::Skip`]. The original is never modified, and a failed or
-/// cancelled export leaves no file behind. `cancel` is checked between
+/// [`ExistingFile::Skip`]. The original is never modified, neither it nor
+/// a [protected](ExportItem::protected) file is ever replaced, and a
+/// failed or cancelled export leaves no file behind (see the crate
+/// documentation for exactly what is guaranteed). `cancel` is checked between
 /// strips and while encoding; once it is cancelled the result is
 /// [`ExportError::Cancelled`].
 pub fn export(
