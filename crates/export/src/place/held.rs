@@ -14,7 +14,8 @@
 //! one. What is kept is the open file, and the identity is read afresh
 //! from it, and from the file it is compared with, at the moment of every
 //! comparison: the open file and its path report the same new number as
-//! soon as it changes.
+//! soon as it changes. Reading an identity can fail (when no descriptor is
+//! left to read it with, say); that is an error, never an answer.
 
 use std::fs::File;
 use std::io;
@@ -24,24 +25,25 @@ use same_file::Handle;
 
 /// A file kept open. Anyone can still read, move, rename or remove it
 /// meanwhile (on Windows it is opened shared for all three).
-pub(crate) struct Held(Handle);
+pub(crate) struct Held(File);
 
 impl Held {
     /// Opens what `path` leads to, a file or a folder; a symbolic link is
     /// followed.
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
-        Handle::from_path(path).map(Self)
+        // `same_file` knows how to open a folder on Windows as well.
+        Handle::from_path(path)?.as_file().try_clone().map(Self)
     }
 
     /// Keeps a file that is already open; it stays usable through
-    /// [`Self::file`].
-    pub(crate) fn keep(file: File) -> io::Result<Self> {
-        Handle::from_file(file).map(Self)
+    /// [`Self::file`]. Nothing is read from it yet, so this cannot fail.
+    pub(crate) fn keep(file: File) -> Self {
+        Self(file)
     }
 
     /// The open file.
     pub(crate) fn file(&mut self) -> &mut File {
-        self.0.as_file_mut()
+        &mut self.0
     }
 
     /// True when the two are one file at this moment. An error means an
@@ -50,15 +52,21 @@ impl Held {
         Ok(self.now()? == other.now()?)
     }
 
-    /// True when `path` can be shown to lead to this file at this moment;
-    /// false when it leads elsewhere, nowhere, or cannot be read.
-    pub(crate) fn is_at(&self, path: &Path) -> bool {
-        Self::open(path).is_ok_and(|there| self.is(&there).unwrap_or(false))
+    /// True when `path` leads to this file at this moment; false when it
+    /// leads to another or to nothing. An error means it could not be
+    /// told: `path` leads to something that cannot be opened, or an
+    /// identity could not be read.
+    pub(crate) fn is_at(&self, path: &Path) -> io::Result<bool> {
+        match Self::open(path) {
+            Ok(there) => self.is(&there),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// The identity the file has now, read from the open file.
     fn now(&self) -> io::Result<Handle> {
-        Handle::from_file(self.0.as_file().try_clone()?)
+        Handle::from_file(self.0.try_clone()?)
     }
 }
 
@@ -81,18 +89,38 @@ mod tests {
             .create_new(true)
             .open(&first)
             .unwrap();
-        let mut held = Held::keep(created).unwrap();
-        assert!(held.is_at(&first));
+        let mut held = Held::keep(created);
+        assert!(held.is_at(&first).unwrap());
         fs::rename(&first, &second).unwrap();
-        assert!(held.is_at(&second), "after a rename while empty");
+        assert!(held.is_at(&second).unwrap(), "after a rename while empty");
         held.file().write_all(b"first bytes").unwrap();
-        assert!(held.is_at(&second), "after its first bytes");
+        assert!(held.is_at(&second).unwrap(), "after its first bytes");
         fs::rename(&second, &first).unwrap();
-        assert!(held.is_at(&first), "after a rename");
+        assert!(held.is_at(&first).unwrap(), "after a rename");
         let other = dir.path().join("other");
         fs::write(&other, b"first bytes").unwrap();
-        assert!(!held.is_at(&other) && !held.is_at(&second));
+        assert!(!held.is_at(&other).unwrap() && !held.is_at(&second).unwrap());
         assert!(!held.is(&Held::open(&other).unwrap()).unwrap());
         assert!(held.is(&Held::open(&first).unwrap()).unwrap());
+    }
+
+    /// A path that leads to something that cannot be opened says nothing
+    /// about whether it is this file: an error, not "another file".
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_cannot_be_opened_is_not_another_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, b"bytes").unwrap();
+        let held = Held::open(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&path).is_ok() {
+            // Whoever runs this (root) is stopped by no permission.
+            return;
+        }
+        let error = held.is_at(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!held.is_at(&dir.path().join("absent")).unwrap());
     }
 }

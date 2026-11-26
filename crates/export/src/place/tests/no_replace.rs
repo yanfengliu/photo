@@ -134,7 +134,7 @@ fn a_failure_gives_back_only_what_the_export_created() {
                 );
                 if let Some(theirs) = &theirs {
                     assert!(
-                        theirs.is_at(&name),
+                        theirs.is_at(&name).unwrap(),
                         "{context}: their file is gone: {:?}",
                         folder.names()
                     );

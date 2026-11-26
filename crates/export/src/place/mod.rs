@@ -14,6 +14,8 @@
 //! - A failure leaves nothing of the export behind and nothing of anyone
 //!   else's missing: a file that was moved aside is put back, without
 //!   replacing anything, under its name or a visible name beside it.
+//! - An identity that cannot be read is an error, never an answer: not
+//!   "another file has the name", not "this is the export's own file".
 //!
 //! One thing is out of scope: another program writing to this export's own
 //! hidden names, `.photo-export-<process>-<number>.<role>` in the

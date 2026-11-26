@@ -165,8 +165,10 @@ pub(crate) fn move_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Resul
 ///
 /// `Ok(false)` when the name is taken, and also when another program took
 /// the name over while the bytes were copied: what is there then is not
-/// this export's to touch, and `from` is kept. When the copy fails, the name
-/// is given back only if it still leads to the file created here.
+/// this export's to touch, and `from` is kept. When the copy fails, or
+/// whether the name still leads to the copy cannot be read, that is the
+/// error, and the name is given back only if it can be shown to lead to
+/// the file created here.
 fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
     let kind = fs::symlink_metadata(from)?.file_type();
     if kind.is_symlink() {
@@ -192,18 +194,20 @@ fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
     // The open file is how this file is told from any other that comes to
     // have its name. Its identity is read when it is compared, not noted
     // here: on FAT and exFAT, the very file systems this is for, a file's
-    // identity changes with its first bytes.
-    let mut created = Held::keep(created)?;
-    let filled = fill(disk, from, created.file());
-    let still_here = disk.is_at(&created, to).unwrap_or(false);
+    // identity changes with its first bytes. So nothing can fail between
+    // creating the name and the point from which a failure gives it back.
+    let mut created = Held::keep(created);
+    let filled = fill(disk, from, created.file()).and_then(|()| disk.is_at(&created, to));
     match filled {
-        Ok(()) if still_here => {
+        Ok(true) => {
             drop(created);
             disk.reached(Step::Unlink);
             remove_old_name(from);
             Ok(true)
         }
-        Ok(()) => {
+        // Another program renamed its own file onto the name while the bytes
+        // were copied, which replaced the copy; or it removed the copy.
+        Ok(false) => {
             drop(created);
             if occupied(to) {
                 Ok(false)
@@ -287,16 +291,28 @@ fn fill(disk: &mut dyn Disk, from: &Path, into: &mut File) -> io::Result<()> {
     Ok(())
 }
 
-/// Gives back a name [`copy_new`] created and could not fill, but only the
-/// file created there. What has the name is moved aside in one rename, so
-/// that what is examined is exactly what had it: if that is the file
-/// `created`, it is removed; if another program put its own file there in
-/// between, that file is put back untouched.
+/// Gives back a name [`copy_new`] created and could not fill or confirm,
+/// but only the file created there. What has the name is moved aside in one
+/// rename, so that what is examined is exactly what had it: if that is the
+/// file `created`, it is removed; if another program put its own file there
+/// in between, that file is put back untouched.
+///
+/// A file that cannot be told to be `created` (an identity cannot be read)
+/// is treated as somebody else's: left where it is, or put back. It may be
+/// this export's own copy, which then stays.
 fn give_back(disk: &mut dyn Disk, to: &Path, created: Held) {
     disk.reached(Step::GiveBack);
     // Looked at first, so that another program's file is not even moved.
-    if !disk.is_at(&created, to).unwrap_or(false) {
-        return;
+    match disk.is_at(&created, to) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            log::warn!(
+                "cannot tell whether {} is the unfinished export, so it stays: {error}",
+                to.display()
+            );
+            return;
+        }
     }
     let aside = match set_aside(disk, to, "discard") {
         Ok(Some(aside)) => aside,
@@ -306,16 +322,25 @@ fn give_back(disk: &mut dyn Disk, to: &Path, created: Held) {
             return;
         }
     };
-    let ours = disk.is_at(&created, &aside).unwrap_or(false);
+    let ours = disk.is_at(&created, &aside);
     drop(created);
-    if ours {
-        if let Err(error) = fs::remove_file(&aside) {
-            log::warn!("cannot remove the unfinished {}: {error}", aside.display());
+    match ours {
+        Ok(true) => {
+            if let Err(error) = fs::remove_file(&aside) {
+                log::warn!("cannot remove the unfinished {}: {error}", aside.display());
+            }
         }
-    } else {
-        let now = put_back(disk, &aside, to);
-        if now != to {
-            log::warn!("{} is now {}", to.display(), now.display());
+        ours => {
+            if let Err(error) = ours {
+                log::warn!(
+                    "cannot tell whether {} is the unfinished export, so it goes back: {error}",
+                    to.display()
+                );
+            }
+            let now = put_back(disk, &aside, to);
+            if now != to {
+                log::warn!("{} is now {}", to.display(), now.display());
+            }
         }
     }
 }

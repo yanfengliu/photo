@@ -1,7 +1,8 @@
 //! Opening a catalog and the plumbing every other module builds on.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use photo_core::meta::CollectionId;
 use rusqlite::config::DbConfig;
@@ -28,6 +29,11 @@ pub struct Catalog {
     pub(crate) quick_collection: CollectionId,
     clock: Clock,
     read_only: bool,
+    /// How long one call waits for a lock (see [`Catalog::set_busy_timeout`]).
+    busy_timeout: Cell<Duration>,
+    /// When set, no change waits for a lock past this moment, and none is
+    /// tried once it has passed (see [`Catalog::set_deadline`]).
+    deadline: Option<Instant>,
 }
 
 impl Catalog {
@@ -80,9 +86,45 @@ impl Catalog {
     /// How long a call waits for another connection that has the catalog
     /// locked before it fails ([`CatalogError::is_catalog_wide`] is then
     /// true of its error). A catalog waits [`Catalog::BUSY_TIMEOUT`] until
-    /// told otherwise; with zero it does not wait at all.
+    /// told otherwise; with zero it does not wait at all. Each call waits
+    /// this long afresh; for one limit on many calls, see
+    /// [`Catalog::set_deadline`].
     pub fn set_busy_timeout(&self, timeout: Duration) -> Result<()> {
-        Ok(self.conn.busy_timeout(timeout)?)
+        self.busy_timeout.set(timeout);
+        self.limit_the_wait()?;
+        Ok(())
+    }
+
+    /// One limit for every change from now on, however many there are: a
+    /// change waits for another connection that has the catalog locked
+    /// only for what is left until `deadline` (and no longer than the busy
+    /// timeout), and a change asked for once `deadline` has passed is not
+    /// tried at all: it fails with [`CatalogError::OutOfTime`], changing
+    /// nothing. Reading is never refused; it only stops waiting. `None`
+    /// lifts the limit.
+    pub fn set_deadline(&mut self, deadline: Option<Instant>) -> Result<()> {
+        self.deadline = deadline;
+        self.limit_the_wait()?;
+        Ok(())
+    }
+
+    /// Tell SQLite how long the next statement may wait for a lock: the
+    /// busy timeout, cut to what is left until the deadline. Returns false
+    /// once the deadline has passed. What is left is rounded up to whole
+    /// milliseconds, SQLite's unit, so that a change that waited out all
+    /// of it leaves the deadline passed rather than a fraction before.
+    fn limit_the_wait(&self) -> Result<bool> {
+        let timeout = self.busy_timeout.get();
+        let (wait, time_left) = match self.deadline {
+            None => (timeout, true),
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let millis = u64::try_from(left.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX);
+                (Duration::from_millis(millis).min(timeout), !left.is_zero())
+            }
+        };
+        self.conn.busy_timeout(wait)?;
+        Ok(time_left)
     }
 
     /// The schema version stored in the file (`PRAGMA user_version`). After a
@@ -174,21 +216,27 @@ impl Catalog {
             quick_collection: CollectionId(quick),
             clock: Clock { last: newest },
             read_only,
+            busy_timeout: Cell::new(Self::BUSY_TIMEOUT),
+            deadline: None,
         })
     }
 
     /// Run `work` inside one immediate transaction, committing if it returns
     /// `Ok` and rolling back otherwise. `work` also receives the time stamp
     /// of this write in microseconds; stamps strictly increase from one write
-    /// to the next, whatever the system clock does. Fails with
-    /// [`CatalogError::ReadOnly`], before anything runs, on a write-protected
-    /// catalog.
+    /// to the next, whatever the system clock does. Fails before anything
+    /// runs with [`CatalogError::ReadOnly`] on a write-protected catalog,
+    /// and with [`CatalogError::OutOfTime`] once the deadline has passed;
+    /// before that, it waits for a lock only for what is left of it.
     pub(crate) fn write<T>(
         &mut self,
         work: impl FnOnce(&Transaction<'_>, i64) -> Result<T>,
     ) -> Result<T> {
         if self.read_only {
             return Err(CatalogError::ReadOnly);
+        }
+        if self.deadline.is_some() && !self.limit_the_wait()? {
+            return Err(CatalogError::OutOfTime);
         }
         let now = self.clock.tick();
         let tx = self
@@ -381,5 +429,35 @@ mod tests {
         assert_eq!(waits(), 250);
         catalog.set_busy_timeout(Duration::ZERO).unwrap();
         assert_eq!(waits(), 0, "not at all");
+    }
+
+    #[test]
+    fn a_deadline_cuts_the_wait_to_what_is_left_and_lifting_it_restores_the_timeout() {
+        let mut catalog = Catalog::open_in_memory().unwrap();
+        let waits = |catalog: &Catalog| -> i64 {
+            catalog
+                .conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .unwrap()
+        };
+        catalog
+            .set_busy_timeout(Duration::from_millis(250))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        catalog.set_deadline(Some(deadline)).unwrap();
+        assert_eq!(waits(&catalog), 250, "never longer than the timeout");
+        catalog
+            .set_deadline(Some(Instant::now() + Duration::from_millis(100)))
+            .unwrap();
+        assert!(waits(&catalog) <= 100, "{} ms", waits(&catalog));
+        catalog.set_deadline(Some(Instant::now())).unwrap();
+        assert_eq!(waits(&catalog), 0, "nothing is left");
+        assert!(matches!(
+            catalog.set_setting("k", "v"),
+            Err(CatalogError::OutOfTime)
+        ));
+        catalog.set_deadline(None).unwrap();
+        assert_eq!(waits(&catalog), 250, "the timeout is back");
+        catalog.set_setting("k", "v").unwrap();
     }
 }

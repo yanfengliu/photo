@@ -68,9 +68,9 @@ pub(crate) trait Disk {
     }
 
     /// Whether `path` leads to the file `held` at this moment. An error
-    /// means that it could not be told.
+    /// means that it could not be told (see [`Held::is_at`]).
     fn is_at(&mut self, held: &Held, path: &Path) -> io::Result<bool> {
-        Ok(held.is_at(path))
+        held.is_at(path)
     }
 
     /// Whether the volume has room for a copy. Always, on the real file

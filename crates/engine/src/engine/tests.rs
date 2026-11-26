@@ -65,6 +65,12 @@ fn engine_with(files: &[PathBuf], workers: usize) -> (TempDir, Engine, Vec<Photo
 /// dropped. With one worker, everything submitted meanwhile waits in the
 /// queue.
 fn hold_worker(engine: &mut Engine) -> Sender<()> {
+    hold_worker_lingering(engine, Duration::ZERO)
+}
+
+/// As [`hold_worker`], and once let go the worker stays busy for `linger`
+/// more, as a job does that takes that long to notice it should stop.
+fn hold_worker_lingering(engine: &mut Engine, linger: Duration) -> Sender<()> {
     let (started, has_started) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
     engine.submit(
@@ -75,6 +81,9 @@ fn hold_worker(engine: &mut Engine) -> Sender<()> {
             started.send(()).unwrap();
             // An error is the sender dropped, which releases as well.
             let _ = released.recv();
+            if !linger.is_zero() {
+                std::thread::sleep(linger);
+            }
             Box::new(|_: &mut Engine| false)
         },
         |_, _| false,

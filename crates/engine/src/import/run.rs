@@ -309,8 +309,9 @@ impl Engine {
     ///
     /// As the engine closes there is no one to report to and no time to
     /// wait or to tidy up. The catalog is waited for only as long as
-    /// closing still has, and what it could not take stays where it is and
-    /// is named in the log.
+    /// closing still has (the catalog's deadline sees to that, for every
+    /// write), and what it could not take stays where it is and is named in
+    /// the log.
     fn insert_batch(&mut self, task: TaskId, batch: Vec<NewPhoto>) {
         let Some(import) = self.import_summary(task).map(|summary| summary.import) else {
             return;
@@ -319,9 +320,6 @@ impl Engine {
             return;
         }
         let closing = self.imports.closing;
-        if let Some(deadline) = closing {
-            self.wait_for_catalog_until(deadline);
-        }
         let recorded = record(
             &mut self.catalog,
             &batch,
@@ -337,7 +335,7 @@ impl Engine {
         };
         for (photo, error) in &recorded.refused {
             self.forget_copy(task, photo);
-            if closing.is_some() {
+            if closing {
                 log::error!(
                     "{} was not imported as the application closed: {error}",
                     photo.path.display()
@@ -347,7 +345,7 @@ impl Engine {
         }
         if let Some((photos, error)) = &recorded.stranded {
             for photo in *photos {
-                if closing.is_some() {
+                if closing {
                     log::error!(
                         "{} could not be recorded in the catalog as the application closed ({error}); the file is left where it is, and importing its folder adds it",
                         photo.path.display()

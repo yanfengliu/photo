@@ -121,6 +121,12 @@
 //!   tried beside it are all taken, when there is no room for the copy
 //!   described next, or when it is a folder that took the name at that
 //!   very instant on a file system without an exclusive rename.
+//! - Where the export is copied to its name (neither hard links nor
+//!   exclusive renames), an identity that cannot be read when the export
+//!   checks its copy fails the export at that name; the copy is removed
+//!   only once it is shown to be the export's, so when no identity can be
+//!   read at all (no descriptor left, say) the finished copy stays under
+//!   the export's name.
 //! - On a file system with neither hard links nor exclusive renames, a
 //!   file that is put back comes back as a new file with the same bytes,
 //!   modification time and permissions (a symbolic link is made anew and

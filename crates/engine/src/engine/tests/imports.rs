@@ -5,11 +5,14 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use photo_catalog::Catalog;
+use photo_catalog::{Catalog, CatalogError};
+use photo_core::develop::Adj;
+use photo_core::meta::PhotoId;
 use tempfile::TempDir;
 
 use super::{
-    Engine, PATIENCE, engine_with, hold_worker, jpegs, logged, next_event, release_at_shutdown,
+    Engine, PATIENCE, engine_with, hold_worker_lingering, jpegs, logged, next_event,
+    release_at_shutdown,
 };
 use crate::import::{CopyLayout, ImportMode, ImportRequest};
 
@@ -39,12 +42,22 @@ struct Halfway {
     catalog_path: PathBuf,
     /// The finished copy that has no record yet.
     copy: PathBuf,
-    _dirs: [TempDir; 3],
+    /// The photos that were in the catalog before the import.
+    catalogued: Vec<PhotoId>,
+    _dirs: [TempDir; 4],
 }
 
 fn halfway_through_a_copy_import() -> Halfway {
+    halfway_through_a_copy_import_with(0, Duration::ZERO)
+}
+
+/// As [`halfway_through_a_copy_import`], in a catalog that already holds
+/// `catalogued` photos, and with a busy worker that takes `linger` to stop
+/// once the engine shuts it down.
+fn halfway_through_a_copy_import_with(catalogued: usize, linger: Duration) -> Halfway {
+    let (catalogued_dir, catalogued_files) = jpegs(catalogued, 96, 64);
     let (files_dir, files) = jpegs(2, 96, 64);
-    let (dir, mut engine, _) = engine_with(&[], 1);
+    let (dir, mut engine, catalogued) = engine_with(&catalogued_files, 1);
     let destination = tempfile::tempdir().unwrap();
     let task = engine
         .start_import(copying(files, destination.path()))
@@ -59,7 +72,7 @@ fn halfway_through_a_copy_import() -> Halfway {
     engine.handle(first_copied);
     // From here the worker is busy with something else, so the copy of the
     // second file stays queued.
-    let release = hold_worker(&mut engine);
+    let release = hold_worker_lingering(&mut engine, linger);
     release_at_shutdown(&mut engine, release);
     engine.handle(second_read);
 
@@ -75,7 +88,8 @@ fn halfway_through_a_copy_import() -> Halfway {
         engine,
         catalog_path: catalog_path(&dir),
         copy,
-        _dirs: [files_dir, dir, destination],
+        catalogued,
+        _dirs: [catalogued_dir, files_dir, dir, destination],
     }
 }
 
@@ -86,6 +100,7 @@ fn closing_the_app_during_a_copy_import_leaves_no_file_without_a_record() {
         catalog_path,
         copy,
         _dirs,
+        ..
     } = halfway_through_a_copy_import();
     drop(engine);
 
@@ -110,6 +125,7 @@ fn closing_does_not_wait_out_a_catalog_that_another_connection_has_locked() {
         catalog_path,
         copy,
         _dirs,
+        ..
     } = halfway_through_a_copy_import();
     // Another connection is in the middle of a change, and stays there.
     let other = rusqlite::Connection::open(&catalog_path).unwrap();
@@ -137,6 +153,63 @@ fn closing_does_not_wait_out_a_catalog_that_another_connection_has_locked() {
     assert!(
         lines.iter().any(|line| line.contains(&name)),
         "and named in the log: {lines:?}"
+    );
+}
+
+#[test]
+fn closing_spends_one_patience_on_all_its_writes_and_tries_none_once_it_is_spent() {
+    let Halfway {
+        mut engine,
+        catalog_path,
+        copy,
+        catalogued,
+        _dirs,
+    } = halfway_through_a_copy_import_with(1, Duration::ZERO);
+    // An edit is open on the photo that was there before the import.
+    engine.open_develop(catalogued[0]).unwrap();
+    engine.adjust(Adj::Exposure, 0.8).unwrap();
+    // Another connection is in the middle of a change, and stays there.
+    let other = rusqlite::Connection::open(&catalog_path).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    engine.closing_patience = Duration::from_millis(200);
+    let lines = logged(|| drop(engine));
+
+    // The edit waits out all of the patience. The copy's record, which
+    // comes after it, is not tried: it would only wait again.
+    let name = copy.display().to_string();
+    let Some(line) = lines.iter().find(|line| line.contains(&name)) else {
+        panic!("the copy is named in the log: {lines:?}");
+    };
+    assert!(
+        line.contains(&CatalogError::OutOfTime.to_string()),
+        "and was not tried: {line}"
+    );
+    other.execute_batch("ROLLBACK").unwrap();
+    drop(other);
+    let catalog = Catalog::open(catalog_path).unwrap();
+    assert!(catalog.find_by_path(&copy).unwrap().is_none());
+    assert!(copy.is_file(), "it is left where it is");
+}
+
+#[test]
+fn waiting_for_the_workers_to_stop_spends_none_of_the_patience() {
+    // The busy worker takes longer to stop than closing waits for the
+    // catalog in all, and nothing is in the catalog's way.
+    let patience = Duration::from_millis(50);
+    let Halfway {
+        mut engine,
+        catalog_path,
+        copy,
+        _dirs,
+        ..
+    } = halfway_through_a_copy_import_with(0, patience * 4);
+    engine.closing_patience = patience;
+    drop(engine);
+
+    let catalog = Catalog::open(catalog_path).unwrap();
+    assert!(
+        catalog.find_by_path(&copy).unwrap().is_some(),
+        "the copy is recorded once the workers have stopped"
     );
 }
 

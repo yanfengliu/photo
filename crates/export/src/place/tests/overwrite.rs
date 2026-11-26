@@ -263,7 +263,10 @@ fn a_guarded_file_that_has_the_name_is_refused_where_it_is() {
                 "{context}: {result:?}"
             );
             assert!(!steps.contains(&Step::SetAside), "{context}: {steps:?}");
-            assert!(before.is_at(&name), "{context}: another file has the name");
+            assert!(
+                before.is_at(&name).unwrap(),
+                "{context}: another file has the name"
+            );
             let link = fs::symlink_metadata(&name).unwrap().is_symlink();
             assert_eq!(link, arrival == Arrival::SymbolicLink, "{context}");
             assert_eq!(folder.read("x.jpg").unwrap(), b"protected", "{context}");

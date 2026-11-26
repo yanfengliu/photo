@@ -17,6 +17,7 @@
 //! bytes): `TMPDIR=/Volumes/<name> cargo test -p photo-export`. There only
 //! the kinds the volume can stage are run ([`kinds`]).
 
+mod failing;
 mod identity;
 mod no_replace;
 mod overwrite;
@@ -98,8 +99,11 @@ struct Staged<'a> {
     /// Hidden names to hand out before real ones, first one first: names
     /// that another exporter came to use too.
     hidden: Vec<PathBuf>,
-    /// No identity can be read.
-    identity_fails: bool,
+    /// Whether reading an identity fails, by the number of the read (the
+    /// first is 0): as when no descriptor is left to open the file with.
+    identity_fails: fn(usize) -> bool,
+    /// How many identities have been read.
+    identity_reads: usize,
     /// The volume has no room for a copy.
     full: bool,
 }
@@ -111,7 +115,8 @@ impl<'a> Staged<'a> {
             steps: Vec::new(),
             intruder,
             hidden: Vec::new(),
-            identity_fails: false,
+            identity_fails: |_| false,
+            identity_reads: 0,
             full: false,
         }
     }
@@ -127,10 +132,12 @@ impl Disk for Staged<'_> {
     }
 
     fn is_at(&mut self, held: &Held, path: &Path) -> io::Result<bool> {
-        if self.identity_fails {
+        let read = self.identity_reads;
+        self.identity_reads += 1;
+        if (self.identity_fails)(read) {
             Err(io::Error::other("the identity cannot be read"))
         } else {
-            Ok(held.is_at(path))
+            held.is_at(path)
         }
     }
 
@@ -303,7 +310,7 @@ fn at_every_step(mut scene: impl FnMut(Kind, Option<usize>) -> usize) {
 
 /// True when the two paths lead to one file.
 fn same_file(a: &Path, b: &Path) -> bool {
-    Held::open(a).unwrap().is_at(b)
+    Held::open(a).unwrap().is_at(b).unwrap()
 }
 
 #[test]

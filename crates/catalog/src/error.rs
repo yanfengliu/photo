@@ -214,6 +214,13 @@ pub enum CatalogError {
     #[error("the catalog file could not be read")]
     Io(#[source] std::io::Error),
 
+    /// The deadline given with [`Catalog::set_deadline`] had passed, so the
+    /// change was not tried; nothing was changed.
+    ///
+    /// [`Catalog::set_deadline`]: crate::Catalog::set_deadline
+    #[error("the time given for changing the catalog had run out, so the change was not tried")]
+    OutOfTime,
+
     /// Any other failure reported by SQLite.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
@@ -226,16 +233,18 @@ impl CatalogError {
 
     /// True when the catalog as a whole could not be used, whatever the
     /// call asked for: another connection has it locked (see
-    /// [`Catalog::set_busy_timeout`]), its file is write-protected, damaged
-    /// or could not be read or written, or there was no room for the
-    /// change. The same call with other values would fail the same way, so
-    /// nothing is gained by trying the items of a refused batch one by one.
+    /// [`Catalog::set_busy_timeout`]), the time given for changes has run
+    /// out ([`CatalogError::OutOfTime`]), its file is write-protected,
+    /// damaged or could not be read or written, or there was no room for
+    /// the change. The same call with other values would fail the same way,
+    /// so nothing is gained by trying the items of a refused batch one by
+    /// one.
     ///
     /// [`Catalog::set_busy_timeout`]: crate::Catalog::set_busy_timeout
     pub fn is_catalog_wide(&self) -> bool {
         use rusqlite::ErrorCode as Code;
         match self {
-            Self::ReadOnly | Self::Io(_) => true,
+            Self::ReadOnly | Self::Io(_) | Self::OutOfTime => true,
             Self::Sqlite(rusqlite::Error::SqliteFailure(failure, _)) => matches!(
                 failure.code,
                 Code::DatabaseBusy
@@ -283,6 +292,7 @@ mod tests {
         }
         assert!(CatalogError::ReadOnly.is_catalog_wide());
         assert!(CatalogError::Io(std::io::Error::other("unplugged")).is_catalog_wide());
+        assert!(CatalogError::OutOfTime.is_catalog_wide());
 
         let of_one_record = [
             ffi::SQLITE_CONSTRAINT,
