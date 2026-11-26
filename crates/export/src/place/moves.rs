@@ -11,6 +11,8 @@
 //!    copied through that same open handle ([`copy_new`]). Nothing is ever
 //!    renamed onto the name, so nothing can be replaced there either; the
 //!    price is that a reader can watch the file grow under its final name.
+//!    A symbolic link, which has no bytes of its own to copy, is made anew
+//!    under the name instead ([`relink_new`]), which is exclusive too.
 //!
 //! No step looks at a name first and acts on it afterwards: whatever another
 //! program does between two steps, a file this export did not create is
@@ -94,10 +96,14 @@ pub(crate) fn move_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Resul
 /// this export's to touch, and `from` is kept. When the copy fails, the name
 /// is given back only if it still leads to the file created here.
 fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
-    if !fs::symlink_metadata(from)?.is_file() {
+    let kind = fs::symlink_metadata(from)?.file_type();
+    if kind.is_symlink() {
+        return relink_new(disk, from, to);
+    }
+    if !kind.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "only a regular file can be copied to a new name",
+            "only a regular file or a symbolic link can be copied to a new name",
         ));
     }
     disk.reached(Step::Create);
@@ -139,6 +145,45 @@ fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
             Err(error)
         }
     }
+}
+
+/// Gives the name `to` to the symbolic link at `from` where no move can
+/// avoid replacing: makes the same link under the new name, which fails when
+/// anything has that name, and only then removes the old one. `Ok(false)`
+/// when the name is taken, in which case `from` is still where it was.
+///
+/// A relative link leads somewhere else from another folder, so it is
+/// remade only beside where it was (which is where a file that was moved
+/// aside always goes back to).
+#[cfg(unix)]
+fn relink_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
+    let leads_to = fs::read_link(from)?;
+    if leads_to.is_relative() && folder_of(from) != folder_of(to) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a relative symbolic link cannot be remade in another folder",
+        ));
+    }
+    disk.reached(Step::Create);
+    match std::os::unix::fs::symlink(&leads_to, to) {
+        Ok(()) => {
+            disk.reached(Step::Unlink);
+            remove_old_name(from);
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Windows has an exclusive rename on every file system, so a symbolic
+/// link never has to be remade there (and making one needs a privilege).
+#[cfg(not(unix))]
+fn relink_new(_: &mut dyn Disk, _: &Path, _: &Path) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "a symbolic link cannot be remade under a new name here",
+    ))
 }
 
 /// Copies `from` into the open file `into`, with its modification time and

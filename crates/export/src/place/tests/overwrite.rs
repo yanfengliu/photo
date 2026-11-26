@@ -44,32 +44,91 @@ fn undisturbed_the_export_replaces_what_had_the_name() {
     }
 }
 
-/// Another program moves the original, or a protected file, onto the
-/// export's name: after the early check, after the previous file has been
-/// moved aside, while the export is taking the name, or after.
+/// How a guarded file comes to have the export's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrival {
+    /// The file itself is moved there.
+    Moved,
+    /// A hard link to it is.
+    HardLink,
+    /// A symbolic link to it is.
+    SymbolicLink,
+}
+
+impl Arrival {
+    /// The ways this platform has (making a symbolic link needs a
+    /// privilege on Windows).
+    fn all() -> Vec<Self> {
+        let mut all = vec![Self::Moved, Self::HardLink];
+        if cfg!(unix) {
+            all.push(Self::SymbolicLink);
+        }
+        all
+    }
+
+    /// Gives the name `x.jpg` to the file under `guarded`, replacing what
+    /// has it, in one rename.
+    fn arrive(self, folder: &Folder, guarded: &str) {
+        let file = folder.at(guarded);
+        let link = folder.at("their.link");
+        match self {
+            Self::Moved => return fs::rename(file, folder.at("x.jpg")).unwrap(),
+            Self::HardLink => fs::hard_link(file, &link).unwrap(),
+            #[cfg(unix)]
+            Self::SymbolicLink => std::os::unix::fs::symlink(file, &link).unwrap(),
+            #[cfg(not(unix))]
+            Self::SymbolicLink => unreachable!("not in Arrival::all here"),
+        }
+        fs::rename(link, folder.at("x.jpg")).unwrap();
+    }
+}
+
+/// Another program gives the export's name to the original, or to a
+/// protected file, itself or through a hard or symbolic link: after the
+/// early check, after the previous file has been moved aside, while the
+/// export is taking the name, or after.
 #[test]
 fn the_original_or_a_protected_file_moved_onto_the_name_at_any_step_survives() {
-    let cases = [
+    let files = [
         ("a.tif", &b"the original"[..], Guard::Source),
         ("p.tif", &b"protected"[..], Guard::Protected),
     ];
-    for (moved, bytes, guard) in cases {
+    let cases = files.into_iter().flat_map(|file| {
+        Arrival::all()
+            .into_iter()
+            .map(move |arrival| (file, arrival))
+    });
+    for ((guarded_name, bytes, guard), arrival) in cases {
         at_every_step(|kind, when| {
             let (folder, guarded) = scene();
             let name = folder.at("x.jpg");
             let mut acted = false;
             let (result, steps) = folder.place_with(kind, Overwrite, &guarded, when, &mut || {
-                fs::rename(folder.at(moved), &name).unwrap();
+                arrival.arrive(&folder, guarded_name);
                 acted = true;
             });
-            let context = format!("{kind:?}, {moved} moved onto the name before step {when:?}");
+            let context =
+                format!("{kind:?}, {guarded_name} {arrival:?} onto the name before step {when:?}");
             if acted {
+                // The file is whole under the name, and under its own too
+                // when only a link to it arrived.
+                let mut names = vec!["x.jpg"];
+                if arrival != Arrival::Moved {
+                    names.insert(0, guarded_name);
+                }
                 assert_eq!(
                     holding(&folder, bytes),
-                    ["x.jpg"],
+                    names,
                     "{context}: it is not whole under its name: {:?}",
                     folder.names()
                 );
+                // A link is still a link to it, except a hard link put back
+                // by copying, which comes back as a file of its own.
+                if arrival == Arrival::SymbolicLink
+                    || (arrival == Arrival::HardLink && kind != Kind::Neither)
+                {
+                    assert!(same_file(&name, &folder.at(guarded_name)), "{context}");
+                }
                 match (&result, guard) {
                     // It arrived after the export had the name and replaced
                     // the export, not the other way round.
@@ -156,9 +215,8 @@ fn what_was_moved_aside_is_removed_only_once_the_export_has_the_name() {
 fn a_protected_file_reached_through_a_link_is_put_back_and_refused() {
     for kind in KINDS {
         for symbolic in [false, true] {
-            // File systems without either move have no symbolic links, and
-            // one could not be put back there by copying.
-            if symbolic && (cfg!(not(unix)) || kind == Kind::Neither) {
+            // Making a symbolic link needs a privilege on Windows.
+            if symbolic && cfg!(not(unix)) {
                 continue;
             }
             let (folder, guarded) = scene();
@@ -176,9 +234,10 @@ fn a_protected_file_reached_through_a_link_is_put_back_and_refused() {
                 matches!(&result, Err(ExportError::WouldOverwriteProtected(path)) if *path == name),
                 "{context}: {result:?}"
             );
-            // Where a file can only be put back by copying it there are no
-            // hard links to begin with; the bytes are what comes back.
-            if kind != Kind::Neither {
+            // Where a file can only be put back by copying it, a hard link
+            // comes back as a file of its own with the same bytes; a
+            // symbolic link is made anew and leads where it led.
+            if symbolic || kind != Kind::Neither {
                 assert!(same_file(&name, &folder.at("p.tif")), "{context}");
             }
             assert_eq!(folder.read("x.jpg").unwrap(), b"protected", "{context}");
