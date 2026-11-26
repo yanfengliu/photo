@@ -171,13 +171,18 @@ impl Action {
         Ok(())
     }
 
-    /// Whether the action changes the open photo's settings from outside
-    /// the Develop tools (see `DevelopAction::edits_outside_tools`). Undo
-    /// and redo do: they put the catalog's settings back in the session.
-    pub(crate) fn edits_outside_tools(&self) -> bool {
+    /// Whether what the open Develop tool has changed is recorded as its
+    /// own step before the action. It is before one that changes the open
+    /// photo's settings from outside the tools (see
+    /// `DevelopAction::edits_outside_tools`; undo and redo do too, they put
+    /// the catalog's settings back in the session), and before one that
+    /// takes the photo as it is saved, so that it takes what is shown: a
+    /// virtual copy, an export.
+    pub(crate) fn ends_tool_step(&self) -> bool {
         match self {
             Self::Develop(action) => action.edits_outside_tools(),
             Self::Undo | Self::Redo => true,
+            Self::CreateVirtualCopies(_) | Self::StartExport(..) => true,
             _ => false,
         }
     }

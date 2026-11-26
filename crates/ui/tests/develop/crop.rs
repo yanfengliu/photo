@@ -200,6 +200,79 @@ fn the_panels_turn_and_flip_buttons_carry_the_crop_with_the_photo() -> TestResul
 }
 
 #[test]
+fn an_export_while_cropping_writes_what_is_shown_and_records_the_crop() -> TestResult {
+    let (_dir, _studio, mut harness) = cropping()?;
+    let steps = history(&harness).len();
+    let rect = harness.app().crop_rect().ok_or("the rectangle is drawn")?;
+    let corner = rect.right_bottom();
+    harness.drag(corner, corner - vec2(240.0, 120.0))?;
+    settle(&mut harness)?;
+    let shown = output(&harness);
+    assert!(shown.0 < 1000 && shown.1 < 700, "{shown:?}");
+    assert_eq!(history(&harness).len(), steps, "not recorded yet");
+
+    let out = tempfile::tempdir()?;
+    harness.press_key(Key::E, Modifiers::COMMAND | Modifiers::SHIFT)?;
+    harness.set_text(
+        Role::TextInput,
+        "Export folder",
+        &out.path().display().to_string(),
+    )?;
+    harness.click(Role::Button, "Export 1 Photo")?;
+    settle(&mut harness)?;
+    let written = image::open(out.path().join("scene.jpg"))?;
+    assert_eq!((written.width(), written.height()), shown, "as shown");
+
+    // The export took the crop as a step of its own; the tool stays up
+    // with nothing of its own left to record or to drop.
+    assert_eq!(harness.app().tool(), Some(Tool::Crop));
+    assert_eq!(
+        history(&harness).len(),
+        steps + 1,
+        "{:?}",
+        history(&harness)
+    );
+    harness.press_key(Key::Z, Modifiers::COMMAND)?;
+    settle(&mut harness)?;
+    assert_eq!(
+        output(&harness),
+        (1200, 800),
+        "one undo takes the crop back"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_virtual_copy_made_while_cropping_is_cropped_as_shown() -> TestResult {
+    let (_dir, _studio, mut harness) = cropping()?;
+    let steps = history(&harness).len();
+    let rect = harness.app().crop_rect().ok_or("the rectangle is drawn")?;
+    let corner = rect.right_bottom();
+    harness.drag(corner, corner - vec2(240.0, 120.0))?;
+    settle(&mut harness)?;
+    let shown = output(&harness);
+    let crop = settings(&harness).crop;
+    let master = session(&harness).photo();
+    assert!(shown.0 < 1000 && shown.1 < 700, "{shown:?}");
+
+    harness.press_key(Key::Quote, Modifiers::COMMAND)?;
+    settle(&mut harness)?;
+    let copy = session(&harness).photo();
+    assert_ne!(copy, master, "the copy is the photo developed now");
+    assert_eq!(
+        settings(&harness).crop,
+        crop,
+        "it has the crop that was shown"
+    );
+    assert_eq!(output(&harness), shown);
+    // And the master kept it, as a step of its own.
+    let engine = harness.app().engine();
+    let recorded = engine.history(master)?;
+    assert_eq!(recorded.len(), steps + 1, "{recorded:?}");
+    Ok(())
+}
+
+#[test]
 fn a_line_drawn_along_a_slope_levels_it() -> TestResult {
     let (_dir, _studio, mut harness) = cropping()?;
     harness.click(Role::Button, "Straighten")?;

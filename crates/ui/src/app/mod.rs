@@ -339,7 +339,7 @@ impl PhotoApp {
             return;
         }
         for action in std::mem::take(&mut self.actions) {
-            if action.edits_outside_tools() {
+            if action.ends_tool_step() {
                 self.record_tool_step();
             }
             let failure = action.failure();
@@ -356,9 +356,9 @@ impl PhotoApp {
         ctx.request_repaint();
     }
 
-    /// Before a change from outside the tools: record what the open tool
-    /// has changed as a step of its own, a draft of it that still waits for
-    /// its turn included.
+    /// Before a change from outside the tools, a virtual copy or an
+    /// export: record what the open tool has changed as a step of its own,
+    /// a draft of it that still waits for its turn included.
     fn record_tool_step(&mut self) {
         let develop = &mut self.ui.develop;
         let waiting = develop.pending.as_ref().is_some_and(Pending::is_tool);
