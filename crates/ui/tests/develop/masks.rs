@@ -140,6 +140,91 @@ fn a_radial_mask_with_exposure_brightens_inside_only_and_the_overlay_matches() -
 }
 
 #[test]
+fn a_radial_gradients_amount_feather_and_inversion_change_how_much_it_acts_and_where() -> TestResult
+{
+    let (_dir, _studio, mut harness) = developing()?;
+    let before = frame_image(&harness);
+    harness.press_key(Key::M, Modifiers::SHIFT)?;
+    settle(&mut harness)?;
+    let (inside, outside) = ((0.3, 0.3), (0.62, 0.3));
+    harness.drag(
+        on_canvas(&harness, inside.0, inside.1),
+        on_canvas(&harness, 0.4, 0.4),
+    )?;
+    harness.set_value(Role::Slider, "Mask Exposure", 1.0)?;
+    settle(&mut harness)?;
+    let lift = |harness: &Harness<PhotoApp>, at: (f32, f32)| {
+        let now = frame_image(harness);
+        luma_at(&now, at.0, at.1) - luma_at(&before, at.0, at.1)
+    };
+    let full = lift(&harness, inside);
+    assert!(full > 25.0, "{full}");
+
+    // Half the amount is clearly less light, and still some.
+    harness.set_value(Role::Slider, "Mask Amount", 50.0)?;
+    settle(&mut harness)?;
+    assert_eq!(settings(&harness).masks[0].amount, 50.0);
+    let half = lift(&harness, inside);
+    assert!(half > full * 0.25 && half < full * 0.8, "{half} of {full}");
+    harness.set_value(Role::Slider, "Mask Amount", 100.0)?;
+
+    // No feather is a hard edge; all of it fades from the middle outwards.
+    let near_the_edge = (inside.0 + 0.08, inside.1);
+    let covered = |harness: &Harness<PhotoApp>| {
+        overlay_at(harness, near_the_edge.0, near_the_edge.1).ok_or("an overlay")
+    };
+    harness.set_value(Role::Slider, "Radial Feather", 0.0)?;
+    settle(&mut harness)?;
+    let hard = covered(&harness)?;
+    harness.set_value(Role::Slider, "Radial Feather", 100.0)?;
+    settle(&mut harness)?;
+    let soft = covered(&harness)?;
+    assert!(hard > 0.95 && soft < 0.6, "hard {hard}, soft {soft}");
+    assert!(soft > 0.0, "still inside the ellipse: {soft}");
+
+    // Inverted, it acts everywhere but in the ellipse.
+    harness.set_value(Role::Slider, "Radial Feather", 0.0)?;
+    harness.invoke(Role::CheckBox, "Invert radial")?;
+    settle(&mut harness)?;
+    let MaskShape::Radial { invert, .. } = settings(&harness).masks[0].components[0].shape else {
+        panic!("a radial gradient");
+    };
+    assert!(invert);
+    assert!(
+        lift(&harness, outside) > 25.0,
+        "{}",
+        lift(&harness, outside)
+    );
+    assert!(
+        lift(&harness, inside).abs() <= 1.0,
+        "{}",
+        lift(&harness, inside)
+    );
+
+    // The handle at the right end of the ellipse makes it wider, not
+    // taller, and leaves it where it is.
+    harness.drag(
+        on_canvas(&harness, 0.4, 0.3),
+        on_canvas(&harness, 0.45, 0.3),
+    )?;
+    settle(&mut harness)?;
+    let MaskShape::Radial {
+        center,
+        radius_x,
+        radius_y,
+        ..
+    } = settings(&harness).masks[0].components[0].shape
+    else {
+        panic!("a radial gradient");
+    };
+    assert!((radius_x - 0.15).abs() < 0.005, "{radius_x}");
+    assert!((radius_y - 80.0 / 1200.0).abs() < 0.003, "{radius_y}");
+    assert!(center.distance(Point::new(0.3, 0.3)) < 0.002, "{center:?}");
+    assert_eq!(settings(&harness).masks.len(), 1, "no second mask");
+    Ok(())
+}
+
+#[test]
 fn a_linear_gradient_is_placed_by_a_drag_and_moved_and_turned_by_its_handles() -> TestResult {
     let (_dir, _studio, mut harness) = developing()?;
     let steps = history(&harness).len();

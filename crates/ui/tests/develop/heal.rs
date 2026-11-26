@@ -113,6 +113,96 @@ fn a_click_places_a_spot_with_the_suggested_source_and_escape_takes_it_back() ->
 }
 
 #[test]
+fn a_spot_stays_on_its_content_when_the_photo_is_turned_and_cropped() -> TestResult {
+    let (_dir, files) = scene_files();
+    let studio = Studio::new();
+    let mut harness = studio.app_with(files);
+    develop(&mut harness, "scene.png")?;
+    harness.press_key(Key::Q, Modifiers::NONE)?;
+    settle(&mut harness)?;
+
+    // A spot in the middle of the blue patch; a corner of the patch, clear
+    // of the spot's circles, says where the patch is on screen.
+    let blue = photo_testkit::patches(1200, 800)
+        .into_iter()
+        .find(|patch| patch.name == "blue")
+        .ok_or("the scene has a blue patch")?;
+    let middle = Point::new(
+        (blue.x as f32 + blue.width as f32 / 2.0) / 1200.0,
+        (blue.y as f32 + blue.height as f32 / 2.0) / 800.0,
+    );
+    let corner = Point::new(
+        (blue.x as f32 + 5.0) / 1200.0,
+        (blue.y as f32 + 5.0) / 800.0,
+    );
+    harness.click_at(on_canvas(&harness, middle))?;
+    settle(&mut harness)?;
+    let spot = settings(&harness).spots[0];
+    assert!(spot.target.distance(middle) < 0.002, "{spot:?}");
+    let apart = (on_canvas(&harness, corner) - on_canvas(&harness, spot.target)).length();
+    let ring = (on_canvas(
+        &harness,
+        Point::new(spot.target.x + spot.radius, spot.target.y),
+    ) - on_canvas(&harness, spot.target))
+    .length();
+    assert!(apart > ring + 6.0, "the corner is clear of the ring");
+
+    // The mark is drawn where `canvas_position` puts the spot; the picture
+    // there is the blue patch, however the photo lies.
+    let check = |harness: &mut Harness<PhotoApp>, when: &str| -> TestResult {
+        assert_eq!(
+            settings(harness).spots,
+            [spot],
+            "{when}: the spot is as placed"
+        );
+        let mark = on_canvas(harness, spot.target);
+        let back = harness.app().canvas_source(mark).ok_or("a photo")?;
+        assert!(back.distance(spot.target) < 0.002, "{when}: {back:?}");
+        if harness.can_render() {
+            harness.pointer_leave()?;
+            let image = harness.render()?;
+            let at = on_canvas(harness, corner);
+            let pixel = image.get_pixel(at.x.round() as u32, at.y.round() as u32);
+            let (red, green, blue) = (
+                i32::from(pixel[0]),
+                i32::from(pixel[1]),
+                i32::from(pixel[2]),
+            );
+            assert!(
+                blue > red + 60 && blue > green + 60,
+                "{when}: {pixel:?} at {at:?} is not the blue patch"
+            );
+        }
+        Ok(())
+    };
+    check(&mut harness, "upright")?;
+    let upright = on_canvas(&harness, spot.target);
+
+    // A quarter turn.
+    harness.press_key(Key::CloseBracket, Modifiers::COMMAND)?;
+    settle(&mut harness)?;
+    let turned = on_canvas(&harness, spot.target);
+    assert!((turned - upright).length() > 50.0, "the mark moved with it");
+    check(&mut harness, "turned")?;
+
+    // A square crop about the middle, which keeps the patch.
+    harness.press_key(Key::R, Modifiers::NONE)?;
+    settle(&mut harness)?;
+    harness.click(Role::ComboBox, "Crop aspect")?;
+    harness.click(Role::Button, "1 : 1")?;
+    harness.press_key(Key::Enter, Modifiers::NONE)?;
+    settle(&mut harness)?;
+    let size = session(&harness).output_size().ok_or("decoded")?;
+    assert_eq!(size, (800, 800));
+    harness.press_key(Key::Q, Modifiers::NONE)?;
+    settle(&mut harness)?;
+    let cropped = on_canvas(&harness, spot.target);
+    assert!((cropped - turned).length() > 10.0, "and with the crop");
+    check(&mut harness, "cropped")?;
+    Ok(())
+}
+
+#[test]
 fn a_spot_dragged_over_the_dark_patch_heals_it_and_changes_nothing_else() -> TestResult {
     let (_dir, files) = scene_files();
     let studio = Studio::new();

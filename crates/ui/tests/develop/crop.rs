@@ -273,6 +273,71 @@ fn a_virtual_copy_made_while_cropping_is_cropped_as_shown() -> TestResult {
 }
 
 #[test]
+fn the_lock_holds_a_shape_custom_numbers_set_one_and_reset_gives_the_photo_back() -> TestResult {
+    let (_dir, _studio, mut harness) = cropping()?;
+    let drawn =
+        |harness: &Harness<PhotoApp>| harness.app().crop_rect().ok_or("the rectangle is drawn");
+
+    // A square, held: an edge dragged in takes the other side with it.
+    harness.click(Role::ComboBox, "Crop aspect")?;
+    harness.click(Role::Button, "1 : 1")?;
+    settle(&mut harness)?;
+    let square = drawn(&harness)?;
+    assert!((square.aspect_ratio() - 1.0).abs() < 0.01, "{square:?}");
+    let lock = harness.control(Role::Button, "Lock aspect")?;
+    assert_eq!(lock.toggled, Some(true), "a chosen shape is held");
+    let edge = square.right_center();
+    harness.drag(edge, edge - vec2(100.0, 0.0))?;
+    settle(&mut harness)?;
+    let held = drawn(&harness)?;
+    assert!((held.aspect_ratio() - 1.0).abs() < 0.01, "{held:?}");
+    assert!(held.width() < square.width() - 50.0, "{held:?}");
+
+    // Let go of, the same drag changes the shape.
+    harness.click(Role::Button, "Lock aspect")?;
+    settle(&mut harness)?;
+    assert_eq!(settings(&harness).crop.constraint, CropConstraint::Free);
+    let edge = held.right_center();
+    harness.drag(edge, edge - vec2(80.0, 0.0))?;
+    settle(&mut harness)?;
+    let freed = drawn(&harness)?;
+    assert!((freed.height() - held.height()).abs() < 1.0, "{freed:?}");
+    assert!(freed.width() < held.width() - 40.0, "{freed:?}");
+
+    // Custom: its two numbers are the shape.
+    harness.click(Role::ComboBox, "Crop aspect")?;
+    harness.click(Role::Button, "Custom")?;
+    harness.set_value(Role::SpinButton, "Custom aspect width", 3.0)?;
+    harness.set_value(Role::SpinButton, "Custom aspect height", 1.0)?;
+    settle(&mut harness)?;
+    let wide = drawn(&harness)?;
+    assert!((wide.aspect_ratio() - 3.0).abs() < 0.03, "{wide:?}");
+    assert_eq!(
+        settings(&harness).crop.constraint,
+        CropConstraint::Ratio {
+            width: 3.0,
+            height: 1.0
+        }
+    );
+    let cropped = output(&harness);
+    assert!(
+        (cropped.0 as f32 / cropped.1 as f32 - 3.0).abs() < 0.02,
+        "{cropped:?}"
+    );
+
+    // Reset: the whole photo again, not turned, the shape still held.
+    harness.set_value(Role::Slider, "Crop Angle", 3.0)?;
+    settle(&mut harness)?;
+    harness.click(Role::Button, "Reset Crop")?;
+    settle(&mut harness)?;
+    let crop = settings(&harness).crop;
+    assert_eq!((crop.rect, crop.angle), (None, 0.0));
+    assert_eq!(output(&harness), (1200, 800));
+    assert!(harness.control(Role::Button, "Reset Crop")?.disabled);
+    Ok(())
+}
+
+#[test]
 fn a_line_drawn_along_a_slope_levels_it() -> TestResult {
     let (_dir, _studio, mut harness) = cropping()?;
     harness.click(Role::Button, "Straighten")?;
