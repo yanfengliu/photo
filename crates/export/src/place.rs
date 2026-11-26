@@ -67,6 +67,9 @@ pub(crate) struct TempFile {
     path: PathBuf,
     file: Option<File>,
     placed: bool,
+    /// How the file is given a second name: a hard link, except in tests
+    /// standing in for a file system that has none.
+    link: fn(&Path, &Path) -> io::Result<()>,
 }
 
 /// Where a finished temporary file ended up.
@@ -93,6 +96,7 @@ impl TempFile {
                         path,
                         file: Some(file),
                         placed: false,
+                        link: |from, to| fs::hard_link(from, to),
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -106,6 +110,14 @@ impl TempFile {
         self.file
             .as_mut()
             .expect("the file stays open until the temporary file is placed")
+    }
+
+    /// The same file as if its folder were on a file system without hard
+    /// links (FAT, exFAT, many network shares), where linking fails.
+    #[cfg(test)]
+    fn without_hard_links(mut self) -> Self {
+        self.link = |_, _| Err(io::ErrorKind::Unsupported.into());
+        self
     }
 
     /// Gives the finished file its name under `policy`, trying candidates
@@ -160,7 +172,7 @@ impl TempFile {
     /// the name is reserved instead (see [`claim_by_reservation`]). Either
     /// way no file this export did not create is ever replaced.
     fn claim(&mut self, target: &Path) -> Result<bool, ExportError> {
-        match fs::hard_link(&self.path, target) {
+        match (self.link)(&self.path, target) {
             Ok(()) => {
                 self.placed = true;
                 if let Err(error) = fs::remove_file(&self.path) {
@@ -264,7 +276,11 @@ mod tests {
         file_with(&target, b"theirs");
         assert!(!claim_by_reservation(&ours, &target).unwrap());
         assert_eq!(fs::read(&target).unwrap(), b"theirs");
-        assert_eq!(fs::read(&ours).unwrap(), b"ours", "the finished file is kept");
+        assert_eq!(
+            fs::read(&ours).unwrap(),
+            b"ours",
+            "the finished file is kept"
+        );
     }
 
     #[test]
@@ -286,6 +302,37 @@ mod tests {
         let (missing, target) = (dir.path().join("gone.part"), dir.path().join("x.jpg"));
         assert!(claim_by_reservation(&missing, &target).is_err());
         assert!(names(dir.path()).is_empty(), "{:?}", names(dir.path()));
+    }
+
+    /// Review finding E2 through the policies themselves: where hard links
+    /// fail, unique-name and skip still never replace a file.
+    #[test]
+    fn without_hard_links_the_policies_still_never_replace_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = NamePlan {
+            folder: dir.path().to_path_buf(),
+            stem: "x".into(),
+            extension: "jpg".into(),
+        };
+        let original = Original::capture(&dir.path().join("absent.tif"));
+        let export = |bytes: &[u8]| finished(dir.path(), bytes).without_hard_links();
+        // The name was free when the export was planned; then this appeared.
+        file_with(&plan.candidate(1), b"theirs");
+        let placed = export(b"first").place(&plan, 1, ExistingFile::UniqueName, &original);
+        assert!(matches!(placed, Ok(Placed::At(path)) if path == plan.candidate(2)));
+        let skipped = export(b"second").place(&plan, 1, ExistingFile::Skip, &original);
+        assert!(matches!(skipped, Ok(Placed::Skipped(path)) if path == plan.candidate(1)));
+        assert_eq!(fs::read(plan.candidate(1)).unwrap(), b"theirs");
+        assert_eq!(fs::read(plan.candidate(2)).unwrap(), b"first");
+        // A free name is still taken.
+        let free = NamePlan {
+            stem: "y".into(),
+            ..plan.clone()
+        };
+        let placed = export(b"third").place(&free, 1, ExistingFile::Skip, &original);
+        assert!(matches!(placed, Ok(Placed::At(path)) if path == free.candidate(1)));
+        assert_eq!(fs::read(free.candidate(1)).unwrap(), b"third");
+        assert_eq!(names(dir.path()), ["x-2.jpg", "x.jpg", "y.jpg"]);
     }
 
     /// Review finding E1: the original was recognised by its path, so an
@@ -321,7 +368,10 @@ mod tests {
         file_with(&other, b"original");
         let identity = Original::capture(&original);
         assert!(identity.is(&original).unwrap());
-        assert!(!identity.is(&other).unwrap(), "equal bytes are not the same file");
+        assert!(
+            !identity.is(&other).unwrap(),
+            "equal bytes are not the same file"
+        );
         assert!(!identity.is(&dir.path().join("absent.tif")).unwrap());
         fs::hard_link(&original, dir.path().join("link.tif")).unwrap();
         assert!(identity.is(&dir.path().join("link.tif")).unwrap());

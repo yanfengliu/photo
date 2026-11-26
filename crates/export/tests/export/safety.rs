@@ -67,7 +67,11 @@ fn an_original_moved_onto_the_destination_during_the_export_survives() {
         matches!(&result, Err(ExportError::WouldOverwriteSource(path)) if *path == destination),
         "{result:?}"
     );
-    assert_eq!(fs::read(&destination).unwrap(), before, "the original survives");
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        before,
+        "the original survives"
+    );
     assert_eq!(names(fixture.dir.path()), ["b.tif"]);
 }
 
