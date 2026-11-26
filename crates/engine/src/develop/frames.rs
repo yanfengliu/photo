@@ -17,18 +17,34 @@ use crate::error::EngineError;
 impl Engine {
     /// Ask the render worker for a frame of the open photo for `purpose`
     /// (the overlay's coverage, for [`Purpose::Overlay`]). Does nothing
-    /// until the photo is decoded and the canvas has a view, or when there
-    /// is nothing to show for that purpose.
+    /// until the photo is decoded, or when there is nothing to show for
+    /// that purpose. What is shown on the canvas also waits for the canvas
+    /// to have a view; the preset preview has a size of its own.
+    ///
+    /// Whoever makes one of these conditions true asks again for what was
+    /// waiting on it: a choice made earlier is kept, and asking for the
+    /// same choice again asks for nothing.
     pub(crate) fn render_session(&mut self, purpose: Purpose, quality: Quality) {
         let Some(session) = self.develop.as_mut() else {
             return;
         };
-        let (Some(source), Some(canvas)) = (session.source.clone(), session.canvas) else {
+        let Some(source) = session.source.clone() else {
             return;
         };
+        let on_canvas = session
+            .canvas
+            .map(|canvas| develop_view(&source, &session.settings, canvas));
         let mut work = Work::Render(quality);
-        let (settings, view) = match purpose {
-            Purpose::Overlay => {
+        let (settings, view) = match (purpose, on_canvas) {
+            (Purpose::Look, _) => {
+                let Some((_, look, (width, height))) = &session.look else {
+                    return;
+                };
+                let view = photo_develop::fit_view(&source, look, *width, *height);
+                (look.clone(), view)
+            }
+            (_, None) => return,
+            (Purpose::Overlay, Some(view)) => {
                 let Some(mask) = session.overlay_mask else {
                     return;
                 };
@@ -39,27 +55,14 @@ impl Engine {
                     return;
                 }
                 work = Work::Alpha(mask);
-                let view = develop_view(&source, &session.settings, canvas);
                 (session.settings.clone(), view)
             }
-            Purpose::Main => {
-                let view = develop_view(&source, &session.settings, canvas);
-                (session.settings.clone(), view)
-            }
-            Purpose::Before => {
+            (Purpose::Main, Some(view)) => (session.settings.clone(), view),
+            (Purpose::Before, Some(view)) => {
                 let Some((_, before)) = &session.before else {
                     return;
                 };
-                let shown = tools::with_geometry(before, &session.settings);
-                let view = develop_view(&source, &session.settings, canvas);
-                (shown, view)
-            }
-            Purpose::Look => {
-                let Some((_, look, (width, height))) = &session.look else {
-                    return;
-                };
-                let view = photo_develop::fit_view(&source, look, *width, *height);
-                (look.clone(), view)
+                (tools::with_geometry(before, &session.settings), view)
             }
         };
         self.next_render += 1;

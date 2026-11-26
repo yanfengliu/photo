@@ -2,6 +2,7 @@
 //! preview is looked at again, and what happens while its workers are held.
 
 mod imports;
+mod loading;
 mod saves;
 
 use std::cell::RefCell;

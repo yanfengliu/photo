@@ -274,9 +274,17 @@ impl Engine {
             Ok(source) => {
                 session.source = Some(source);
                 session.reach(DevelopLoad::Decoded);
-                self.render_session(Purpose::Overlay, Quality::Full);
-                self.render_session(Purpose::Main, Quality::Full);
-                self.render_session(Purpose::Before, Quality::Full);
+                // Everything chosen while the photo was loading was waiting
+                // for this, the preset preview included.
+                let waiting = [
+                    Purpose::Overlay,
+                    Purpose::Main,
+                    Purpose::Before,
+                    Purpose::Look,
+                ];
+                for purpose in waiting {
+                    self.render_session(purpose, Quality::Full);
+                }
             }
             Err(reason) => {
                 let (photo, missing) = (session.photo, reason.starts_with(MISSING));
