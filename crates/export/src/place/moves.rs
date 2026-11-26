@@ -19,7 +19,7 @@
 //! neither replaced nor removed.
 
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,6 +29,13 @@ use crate::naming::occupied;
 
 /// Distinguishes the hidden names made by one process.
 static NEXT_HIDDEN: AtomicU64 = AtomicU64::new(0);
+
+/// How much of a file is copied at a time. Far more than the usual 8 KiB on
+/// purpose: on FAT and exFAT under macOS, where files are copied to their
+/// names, every write is a round trip to a file system outside the kernel.
+/// Measured on a FAT32 volume, 144 MB took 5.2 s in 8 KiB pieces and 0.2 s
+/// in pieces of this size.
+const COPY_PIECE: usize = 1 << 20;
 
 /// How many visible names are tried for a file that cannot go back under
 /// its own.
@@ -192,7 +199,15 @@ fn relink_new(_: &mut dyn Disk, _: &Path, _: &Path) -> io::Result<bool> {
 fn fill(disk: &mut dyn Disk, from: &Path, into: &mut File) -> io::Result<()> {
     disk.reached(Step::Fill);
     let mut source = File::open(from)?;
-    io::copy(&mut source, into)?;
+    let mut piece = vec![0; COPY_PIECE];
+    loop {
+        match source.read(&mut piece) {
+            Ok(0) => break,
+            Ok(read) => into.write_all(&piece[..read])?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
     if let Ok(meta) = source.metadata() {
         // Best effort: the copy stands for the file it copies.
         if let Ok(modified) = meta.modified() {

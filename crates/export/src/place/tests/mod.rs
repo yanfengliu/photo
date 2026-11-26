@@ -182,8 +182,20 @@ impl Folder {
         guarded: &Guarded,
         intruder: &mut dyn FnMut(usize, Step),
     ) -> (Result<Placed, ExportError>, Vec<Step>) {
+        self.place_bytes(b"export", kind, policy, guarded, intruder)
+    }
+
+    /// [`Self::place`] for an export that holds `bytes`.
+    fn place_bytes(
+        &self,
+        bytes: &[u8],
+        kind: Kind,
+        policy: ExistingFile,
+        guarded: &Guarded,
+        intruder: &mut dyn FnMut(usize, Step),
+    ) -> (Result<Placed, ExportError>, Vec<Step>) {
         let mut finished = TempFile::create(self.0.path()).unwrap();
-        finished.file().write_all(b"export").unwrap();
+        finished.file().write_all(bytes).unwrap();
         let plan = NamePlan {
             folder: self.0.path().to_path_buf(),
             stem: "x".into(),

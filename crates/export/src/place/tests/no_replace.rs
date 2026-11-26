@@ -155,6 +155,23 @@ fn a_failure_gives_back_only_what_the_export_created() {
     }
 }
 
+/// Where the export is copied to its name, it is copied a piece at a time:
+/// an export longer than a piece, and not a whole number of pieces, arrives
+/// byte for byte on every kind of file system.
+#[test]
+fn an_export_longer_than_one_piece_arrives_whole() {
+    let bytes: Vec<u8> = (0..2_500_007_u32).map(|n| (n % 251) as u8).collect();
+    for kind in kinds() {
+        let folder = Folder::new();
+        let guarded = nothing_guarded(&folder);
+        let (result, _) =
+            folder.place_bytes(&bytes, kind, ExistingFile::Skip, &guarded, &mut |_, _| {});
+        assert_eq!(result.unwrap(), Placed::At(folder.at("x.jpg")), "{kind:?}");
+        assert!(folder.read("x.jpg").unwrap() == bytes, "{kind:?}");
+        assert_eq!(folder.names(), ["x.jpg"], "{kind:?}");
+    }
+}
+
 /// Another program takes every name the export goes for, just before the
 /// export can have it. The export gives up after a bounded number of names
 /// instead of going on without end, and every one of their files is intact.
