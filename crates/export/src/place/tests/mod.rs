@@ -19,6 +19,7 @@
 
 mod failing;
 mod identity;
+mod kept;
 mod no_replace;
 mod overwrite;
 
@@ -106,6 +107,8 @@ struct Staged<'a> {
     identity_reads: usize,
     /// The volume has no room for a copy.
     full: bool,
+    /// A replaced file cannot be removed (read-only on Windows, say).
+    removal_fails: bool,
 }
 
 impl<'a> Staged<'a> {
@@ -118,6 +121,7 @@ impl<'a> Staged<'a> {
             identity_fails: |_| false,
             identity_reads: 0,
             full: false,
+            removal_fails: false,
         }
     }
 }
@@ -125,7 +129,7 @@ impl<'a> Staged<'a> {
 impl Disk for Staged<'_> {
     fn hidden_name(&mut self, folder: &Path, role: &str) -> PathBuf {
         if self.hidden.is_empty() {
-            super::moves::hidden_name(folder, role)
+            super::aside::hidden_name(folder, role)
         } else {
             self.hidden.remove(0)
         }
@@ -146,6 +150,14 @@ impl Disk for Staged<'_> {
             Err(io::ErrorKind::StorageFull.into())
         } else {
             Ok(())
+        }
+    }
+
+    fn remove(&mut self, path: &Path) -> io::Result<()> {
+        if self.removal_fails {
+            Err(io::ErrorKind::PermissionDenied.into())
+        } else {
+            fs::remove_file(path)
         }
     }
 
@@ -215,6 +227,13 @@ impl Folder {
         self.names().into_iter().filter(ours).collect()
     }
 
+    /// The visible names in the folder that hold exactly `bytes`.
+    fn holding(&self, bytes: &[u8]) -> Vec<String> {
+        let holds =
+            |name: &String| !name.starts_with('.') && self.read(name).as_deref() == Some(bytes);
+        self.names().into_iter().filter(holds).collect()
+    }
+
     /// The export's temporary file while it has not been placed.
     fn temporary(&self) -> Option<PathBuf> {
         let part = |name: &String| name.ends_with(".part");
@@ -279,12 +298,29 @@ impl Folder {
         when: Option<usize>,
         act: &mut dyn FnMut(),
     ) -> (Result<Placed, ExportError>, Vec<Step>) {
+        self.place_failing_with(kind, policy, guarded, |_| {}, when, act)
+    }
+
+    /// [`Self::place_with`] on a stand-in that `fail` first makes fail in
+    /// some way (no room for a copy, say).
+    fn place_failing_with(
+        &self,
+        kind: Kind,
+        policy: ExistingFile,
+        guarded: &Guarded,
+        fail: impl FnOnce(&mut Staged),
+        when: Option<usize>,
+        act: &mut dyn FnMut(),
+    ) -> (Result<Placed, ExportError>, Vec<Step>) {
         let mut intruder = |index: usize, _: Step| {
             if Some(index) == when {
                 act();
             }
         };
-        self.place(kind, policy, guarded, &mut intruder)
+        let mut disk = Staged::new(kind, &mut intruder);
+        fail(&mut disk);
+        let result = self.place_on(&mut disk, b"export", policy, guarded);
+        (result, disk.steps)
     }
 }
 

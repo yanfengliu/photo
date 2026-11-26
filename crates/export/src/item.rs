@@ -91,8 +91,9 @@ impl ExportOutcome {
 }
 
 /// Why an export failed. A failed export leaves no file of its own behind,
-/// neither at the planned name nor under a temporary one; the crate
-/// documentation says what becomes of a file it had moved aside.
+/// neither at the planned name nor under a temporary one, except a copy
+/// that no identity can be read to recognise; the crate documentation says
+/// so, and what becomes of a file it had moved aside.
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     /// The original could not be decoded.
@@ -141,6 +142,20 @@ pub enum ExportError {
     /// size of zero pixels or a JPEG wider than 65535 pixels.
     #[error("cannot export: {0}")]
     Unsupported(String),
+    /// The export failed with `error`, and files that had the export's
+    /// name, which it had moved out of the way, could not get that name
+    /// back. None is lost: each is whole at one of `kept`, a visible name
+    /// beside the export's (`name-kept.ext`, `name-kept-2.ext` and so on)
+    /// or, when even that rename fails, the hidden name it was moved to.
+    /// The original and the protected files are not among them: a refusal
+    /// gives their path itself.
+    #[error("{error}; what had that name could not get it back and is now {}", list(.kept))]
+    Kept {
+        /// Why the export failed.
+        error: Box<ExportError>,
+        /// Where those files are now.
+        kept: Vec<PathBuf>,
+    },
 }
 
 impl ExportError {
@@ -151,4 +166,26 @@ impl ExportError {
             source,
         }
     }
+
+    /// This failure, with where the files that could not get the export's
+    /// name back now are (see [`Self::Kept`]); itself when there are none.
+    pub(crate) fn with_kept(self, kept: Vec<PathBuf>) -> Self {
+        if kept.is_empty() {
+            self
+        } else {
+            Self::Kept {
+                error: Box::new(self),
+                kept,
+            }
+        }
+    }
+}
+
+/// Paths for a message, one after another.
+fn list(paths: &[PathBuf]) -> String {
+    let shown: Vec<String> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    shown.join(", ")
 }

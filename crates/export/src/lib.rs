@@ -81,14 +81,17 @@
 //!   folder and the same name, ignoring case), which on a file system that
 //!   tells such names apart can be another file: the doubt goes to the
 //!   guarded file.
-//! - **A failure loses nothing.** A failed, refused or cancelled export
-//!   removes the files it created and nothing else (a destination folder
-//!   it had to make stays). A file it had moved aside is put back without
-//!   replacing anything: under its own name or, if another program has
-//!   taken that meanwhile, under a visible name beside it
-//!   (`name-kept.ext`, then `name-kept-2.ext` and so on). For the original
-//!   or a protected file the error carries the path it now has; for any
-//!   other file that path is logged.
+//! - **A failure loses nothing and hides nothing.** A failed, refused or
+//!   cancelled export removes the files it created and nothing else (a
+//!   destination folder it had to make stays). A file it had moved aside
+//!   is put back without replacing anything: under its own name or, when
+//!   that cannot be had (another program has taken it meanwhile, there is
+//!   no room to copy it back where it has to be copied, the move fails),
+//!   renamed to a visible name beside it (`name-kept.ext`, then
+//!   `name-kept-2.ext` and so on). The error gives that path: the refusal
+//!   itself for the original or a protected file, [`ExportError::Kept`]
+//!   for any other. A file the export replaced and cannot remove is
+//!   renamed beside it in the same way, and the log says where.
 //!
 //! Not guaranteed:
 //!
@@ -115,12 +118,13 @@
 //!   steps, leaves the hidden files that `place` lists step by step, and
 //!   nothing picks them up later. It never leaves a file both gone and not
 //!   yet replaced.
-//! - A file that cannot be put back stays whole under its hidden name,
-//!   which the error or the log then gives. That happens when the folder
-//!   can no longer be written, when its name and the ninety-nine names
-//!   tried beside it are all taken, when there is no room for the copy
-//!   described next, or when it is a folder that took the name at that
-//!   very instant on a file system without an exclusive rename.
+//! - A file that can neither go back under its name nor be renamed beside
+//!   it (the folder can no longer be written, or the ninety-nine names
+//!   tried beside it are all taken) stays whole under its hidden name,
+//!   which the error then gives. On a file system with neither hard links
+//!   nor exclusive renames the rename to a `-kept` name is a plain rename
+//!   onto a name that nothing had a moment before: a file another program
+//!   creates under that very name in that instant is replaced.
 //! - Where the export is copied to its name (neither hard links nor
 //!   exclusive renames), an identity that cannot be read when the export
 //!   checks its copy fails the export at that name; the copy is removed

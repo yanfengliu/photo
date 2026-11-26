@@ -12,16 +12,18 @@
 //!   is refused where it is, and what has the name is moved aside and
 //!   identified before the export takes its place (see [`overwrite`]).
 //! - A failure leaves nothing of the export behind and nothing of anyone
-//!   else's missing: a file that was moved aside is put back, without
-//!   replacing anything, under its name or a visible name beside it.
+//!   else's missing or out of sight: a file that was moved aside is put
+//!   back, without replacing anything, under its name or, renamed, under a
+//!   visible name beside it, which the error gives (see [`aside`]).
 //! - An identity that cannot be read is an error, never an answer: not
 //!   "another file has the name", not "this is the export's own file".
 //!
 //! One thing is out of scope: another program writing to this export's own
-//! hidden names, `.photo-export-<process>-<number>.<role>` in the
+//! hidden names, `.photo-export-<process>-<random>.<role>` in the
 //! destination folder. The crate documentation lists what else is not
-//! guaranteed, among it the few cases in which a file cannot be put back
-//! and stays, whole, under its hidden name.
+//! guaranteed, among it the few cases in which a file can be neither put
+//! back nor renamed beside its name and stays, whole, under its hidden
+//! name.
 //!
 //! # What a crash leaves on disk
 //!
@@ -41,14 +43,18 @@
 //! being moved aside and being put back, which happens only to one that
 //! takes the name in the instant after the export's look at it. A file
 //! that is being put back goes through the second, third or fourth row
-//! with `….previous` in the place of `….part`; a copy that failed is under
-//! `….discard` for the instant before it is removed.
+//! with `….previous` in the place of `….part`, or is renamed in one step
+//! to `name-kept.ext`; a copy that failed is under `….discard` for the
+//! instant before it is removed, and so is a file another program renamed
+//! onto the name in the instant before it was given back, until it is
+//! put back.
 //!
 //! All of this is about the process stopping. Against power loss only the
 //! copy of the fourth row is synced, before the file it was made from is
 //! removed; an export that takes its name by a hard link or an exclusive
 //! rename is not synced first.
 
+mod aside;
 mod disk;
 mod guard;
 mod held;
@@ -64,8 +70,9 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use guard::Guarded;
 
+use self::aside::hidden_name;
 use self::disk::{Disk, RealDisk};
-use self::moves::{hidden_name, move_new};
+use self::moves::move_new;
 use crate::item::ExportError;
 use crate::naming::NamePlan;
 use crate::settings::ExistingFile;
@@ -182,8 +189,12 @@ impl TempFile {
 }
 
 /// Moves `finished` to the free name `target`; `false` when it is taken.
+/// A failure says where any file of another program's that had to be moved
+/// on the way is now, when that is not `target` ([`ExportError::Kept`]).
 fn take(disk: &mut dyn Disk, finished: &Path, target: &Path) -> Result<bool, ExportError> {
-    move_new(disk, finished, target).map_err(|error| ExportError::io(target, error))
+    let mut kept = Vec::new();
+    move_new(disk, finished, target, &mut kept)
+        .map_err(|error| ExportError::io(target, error).with_kept(kept))
 }
 
 impl Drop for TempFile {

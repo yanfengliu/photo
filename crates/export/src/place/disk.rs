@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempPath;
 
+use super::aside::hidden_name;
 use super::held::Held;
-use super::moves::hidden_name;
 
 /// The point just before one step of placing a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +38,9 @@ pub(crate) enum Step {
     Identify,
     /// A file that was moved aside is about to be put back.
     PutBack,
+    /// A file that was moved aside and cannot go back under its name is
+    /// about to be renamed to the next visible name beside it.
+    Keep,
     /// The export has the name; what was moved aside is about to be
     /// removed.
     Discard,
@@ -77,6 +80,12 @@ pub(crate) trait Disk {
     /// system: a copy that does not fit fails by itself there.
     fn room(&mut self) -> io::Result<()> {
         Ok(())
+    }
+
+    /// Removes a file the export has replaced, once the export has its
+    /// name.
+    fn remove(&mut self, path: &Path) -> io::Result<()> {
+        fs::remove_file(path)
     }
 
     /// Called just before each step. Does nothing on the real file system.

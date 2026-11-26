@@ -9,10 +9,10 @@ use std::io::{self, Write};
 use super::{Folder, Kind, Staged, at_every_step, kinds, same_file, volume};
 use crate::item::ExportError;
 use crate::place::Placed;
+use crate::place::aside::EXCLUSIVE_ASIDE;
 use crate::place::disk::Step;
 use crate::place::guard::{Guard, Guarded};
 use crate::place::held::Held;
-use crate::place::moves::EXCLUSIVE_ASIDE;
 use crate::place::overwrite::ROUNDS;
 use crate::settings::ExistingFile::Overwrite;
 
@@ -25,13 +25,6 @@ fn scene() -> (Folder, Guarded) {
     let protected = folder.put("p.tif", b"protected");
     let guarded = Guarded::capture(&original, &[protected]);
     (folder, guarded)
-}
-
-/// The visible names in `folder` that hold exactly `bytes`.
-fn holding(folder: &Folder, bytes: &[u8]) -> Vec<String> {
-    let holds =
-        |name: &String| !name.starts_with('.') && folder.read(name).as_deref() == Some(bytes);
-    folder.names().into_iter().filter(holds).collect()
 }
 
 #[test]
@@ -151,7 +144,7 @@ fn the_original_or_a_protected_file_moved_onto_the_name_at_any_step_survives() {
                     names.insert(0, guarded_name);
                 }
                 assert_eq!(
-                    holding(&folder, bytes),
+                    folder.holding(bytes),
                     names,
                     "{context}: it is not whole under its name: {:?}",
                     folder.names()
@@ -163,7 +156,19 @@ fn the_original_or_a_protected_file_moved_onto_the_name_at_any_step_survives() {
                 {
                     assert!(same_file(&name, &folder.at(guarded_name)), "{context}");
                 }
-                match (&result, guard) {
+                // The previous file, moved aside before the guarded file took
+                // the name, cannot get the name back: it is where the error
+                // says (review F56).
+                let refusal = match &result {
+                    Err(ExportError::Kept { error, kept }) => {
+                        for path in kept {
+                            assert_eq!(fs::read(path).unwrap(), b"previous", "{context}");
+                        }
+                        Err(&**error)
+                    }
+                    other => other.as_ref(),
+                };
+                match (refusal, guard) {
                     // It arrived after the export had the name and replaced
                     // the export, not the other way round.
                     (Ok(placed), _) => assert_eq!(*placed, Placed::At(name), "{context}"),
@@ -239,7 +244,7 @@ fn what_was_moved_aside_is_removed_only_once_the_export_has_the_name() {
         let (result, _) = folder.place(kind, Overwrite, &guarded, &mut intruder);
         result.unwrap();
         assert!(discarding, "{kind:?}");
-        assert!(holding(&folder, b"previous").is_empty() && folder.hidden().is_empty());
+        assert!(folder.holding(b"previous").is_empty() && folder.hidden().is_empty());
     }
 }
 
@@ -362,8 +367,8 @@ fn a_file_that_cannot_be_identified_is_refused_where_it_is() {
 /// A folder takes the name in the instant between the export's look and its
 /// move, so it is the folder that is moved aside. It is kept whole: put back
 /// under the name where a folder can be moved without replacing (an
-/// exclusive rename), and elsewhere left under the hidden name that the
-/// error gives.
+/// exclusive rename), and elsewhere renamed to a visible name beside it
+/// (review F56: never left under the hidden name), which the error gives.
 #[test]
 fn a_folder_that_takes_the_name_at_the_last_instant_is_kept_whole() {
     for kind in kinds() {
@@ -383,21 +388,27 @@ fn a_folder_that_takes_the_name_at_the_last_instant_is_kept_whole() {
         assert_eq!(source.kind(), io::ErrorKind::IsADirectory, "{kind:?}");
         assert_eq!(fs::read(path.join("inside")).unwrap(), b"kept", "{kind:?}");
         let exclusive = matches!(kind, Kind::Both | Kind::ExclusiveOnly);
-        assert_eq!(*path == name, exclusive, "{kind:?}: {}", path.display());
+        let expected = if exclusive {
+            name.clone()
+        } else {
+            folder.at("x-kept.jpg")
+        };
+        assert_eq!(*path, expected, "{kind:?}");
         let hidden = folder.hidden();
-        assert_eq!(hidden.is_empty(), exclusive, "{kind:?}: {hidden:?}");
+        assert!(hidden.is_empty(), "{kind:?}: {hidden:?}");
         // The export itself is gone, the original and the protected file are
         // where they were.
         assert_eq!(folder.read("a.tif").unwrap(), b"the original", "{kind:?}");
         assert_eq!(folder.read("p.tif").unwrap(), b"protected", "{kind:?}");
-        assert!(holding(&folder, b"export").is_empty(), "{kind:?}");
+        assert!(folder.holding(b"export").is_empty(), "{kind:?}");
     }
 }
 
 /// Another program puts a new file at the name every time it is free. The
 /// export gives up after a bounded number of rounds, and every file it
 /// moved aside is back: the latest arrival under the name, the others and
-/// the previous file under visible names beside it.
+/// the previous file under visible names beside it, which the error gives
+/// (review F56).
 #[test]
 fn after_too_many_new_files_the_export_gives_up_and_everything_is_back() {
     for kind in kinds() {
@@ -411,19 +422,24 @@ fn after_too_many_new_files_the_export_gives_up_and_everything_is_back() {
             }
         };
         let (result, steps) = folder.place(kind, Overwrite, &guarded, &mut intruder);
+        let Err(ExportError::Kept { error, kept }) = &result else {
+            panic!("{kind:?}: {result:?}");
+        };
         assert!(
-            matches!(result, Err(ExportError::Io { .. })),
-            "{kind:?}: {result:?}"
+            matches!(**error, ExportError::Io { .. }),
+            "{kind:?}: {error:?}"
         );
         let set_aside = steps.iter().filter(|step| **step == Step::SetAside).count();
         assert_eq!(set_aside as u32, ROUNDS, "{kind:?}");
         assert_eq!(folder.read("x.jpg").unwrap(), b"arrival 4", "{kind:?}");
+        assert_eq!(kept.len(), 4, "{kind:?}: {kept:?}");
         for bytes in ["previous", "arrival 1", "arrival 2", "arrival 3"] {
-            let holders = holding(&folder, bytes.as_bytes());
+            let holders = folder.holding(bytes.as_bytes());
             assert_eq!(holders.len(), 1, "{kind:?}: {bytes}: {:?}", folder.names());
             assert!(holders[0].starts_with("x-kept"), "{kind:?}: {holders:?}");
+            assert!(kept.contains(&folder.at(&holders[0])), "{kind:?}: {kept:?}");
         }
-        assert!(holding(&folder, b"export").is_empty(), "{kind:?}");
+        assert!(folder.holding(b"export").is_empty(), "{kind:?}");
         assert!(folder.hidden().is_empty(), "{kind:?}: {:?}", folder.names());
     }
 }

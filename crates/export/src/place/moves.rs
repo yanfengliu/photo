@@ -18,21 +18,14 @@
 //! program does between two steps, a file this export did not create is
 //! neither replaced nor removed.
 
-use std::collections::hash_map::RandomState;
 use std::fs::{self, File, OpenOptions};
-use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::aside::{put_back, set_aside};
 use super::disk::{Disk, Step};
 use super::held::Held;
 use crate::naming::occupied;
-
-/// How many hidden names are tried for moving a file aside when each turns
-/// out to be taken.
-const HIDDEN_TRIES: u32 = 16;
 
 /// How much of a file is copied at a time. Far more than the usual 8 KiB on
 /// purpose: on FAT and exFAT under macOS, where files are copied to their
@@ -40,89 +33,6 @@ const HIDDEN_TRIES: u32 = 16;
 /// Measured on a FAT32 volume, 144 MB took 5.2 s in 8 KiB pieces and 0.2 s
 /// in pieces of this size.
 const COPY_PIECE: usize = 1 << 20;
-
-/// How many visible names are tried for a file that cannot go back under
-/// its own.
-const KEPT_NAMES: u32 = 99;
-
-/// Whether the rename that cannot replace is what moves aside a file that
-/// is not this export's own. It is on Apple's systems, where that rename is
-/// one step and nothing else. It is not on Linux: on a file system without
-/// such a rename `tempfile` makes a hard link and removes the old name,
-/// two steps on a visible name, between which the name could come to lead
-/// to another file that would then be unlinked unseen. And it is not on
-/// Windows, where `tempfile` first resets the attributes of the file.
-/// There a plain rename moves the file aside, and the random bits of the
-/// hidden name are what keeps that name free.
-pub(crate) const EXCLUSIVE_ASIDE: bool = cfg!(target_vendor = "apple");
-
-/// A hidden name in `folder` that nothing has:
-/// `.photo-export-<process>-<random>.<role>`. The process id is for a
-/// person reading the folder; the sixty-four random bits are what keeps two
-/// exporters, on two machines writing into one shared folder, from ever
-/// using the same name. The roles are `part` (an export being written),
-/// `previous` (a file moved aside by the overwrite policy) and `discard`
-/// (a failed copy on its way out).
-pub(crate) fn hidden_name(folder: &Path, role: &str) -> PathBuf {
-    loop {
-        let name = format!(
-            ".photo-export-{}-{:016x}.{role}",
-            std::process::id(),
-            random()
-        );
-        let path = folder.join(name);
-        if !occupied(&path) {
-            return path;
-        }
-    }
-}
-
-/// Sixty-four bits that cannot be guessed and that no other process shares:
-/// the standard library's randomly keyed hasher, which the operating system
-/// seeds, over a count and the time.
-pub(crate) fn random() -> u64 {
-    static COUNT: AtomicU64 = AtomicU64::new(0);
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(COUNT.fetch_add(1, Ordering::Relaxed));
-    if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        hasher.write_u128(now.as_nanos());
-    }
-    hasher.finish()
-}
-
-/// Moves what has `name` aside under a fresh hidden name beside it, in one
-/// step, so that what is aside is exactly what had the name. Returns the
-/// hidden name, or `None` when nothing had the name.
-///
-/// Where [`EXCLUSIVE_ASIDE`] says so the step is the rename that cannot
-/// replace: a hidden name that another exporter has come to use as well is
-/// refused, and another one tried. Elsewhere, and on a file system without
-/// such a rename, it is a plain rename.
-pub(crate) fn set_aside(
-    disk: &mut dyn Disk,
-    name: &Path,
-    role: &str,
-) -> io::Result<Option<PathBuf>> {
-    disk.reached(Step::SetAside);
-    for _ in 0..HIDDEN_TRIES {
-        let hidden = disk.hidden_name(folder_of(name), role);
-        if EXCLUSIVE_ASIDE {
-            match disk.rename_exclusive(name, &hidden) {
-                Ok(()) => return Ok(Some(hidden)),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                // No such rename on this file system.
-                Err(_) => {}
-            }
-        }
-        return match fs::rename(name, &hidden) {
-            Ok(()) => Ok(Some(hidden)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        };
-    }
-    Err(io::Error::other("every hidden name tried was taken"))
-}
 
 /// The folder a path's last component is in.
 pub(crate) fn folder_of(path: &Path) -> &Path {
@@ -135,7 +45,16 @@ pub(crate) fn folder_of(path: &Path) -> &Path {
 /// Moves the file at `from` to the name `to` without replacing anything:
 /// `Ok(false)` when something has that name, in which case `from` is still
 /// where it was. See the module documentation for how.
-pub(crate) fn move_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
+///
+/// A copy that fails gives its name back, and can find another program's
+/// file there by then; where such a file ends up, when it cannot go back
+/// under `to`, is added to `kept`.
+pub(crate) fn move_new(
+    disk: &mut dyn Disk,
+    from: &Path,
+    to: &Path,
+    kept: &mut Vec<PathBuf>,
+) -> io::Result<bool> {
     disk.reached(Step::Link);
     match disk.link(from, to) {
         Ok(()) => {
@@ -155,7 +74,7 @@ pub(crate) fn move_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Resul
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(_) => {}
     }
-    copy_new(disk, from, to)
+    copy_new(disk, from, to, kept)
 }
 
 /// Gives the name `to` the content of `from` where no move can avoid
@@ -169,7 +88,12 @@ pub(crate) fn move_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Resul
 /// whether the name still leads to the copy cannot be read, that is the
 /// error, and the name is given back only if it can be shown to lead to
 /// the file created here.
-fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
+fn copy_new(
+    disk: &mut dyn Disk,
+    from: &Path,
+    to: &Path,
+    kept: &mut Vec<PathBuf>,
+) -> io::Result<bool> {
     let kind = fs::symlink_metadata(from)?.file_type();
     if kind.is_symlink() {
         return relink_new(disk, from, to);
@@ -219,7 +143,7 @@ fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
             }
         }
         Err(error) => {
-            give_back(disk, to, created);
+            give_back(disk, to, created, kept);
             Err(error)
         }
     }
@@ -295,12 +219,13 @@ fn fill(disk: &mut dyn Disk, from: &Path, into: &mut File) -> io::Result<()> {
 /// but only the file created there. What has the name is moved aside in one
 /// rename, so that what is examined is exactly what had it: if that is the
 /// file `created`, it is removed; if another program put its own file there
-/// in between, that file is put back untouched.
+/// in between, that file is put back untouched, under the name or, when it
+/// cannot have that back, a visible name beside it, which goes into `kept`.
 ///
 /// A file that cannot be told to be `created` (an identity cannot be read)
 /// is treated as somebody else's: left where it is, or put back. It may be
 /// this export's own copy, which then stays.
-fn give_back(disk: &mut dyn Disk, to: &Path, created: Held) {
+fn give_back(disk: &mut dyn Disk, to: &Path, created: Held, kept: &mut Vec<PathBuf>) {
     disk.reached(Step::GiveBack);
     // Looked at first, so that another program's file is not even moved.
     match disk.is_at(&created, to) {
@@ -337,102 +262,20 @@ fn give_back(disk: &mut dyn Disk, to: &Path, created: Held) {
                     to.display()
                 );
             }
-            let now = put_back(disk, &aside, to);
+            let now = put_back(disk, &aside, to, kept);
             if now != to {
                 log::warn!("{} is now {}", to.display(), now.display());
+                kept.push(now);
             }
         }
     }
-}
-
-/// Puts a file that was moved aside back under `name` without replacing
-/// anything, and returns where it is now: `name`, or, when something else
-/// has taken that name meanwhile, the first free of `stem-kept.ext`,
-/// `stem-kept-2.ext` and so on beside it. Only when none of those can be
-/// had (the folder can no longer be written, say) does the file stay where
-/// it was, under its hidden name, which is then what is returned.
-pub(crate) fn put_back(disk: &mut dyn Disk, aside: &Path, name: &Path) -> PathBuf {
-    disk.reached(Step::PutBack);
-    let kept = (1..=KEPT_NAMES).map(|number| kept_name(name, number));
-    for candidate in std::iter::once(name.to_path_buf()).chain(kept) {
-        match move_new(disk, aside, &candidate) {
-            Ok(true) => return candidate,
-            Ok(false) => {}
-            Err(error) => {
-                log::error!(
-                    "cannot put {} back as {}: {error}",
-                    aside.display(),
-                    candidate.display()
-                );
-                break;
-            }
-        }
-    }
-    aside.to_path_buf()
-}
-
-/// The `number`th visible name beside `name` for a file that could not go
-/// back under it: `stem-kept.ext`, then `stem-kept-2.ext` and so on.
-fn kept_name(name: &Path, number: u32) -> PathBuf {
-    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
-    let mark = if number <= 1 {
-        "-kept".to_string()
-    } else {
-        format!("-kept-{number}")
-    };
-    let file = match name.extension() {
-        Some(extension) => format!("{stem}{mark}.{}", extension.to_string_lossy()),
-        None => format!("{stem}{mark}"),
-    };
-    name.with_file_name(file)
 }
 
 /// Removes the name a file was moved from, once it has its new one.
-fn remove_old_name(path: &Path) {
+pub(crate) fn remove_old_name(path: &Path) {
     if let Err(error) = fs::remove_file(path)
         && error.kind() != io::ErrorKind::NotFound
     {
         log::warn!("cannot remove {}: {error}", path.display());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kept_names_sit_beside_the_name_and_count_up() {
-        let name = Path::new("out").join("IMG 1.jpg");
-        assert_eq!(kept_name(&name, 1), Path::new("out").join("IMG 1-kept.jpg"));
-        assert_eq!(
-            kept_name(&name, 3),
-            Path::new("out").join("IMG 1-kept-3.jpg")
-        );
-        assert_eq!(kept_name(Path::new("bare"), 2), Path::new("bare-kept-2"));
-        assert_eq!(folder_of(Path::new("bare")), Path::new("."));
-        assert_eq!(folder_of(&name), Path::new("out"));
-    }
-
-    /// Review finding 6: a process id and a count are the same on two
-    /// machines. The names carry the process id, for a person reading the
-    /// folder, and sixty-four bits that are not a count.
-    #[test]
-    fn hidden_names_carry_the_process_id_and_sixty_four_random_bits() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = format!(".photo-export-{}-", std::process::id());
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..1000 {
-            let path = hidden_name(dir.path(), "previous");
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let random = name
-                .strip_prefix(&prefix)
-                .and_then(|rest| rest.strip_suffix(".previous"))
-                .unwrap_or_else(|| panic!("{name}"));
-            assert_eq!(random.len(), 16, "{name}");
-            let number = u64::from_str_radix(random, 16).unwrap_or_else(|_| panic!("{name}"));
-            assert!(seen.insert(number), "{name} came twice");
-        }
-        let (least, most) = (seen.iter().min().unwrap(), seen.iter().max().unwrap());
-        assert!(most - least > 1 << 40, "the names follow one another");
     }
 }
