@@ -38,9 +38,10 @@
 //! removed.
 //!
 //! Guaranteed, whatever other programs do in the folder while the export
-//! runs (the `place` module; its tests act between every two steps, and
-//! pass on APFS and, with `TMPDIR` set there, on FAT32 and exFAT volumes
-//! under macOS; nothing here has been run on Windows):
+//! runs (the `place` module; its tests have another program act before
+//! each step in turn, once per run, and pass on APFS and, with `TMPDIR` set
+//! there, on FAT32 and exFAT volumes under macOS; nothing here has been run
+//! on Windows):
 //!
 //! - **Skip and unique name** never replace or remove a file the export
 //!   did not create. The name is taken by a hard link or an exclusive
@@ -52,7 +53,9 @@
 //!   there and a reader can see the file grow under its final name. The
 //!   unique-name policy fails, rather than going on without end, when a
 //!   hundred names in a row are each taken in the instant before it can
-//!   have them.
+//!   have them. An identity that cannot be read while the copy is checked
+//!   is an error at that name: never "skipped", never a reason to try the
+//!   next name.
 //! - **Overwrite** replaces what has the name, except the original photo
 //!   and the files in [`ExportItem::protected`]. Those are recognised by
 //!   file identity, as they were when the export started and as their
@@ -71,16 +74,19 @@
 //!   when the guarded file has the name as the export starts, and without
 //!   moving it when it has the name as the export comes to place its file.
 //!   Only a guarded file that takes the name in the instant after that
-//!   last look is moved aside with it; it is then put back. A file that
-//!   cannot be opened to be identified is refused in the same way, and so
-//!   is any file when the original or a protected path leads to a file
-//!   that cannot be opened ([`ExportError::CannotIdentify`]): when that is
-//!   so as the export starts, before anything is rendered, even if nothing
-//!   has the name yet, because that file could be moved there. So is
-//!   a file moved aside from the very place a guarded path names (the same
-//!   folder and the same name, ignoring case), which on a file system that
-//!   tells such names apart can be another file: the doubt goes to the
-//!   guarded file.
+//!   last look is moved aside with it; it is then put back. What cannot be
+//!   told apart is refused in the same way, the doubt going to the guarded
+//!   file: a file at the name that cannot be opened to be identified; any
+//!   file at all when the original or a protected path leads to a file
+//!   that cannot be opened ([`ExportError::CannotIdentify`]; when that is
+//!   so as the export starts, before anything is rendered or decoded, even
+//!   if nothing has the name yet, since that file could be moved there); a
+//!   comparison whose identities cannot be read; and a file moved aside
+//!   from the very place a guarded path names (the same folder and the
+//!   same name, ignoring case), which on a file system that tells such
+//!   names apart can be another file. A path that leads to no file at all
+//!   (an original on a drive that is away, rendered from memory) refuses
+//!   nothing.
 //! - **A failure loses nothing and hides nothing.** A failed, refused or
 //!   cancelled export removes the files it created and nothing else (a
 //!   destination folder it had to make stays). A file it had moved aside
@@ -92,18 +98,20 @@
 //!   itself for the original or a protected file, [`ExportError::Kept`]
 //!   for any other. A file the export replaced and cannot remove is
 //!   renamed beside it in the same way, and the log says where.
+//! - **Hidden names are the export's own.** They are
+//!   `.photo-export-<process>-<random>.<role>`, sixty-four random bits
+//!   after the process id, so another exporter writing into the same
+//!   folder, even one on another machine with the same process id, does
+//!   not come to use them (short of a one in 2^64 chance for a pair of
+//!   names). On Apple's systems the move aside also refuses
+//!   a hidden name that is taken, and tries another; elsewhere, and on a
+//!   volume without an exclusive rename, it is a plain rename, and the
+//!   random bits alone keep the names apart.
 //!
 //! Not guaranteed:
 //!
-//! - Another program writing to this export's own hidden names
-//!   (`.photo-export-<process>-<random>.<role>` in the destination folder)
-//!   is out of scope: a file put under such a name can be replaced or
-//!   removed. Another exporter, even on another machine with the same
-//!   process id, does not come to use them: each carries sixty-four random
-//!   bits, and on Apple's systems the move aside also refuses a hidden name
-//!   that is taken. Elsewhere, and on a volume without an exclusive rename,
-//!   the move aside is a plain rename and the random bits alone keep the
-//!   names apart.
+//! - Another program writing to this export's own hidden names is out of
+//!   scope: a file put under such a name can be replaced or removed.
 //! - Under the overwrite policy every other file with the export's name is
 //!   replaced, one that another program put there a moment before
 //!   included: only the original and the protected files are guarded.
@@ -113,16 +121,18 @@
 //!   protect it: nothing then tells the file from any other. A path that
 //!   reaches the file only through the export's own name (a symbolic link
 //!   to that name, say) must lead there by the export's last look at the
-//!   name, because moving the file aside breaks such a path. (A path that
-//!   leads to a file that cannot be opened is another matter: see
-//!   [`ExportError::CannotIdentify`].)
+//!   name, because moving the file aside breaks such a path.
+//! - A comparison reads two identities one after the other. On exFAT,
+//!   where rewriting a file changes its identity, a guarded file that
+//!   another program moves onto the export's name and rewrites between
+//!   those two reads can pass for another file.
 //! - An original or protected file that takes the export's name in the
 //!   instant between the export's last look at the name and its move is
 //!   moved aside with it: until it is put back it is whole, but under a
 //!   hidden name. A process that stops there, or between any other two
-//!   steps, leaves the hidden files that `place` lists step by step, and
-//!   nothing picks them up later. It never leaves a file both gone and not
-//!   yet replaced.
+//!   steps (between moving a file aside and putting it back, say), leaves
+//!   the hidden files that `place` lists step by step, and nothing picks
+//!   them up later. It never leaves a file both gone and not yet replaced.
 //! - A file that can neither go back under its name nor be renamed beside
 //!   it (the folder can no longer be written, or the ninety-nine names
 //!   tried beside it are all taken) stays whole under its hidden name,
@@ -130,18 +140,21 @@
 //!   nor exclusive renames the rename to a `-kept` name is a plain rename
 //!   onto a name that nothing had a moment before: a file another program
 //!   creates under that very name in that instant is replaced.
-//! - Where the export is copied to its name (neither hard links nor
-//!   exclusive renames), an identity that cannot be read when the export
-//!   checks its copy fails the export at that name; the copy is removed
-//!   only once it is shown to be the export's, so when no identity can be
-//!   read at all (no descriptor left, say) the finished copy stays under
-//!   the export's name.
+//! - Where the export is copied to its name, the copy is removed after a
+//!   failure only once it is shown to be the export's. When no identity can
+//!   be read at all (no descriptor left, say) the finished copy stays under
+//!   the export's name, and the export still fails; when one cannot be read
+//!   just after the copy was moved aside, the copy is put back like a file
+//!   of somebody else's.
 //! - On a file system with neither hard links nor exclusive renames, a
 //!   file that is put back comes back as a new file with the same bytes,
 //!   modification time and permissions (a symbolic link is made anew and
-//!   leads where it led). On Windows without hard links (FAT, exFAT) a
-//!   file that is put back has its attributes (read-only, hidden, system)
-//!   cleared, which the exclusive rename used there does.
+//!   leads where it led), so what another program writes to the old file
+//!   through a handle it holds open is not in it. A file renamed beside its
+//!   name is the file itself. On Windows without hard links (FAT, exFAT) a
+//!   file that is put back or renamed beside its name has its attributes
+//!   (read-only, hidden, system) cleared, which the exclusive rename used
+//!   there does.
 //! - Power loss, as opposed to this process stopping: an export is not
 //!   synced to the disk before it takes its name (only a copy made where
 //!   there is neither move is), so a file reported as written can be
