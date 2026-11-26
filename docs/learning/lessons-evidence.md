@@ -2,12 +2,10 @@
 
 The war story, the measurements and the anchor behind each line in [lessons.md](lessons.md). Not session-start reading.
 
-## `cargo fmt` given `--manifest-path` checks only the root package
+## A file's identity changes on FAT and exFAT under macOS
 
-**Anchor:** 2026-11-19, GitHub Actions run 44680100632 on commit `c59c2bf`: the Format step failed on macOS and Windows thirty seconds after a push whose message said the format gate passed. Fixed in `5a64b64`.
+**Anchor:** 2026-11-25, commit `f4ed351` (the defect) and `c14fe42` (the fix), found by the photo-export builder running the placement tests on real FAT32 and exFAT images made with `hdiutil create -fs MS-DOS` and `-fs ExFAT` and pointed at with `TMPDIR`.
 
-**Gate:** CI's Format step in `.github/workflows/ci.yml`. It was red on the defect. It has not yet been green on `main`, because the UI spike in `c59c2bf` stayed unformatted until the widget kit replaced it, so the proof is half made.
+**Gate it waits for:** a CI step on the macOS runner that runs `cargo test -p photo-export` with `TMPDIR` on each kind of image. Until then the tests only show it when someone runs them that way by hand.
 
-Every cargo command in the session that built the foundation was run with `--manifest-path <root>/Cargo.toml`. For `cargo test`, `cargo clippy` and `cargo build` that is harmless. `cargo fmt` decides whether to format every workspace member by comparing the workspace root directory with the current directory; given `--manifest-path` it compares the root directory with the manifest file's path instead, the comparison is always false, and it formats only the package that manifest belongs to. `cargo fmt --check --manifest-path <root>/Cargo.toml` exited 0 while eleven files in `crates/core` were unformatted, and version 0.3.0 was committed and pushed with a red format gate reported as green.
-
-What works: plain `cargo fmt --check` with the workspace root as the working directory, `cargo fmt --all --check` from anywhere, or `cargo fmt -p <crate> -- --check` for one crate, which selects packages by name.
+Measured on such volumes: neither hard links nor an exclusive rename exist (both `ENOTSUP`), so export takes a name by an exclusive create and a copy; and a file's device and inode change when an empty file gets its first bytes, when an empty file is renamed, and on exFAT when it is cut to nothing and rewritten. `f4ed351` noted the identity of the name it created while the file was empty and compared it with the one read after the copy, so it never recognised its own file: on a FAT32 image the unique-name policy wrote `x.jpg`, `x-2.jpg`, and on past `x-999.jpg` before it was stopped; skip reported a file it had just written as skipped; overwrite failed. The stand-in file systems in the tests could not show it, because they run on APFS. `c14fe42` keeps the file open and reads both identities at the moment of each comparison.

@@ -12,4 +12,4 @@ Code lessons need a real test id. Photo-processing lessons record the affected s
 
 ## Rules
 
-- `cargo fmt` given `--manifest-path` checks only the root package, so a green local format gate can hide unformatted crates. — **gate:** CI's Format step, `cargo fmt --all --check`, which went red on `c59c2bf`; retire once it has also gone green on `main` ([evidence](lessons-evidence.md#cargo-fmt-given---manifest-path-checks-only-the-root-package))
+- On FAT and exFAT under macOS a file's identity (device and inode) changes when an empty file gets its first bytes, when it is renamed, and on exFAT when it is cut to nothing and rewritten, so identity checks that pass on APFS can fail to recognise a file there. — **gate:** a CI step on the macOS runner that runs `cargo test -p photo-export` with `TMPDIR` on a FAT32 and on an exFAT disk image, which would have caught `f4ed351`; the tests that show it on such a volume are `place::held::tests::a_held_file_is_recognised_through_its_first_bytes_and_a_rename` and `place::tests::the_guard_knows_a_file_by_identity_not_by_bytes_or_name` ([evidence](lessons-evidence.md#a-files-identity-changes-on-fat-and-exfat-under-macos))
