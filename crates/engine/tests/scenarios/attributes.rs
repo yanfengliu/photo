@@ -439,12 +439,16 @@ fn undoing_a_keyword_a_change_created_keeps_it_on_photos_that_got_it_since() {
         .engine
         .add_keywords(Target::Photos(vec![p[0]]), &["Trip"])
         .unwrap();
+    // A photo imported later says "Trip" in its own metadata.
     let (_more, files) = crate::common::many_jpegs(1, 64, 48);
-    let mut request = crate::common::add(files);
-    request.keywords = vec!["Trip".to_string()];
-    let task = studio.engine.start_import(request).unwrap();
-    studio.settle();
-    let later = studio.engine.import_summary(task).unwrap().imported[0];
+    let kind = photo_core::meta::FileKind::Raster;
+    let said = photo_xmp::XmpData {
+        keywords: vec!["Trip".to_string()],
+        ..photo_xmp::XmpData::default()
+    };
+    let info = photo_xmp::ImageInfo::new(kind).with_size(64, 48);
+    photo_xmp::write_sidecar(&photo_xmp::sidecar_path(&files[0], kind), &said, info).unwrap();
+    let later = studio.import(files).imported[0];
     assert_eq!(keyword_names(&studio, later), ["Trip"]);
     let trip = studio.engine.photo_keywords(later).unwrap()[0].id;
     assert_eq!(studio.engine.undo_label(), Some("Add Keyword \"Trip\""));
