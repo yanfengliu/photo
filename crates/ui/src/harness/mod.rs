@@ -19,40 +19,12 @@ mod host;
 
 use std::path::Path;
 
-use egui::accesskit::{self, Role};
-use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Vec2};
-use egui_kittest::kittest::{NodeT as _, Queryable as _};
+use egui::{Event, Key, Modifiers, PointerButton, Pos2, Vec2};
 
 pub use builder::HarnessBuilder;
-pub use controls::ListedControl;
+pub use controls::{Control, ListedControl};
 pub use error::{HarnessError, RenderError};
 pub use host::Host;
-
-/// What the accessibility tree says about one control.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Control {
-    /// Where it is, in logical points.
-    pub rect: Rect,
-    /// Its number, for sliders and the like.
-    pub value: Option<f64>,
-    /// The least number it takes, for sliders and the like.
-    pub min: Option<f64>,
-    /// The greatest number it takes, for sliders and the like.
-    pub max: Option<f64>,
-    /// Its text: the content of a text field, or a widget's own description
-    /// of its state.
-    pub text: Option<String>,
-    /// Whether it is on, for switches and toggle buttons.
-    pub toggled: Option<bool>,
-    /// Whether it is selected, for items of a list or grid.
-    pub selected: Option<bool>,
-    /// Whether it is expanded, for disclosure headers.
-    pub expanded: Option<bool>,
-    /// Whether it has keyboard focus.
-    pub focused: bool,
-    /// Whether it is disabled.
-    pub disabled: bool,
-}
 
 /// The longest stretch of simulated time [`Harness::advance`] passes at once.
 const MAX_ADVANCE: f32 = 60.0;
@@ -359,114 +331,6 @@ impl<A: eframe::App + 'static> Harness<A> {
         if modifiers.any() {
             self.inner.event(Event::ModifiersChanged(Modifiers::NONE));
         }
-    }
-
-    // ---- Controls, by role and accessible name ----
-
-    /// Describe the one control with this role and name.
-    pub fn control(&self, role: Role, name: &str) -> Result<Control, HarnessError> {
-        let node = self.node(role, name)?;
-        let access = node.accesskit_node();
-        Ok(Control {
-            rect: self.rect_of(&node, role, name)?,
-            value: access.numeric_value(),
-            min: access.min_numeric_value(),
-            max: access.max_numeric_value(),
-            text: access.value(),
-            toggled: access
-                .toggled()
-                .map(|toggled| toggled == accesskit::Toggled::True),
-            selected: access.is_selected(),
-            expanded: access.data().is_expanded(),
-            focused: access.is_focused(),
-            disabled: access.is_disabled(),
-        })
-    }
-
-    /// How many controls have this role and name (0 when it is not shown).
-    pub fn count(&self, role: Role, name: &str) -> usize {
-        self.inner.query_all_by_role_and_label(role, name).count()
-    }
-
-    /// Click the centre of a control with the pointer.
-    pub fn click(&mut self, role: Role, name: &str) -> Result<(), HarnessError> {
-        let center = self.control(role, name)?.rect.center();
-        self.click_at(center)
-    }
-
-    /// Double-click the centre of a control with the pointer.
-    pub fn double_click(&mut self, role: Role, name: &str) -> Result<(), HarnessError> {
-        let center = self.control(role, name)?.rect.center();
-        self.double_click_at(center)
-    }
-
-    /// Activate a control through the accessibility tree, the way assistive
-    /// technology does. Unlike [`Self::click`] this works when the control is
-    /// scrolled out of view or covered.
-    pub fn invoke(&mut self, role: Role, name: &str) -> Result<(), HarnessError> {
-        self.node(role, name)?.click_accesskit();
-        self.run().map(drop)
-    }
-
-    /// Give a control keyboard focus.
-    pub fn focus(&mut self, role: Role, name: &str) -> Result<(), HarnessError> {
-        self.node(role, name)?.focus();
-        self.run().map(drop)
-    }
-
-    /// Set the number of a slider-like control.
-    pub fn set_value(&mut self, role: Role, name: &str, value: f64) -> Result<(), HarnessError> {
-        self.node(role, name)?.set_value_accesskit(value);
-        self.run().map(drop)
-    }
-
-    /// Replace the content of a text field.
-    pub fn set_text(&mut self, role: Role, name: &str, text: &str) -> Result<(), HarnessError> {
-        self.node(role, name)?.set_text_value_accesskit(text);
-        self.run().map(drop)
-    }
-
-    fn node<'a>(
-        &'a self,
-        role: Role,
-        name: &'a str,
-    ) -> Result<egui_kittest::Node<'a>, HarnessError> {
-        let mut matches = self.inner.query_all_by_role_and_label(role, name);
-        let first = matches.next().ok_or_else(|| HarnessError::NotFound {
-            role,
-            name: name.to_owned(),
-        })?;
-        match matches.count() {
-            0 => Ok(first),
-            more => Err(HarnessError::Ambiguous {
-                role,
-                name: name.to_owned(),
-                count: more + 1,
-            }),
-        }
-    }
-
-    /// Where `node` is, in logical points. Containers have no rectangle.
-    fn rect_of(
-        &self,
-        node: &egui_kittest::Node<'_>,
-        role: Role,
-        name: &str,
-    ) -> Result<Rect, HarnessError> {
-        let bounds =
-            node.accesskit_node()
-                .bounding_box()
-                .ok_or_else(|| HarnessError::NoBounds {
-                    role,
-                    name: name.to_owned(),
-                })?;
-        // The tree is in physical pixels.
-        let scale = self.inner.ctx.pixels_per_point();
-        let point = |x: f64, y: f64| Pos2::new(x as f32 / scale, y as f32 / scale);
-        Ok(Rect::from_min_max(
-            point(bounds.x0, bounds.y0),
-            point(bounds.x1, bounds.y1),
-        ))
     }
 
     // ---- Rendering ----

@@ -135,7 +135,7 @@ fn exit_codes_say_whether_every_answer_was_ok() {
         .unwrap();
     assert_eq!(binary.status.code(), Some(i32::from(EXIT_OK)));
     let answer: Value = serde_json::from_slice(&binary.stdout).unwrap();
-    assert_eq!(answer["data"]["protocol_version"], 1);
+    assert_eq!(answer["data"]["protocol_version"], 2);
     let usage = Command::new(env!("CARGO_BIN_EXE_harnessctl"))
         .output()
         .unwrap();

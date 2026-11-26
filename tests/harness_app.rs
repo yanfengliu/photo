@@ -270,7 +270,7 @@ fn a_sandboxed_session_writes_nothing_outside_its_run_directory() {
 }
 
 #[test]
-fn open_shows_a_photo_in_the_loupe_at_startup_and_later() {
+fn open_shows_a_photo_in_the_loupe_at_startup_and_later_in_the_app_as_it_is() {
     let library = TempLibrary::new();
     let path_of = |name: &str| {
         library
@@ -284,13 +284,46 @@ fn open_shows_a_photo_in_the_loupe_at_startup_and_later() {
     let live = Live::start_with(Some(dawn.clone()));
     let mut client = live.client();
     let seen = client.ok("observe", json!({ "controls": false }));
+    assert_eq!(seen["module"], "library");
     assert_eq!(seen["view"], "loupe");
     assert_eq!(seen["active_photo"]["file_name"], "dawn.jpg");
     assert_eq!(seen["photos"]["all"], 1);
 
+    // What starting the app again would lose: a step to undo and a panel
+    // that was closed.
+    client.ok("key", json!({ "name": "3" }));
+    client.ok(
+        "click",
+        json!({ "name": "Folders", "role": "DisclosureTriangle" }),
+    );
+    let before = client.ok("observe", json!({ "controls": false }));
+    assert_eq!(before["undo"]["undo"], "Set Rating to 3");
+    let open_panels = |seen: &Value| -> Vec<String> {
+        seen["panels"]["left"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|panel| panel.as_str().map(str::to_owned))
+            .collect()
+    };
+    assert!(!open_panels(&before).contains(&"Folders".to_owned()));
+    assert!(open_panels(&before).contains(&"Catalog".to_owned()));
+
     let opened = client.ok("open", json!({ "path": path_of("lake.png") }));
     assert_eq!(opened["opened"]["file_name"], "lake.png");
     assert_eq!(opened["opened"]["imported"], true);
+    assert_eq!(opened["module"], "library");
+    assert_eq!(opened["view"], "loupe");
+    let after = client.ok("observe", json!({ "controls": false }));
+    assert_eq!(after["active_photo"]["file_name"], "lake.png");
+    assert_eq!(after["active_photo"]["id"], opened["opened"]["id"]);
+    assert_eq!(after["selection"]["count"], 1);
+    assert_eq!(
+        after["undo"]["undo"], "Set Rating to 3",
+        "the undo stack is as it was"
+    );
+    assert_eq!(after["panels"], before["panels"], "and so are the panels");
+
     let again = client.ok("open", json!({ "path": dawn }));
     assert_eq!(
         again["opened"]["imported"], false,
@@ -299,10 +332,32 @@ fn open_shows_a_photo_in_the_loupe_at_startup_and_later() {
     let seen = client.ok("observe", json!({ "controls": false }));
     assert_eq!(seen["view"], "loupe");
     assert_eq!(seen["active_photo"]["file_name"], "dawn.jpg");
+    assert_eq!(seen["active_photo"]["rating"], 3);
     assert_eq!(seen["photos"]["all"], 2);
     assert_eq!(
         client.fails("open", json!({ "path": library.stray_file() })),
         "invalid_params"
+    );
+    assert_eq!(
+        client.fails("open", json!({ "path": library.root().join("gone.jpg") })),
+        "not_found"
+    );
+    let unchanged = client.ok("observe", json!({ "controls": false }));
+    assert_eq!(unchanged["active_photo"]["file_name"], "dawn.jpg");
+
+    // While developing, the photo opened is the one developed.
+    client.ok("key", json!({ "name": "d" }));
+    client.ok("wait_idle", json!({ "timeout_ms": 120_000 }));
+    let developing = client.ok("open", json!({ "path": path_of("lake.png") }));
+    assert_eq!(developing["module"], "develop");
+    client.ok("wait_idle", json!({ "timeout_ms": 120_000 }));
+    let seen = client.ok("observe", json!({ "controls": false }));
+    assert_eq!(seen["module"], "develop");
+    assert_eq!(seen["active_photo"]["file_name"], "lake.png");
+    assert!(
+        seen["active_photo"]["load"]["develop"]["state"].is_string(),
+        "a develop session is open on it: {}",
+        seen["active_photo"]
     );
 }
 

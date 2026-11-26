@@ -123,7 +123,7 @@ impl Server {
         if let Some(opened) = opened {
             self.run.log(json!({
                 "kind": "opened",
-                "id": opened.id,
+                "id": opened.photo.0,
                 "path": opened.path,
                 "imported": opened.imported,
             }));

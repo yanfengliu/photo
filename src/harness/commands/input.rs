@@ -11,10 +11,10 @@ use egui::{Pos2, pos2};
 use serde_json::{Value, json};
 
 use super::{Session, performed};
+use crate::harness::controls::{Control, rect_json, role_name};
 use crate::harness::driver::{Driver, finish};
 use crate::harness::keys::{parse_key, parse_modifiers};
 use crate::harness::protocol::{CmdError, Params};
-use crate::harness::tree::{Control, rect_json};
 
 /// How long `wait_idle` waits unless told otherwise.
 const DEFAULT_WAIT: Duration = Duration::from_secs(30);
@@ -43,7 +43,7 @@ pub fn click(
     let warnings = finish(result)?;
     Ok(performed(
         json!({
-            "clicked": { "role": control.role_name(), "name": name, "rect": control.rect.map(rect_json) },
+            "clicked": { "role": role_name(control.role), "name": name, "rect": control.rect.map(rect_json) },
             "double": double,
         }),
         warnings,
@@ -53,24 +53,22 @@ pub fn click(
 /// A control can be used: it is enabled and on screen.
 fn within_window(driver: &Driver, control: &Control) -> Result<(), CmdError> {
     let name = control.name.as_deref().unwrap_or_default();
+    let role = role_name(control.role);
     if !control.enabled {
         return Err(CmdError::unavailable(format!(
-            "the {} named {name:?} is disabled",
-            control.role_name()
+            "the {role} named {name:?} is disabled"
         )));
     }
     let rect = control.rect.ok_or_else(|| {
         CmdError::unavailable(format!(
-            "the {} named {name:?} has no rectangle on screen",
-            control.role_name()
+            "the {role} named {name:?} has no rectangle on screen"
         ))
     })?;
     let [width, height] = driver.look().size;
     let window = egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(width, height));
     if !window.contains(rect.center()) {
         return Err(CmdError::unavailable(format!(
-            "the {} named {name:?} is outside the window (scrolled out of view?)",
-            control.role_name()
+            "the {role} named {name:?} is outside the window (scrolled out of view?)"
         )));
     }
     Ok(())

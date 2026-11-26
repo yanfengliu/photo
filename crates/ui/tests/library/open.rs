@@ -86,6 +86,53 @@ fn a_photo_is_opened_by_its_path_without_starting_the_app_again() -> TestResult 
 }
 
 #[test]
+fn a_photo_is_opened_in_an_engine_before_there_is_an_app() -> TestResult {
+    let library = TempLibrary::new();
+    let studio = Studio::new();
+    let mut engine = studio.options.open_engine()?;
+    let lake = library
+        .entries()
+        .iter()
+        .find(|entry| entry.path.ends_with("lake.png"))
+        .ok_or("the library has lake.png")?
+        .path
+        .clone();
+    assert_eq!(photo_ui::openable(&lake), Ok(lake.clone()));
+    let stray = library.stray_file().to_path_buf();
+    assert_eq!(
+        photo_ui::openable(&stray),
+        Err(OpenError::Unsupported(stray.clone()))
+    );
+    assert_eq!(
+        photo_ui::open_in_engine(&mut engine, &stray, PATIENCE),
+        Err(OpenError::Unsupported(stray))
+    );
+    assert_eq!(engine.photo_count(), 0, "a refusal imports nothing");
+
+    let opened = photo_ui::open_in_engine(&mut engine, &lake, PATIENCE)?;
+    assert!(opened.imported);
+    assert_eq!(
+        (opened.file_name.as_str(), &opened.path),
+        ("lake.png", &lake)
+    );
+    assert_eq!(engine.active_photo(), Some(opened.photo));
+    assert_eq!(engine.selection().selected(), [opened.photo]);
+
+    // The app started on that engine shows it in the loupe.
+    let options = studio.options.clone();
+    let mut harness = HarnessBuilder::new()
+        .size(WINDOW)
+        .max_steps(240)
+        .build(move |cc| {
+            PhotoApp::new(cc, engine, options).starting_in(Module::Library, View::Loupe)
+        });
+    settle(&mut harness)?;
+    assert_eq!(harness.app().view(), View::Loupe);
+    assert_eq!(active(&harness).as_deref(), Some("lake.png"));
+    Ok(())
+}
+
+#[test]
 fn a_photo_opened_while_developing_is_developed() -> TestResult {
     let library = TempLibrary::new();
     let studio = Studio::new();

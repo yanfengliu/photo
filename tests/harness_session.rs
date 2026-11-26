@@ -23,7 +23,7 @@ fn a_wrong_token_is_refused_and_the_right_one_accepted() {
 
     let mut client = live.client();
     let ping = client.ok("ping", json!({}));
-    assert_eq!(ping["protocol_version"], 1);
+    assert_eq!(ping["protocol_version"], 2);
     assert_eq!(ping["app_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(ping["run_id"], live.session.run_id);
     assert_eq!(ping["sandboxed"], true);

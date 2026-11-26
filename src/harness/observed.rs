@@ -1,17 +1,9 @@
 //! Photo's app as the harness runs it: the real [`PhotoApp`], wrapped so the
-//! harness can see what a frame put in the accessibility tree and which
-//! toasts came and went.
-//!
-//! `photo_ui::harness` finds one control at a time by role and name; to
-//! list every control, the wrapper copies egui's AccessKit nodes at the end
-//! of a frame the harness asks it to watch, once the app has drawn
-//! everything (see `tree`).
+//! harness can see which toasts came and went between two requests.
 
 use std::collections::VecDeque;
 
 use photo_ui::PhotoApp;
-
-use super::tree::Tree;
 
 /// How many toasts `observe` can look back on.
 const TOAST_HISTORY: usize = 20;
@@ -20,8 +12,6 @@ const TOAST_HISTORY: usize = 20;
 pub struct Observed {
     /// The app itself.
     pub app: PhotoApp,
-    capture: bool,
-    captured: Option<Tree>,
     showing: Vec<String>,
     history: VecDeque<SeenToast>,
     next_toast: u64,
@@ -43,23 +33,10 @@ impl Observed {
     pub fn new(app: PhotoApp) -> Self {
         Self {
             app,
-            capture: false,
-            captured: None,
             showing: Vec::new(),
             history: VecDeque::new(),
             next_toast: 1,
         }
-    }
-
-    /// Copy the accessibility tree at the end of the next frame.
-    pub fn capture_next_frame(&mut self) {
-        self.capture = true;
-        self.captured = None;
-    }
-
-    /// The tree the last watched frame left, taken.
-    pub fn take_tree(&mut self) -> Option<Tree> {
-        self.captured.take()
     }
 
     /// The toasts seen appearing, oldest first, at most the last twenty.
@@ -103,11 +80,7 @@ impl eframe::App for Observed {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
-        let ctx = ui.ctx().clone();
-        self.note_toasts(ctx.cumulative_frame_nr());
-        if std::mem::take(&mut self.capture) {
-            self.captured = Tree::capture(&ctx);
-        }
+        self.note_toasts(ui.ctx().cumulative_frame_nr());
     }
 }
 

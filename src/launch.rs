@@ -8,15 +8,14 @@
 //!
 //! A path opens that photo at startup, harness or not: imported in place if
 //! the catalog does not hold it yet, made the active photo, and shown in
-//! the loupe.
+//! the loupe. `photo_ui` does the opening (`open_in_engine`) and owns the
+//! window (`run_with`); this module only puts the two together.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use egui::{Event, Key, Modifiers};
-use photo_engine::{Engine, ImportMode, ImportRequest, Source};
-use photo_ui::{AppOptions, PhotoApp};
+use photo_ui::{AppOptions, Module, View};
 
 /// The port `--harness` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 7878;
@@ -74,179 +73,18 @@ impl Args {
     }
 }
 
-/// Why a photo could not be opened.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OpenError {
-    /// There is no file at the path.
-    Missing(PathBuf),
-    /// The file is not of a kind Photo reads.
-    Unsupported(PathBuf),
-    /// The import did not finish in time.
-    Timeout(PathBuf),
-    /// The import or the catalog refused it.
-    Failed(String),
-}
-
-impl std::fmt::Display for OpenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Missing(path) => write!(f, "there is no file at {}", path.display()),
-            Self::Unsupported(path) => {
-                write!(f, "{} is not a kind of image Photo reads", path.display())
-            }
-            Self::Timeout(path) => write!(f, "importing {} did not finish in time", path.display()),
-            Self::Failed(reason) => f.write_str(reason),
-        }
-    }
-}
-
-impl std::error::Error for OpenError {}
-
-/// The photo [`open_in_engine`] opened.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Opened {
-    /// Its id in the catalog.
-    pub id: i64,
-    /// Its file's name.
-    pub file_name: String,
-    /// Its file.
-    pub path: PathBuf,
-    /// Whether this opening imported it.
-    pub imported: bool,
-}
-
-/// The absolute path of a photo that can be opened, or why it cannot.
-pub fn openable(path: &Path) -> Result<PathBuf, OpenError> {
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    if !absolute.is_file() {
-        return Err(OpenError::Missing(absolute));
-    }
-    if !photo_engine::is_supported(&absolute) {
-        return Err(OpenError::Unsupported(absolute));
-    }
-    Ok(absolute)
-}
-
-/// Import the photo at `path` in place unless the catalog holds it already,
-/// and make it the active photo, alone in the selection. A fresh import
-/// leaves the Previous Import showing; a photo already in the catalog is
-/// found in All Photographs.
-pub fn open_in_engine(
-    engine: &mut Engine,
-    path: &Path,
-    timeout: Duration,
-) -> Result<Opened, OpenError> {
-    let path = openable(path)?;
-    let request = ImportRequest {
-        files: vec![path.clone()],
-        mode: ImportMode::Add,
-        skip_suspected_duplicates: false,
-        keywords: Vec::new(),
-        read_sidecars: true,
-    };
-    let task = engine
-        .start_import(request)
-        .map_err(|error| OpenError::Failed(format!("cannot import {}: {error}", path.display())))?;
-    if !engine.wait_idle(timeout) {
-        return Err(OpenError::Timeout(path));
-    }
-    let summary = engine
-        .import_summary(task)
-        .cloned()
-        .ok_or_else(|| OpenError::Failed("the import left no summary".to_owned()))?;
-    if let Some(issue) = summary.errors.first() {
-        return Err(OpenError::Failed(format!(
-            "cannot import {}: {}",
-            issue.path.display(),
-            issue.message
-        )));
-    }
-    let imported = !summary.imported.is_empty();
-    if !imported {
-        engine
-            .set_source(Source::AllPhotos)
-            .map_err(|error| OpenError::Failed(format!("cannot show all photos: {error}")))?;
-    }
-    let found = engine
-        .photos()
-        .iter()
-        .find(|photo| photo.path == path && !photo.is_virtual_copy())
-        .map(|photo| (photo.id, photo.file_name.clone()))
-        .ok_or_else(|| {
-            OpenError::Failed(format!(
-                "{} is in the catalog but not in the photo list",
-                path.display()
-            ))
-        })?;
-    let (id, file_name) = found;
-    engine.select_only(id);
-    Ok(Opened {
-        id: id.0,
-        file_name,
-        path,
-        imported,
-    })
-}
-
-/// The key press that shows the loupe, as a keyboard sends it.
-pub fn loupe_key_events() -> [Event; 2] {
-    [true, false].map(|pressed| Event::Key {
-        key: Key::E,
-        physical_key: None,
-        pressed,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    })
-}
-
-/// The app in a window with the photo at `path` open in the loupe.
-///
-/// `photo_ui::run` opens its own engine and starts in the grid, so this
-/// opens the engine, opens the photo in it, and starts the window with the
-/// app it would build, pressing E (the loupe) in the first frame. The
-/// window's options are those `photo_ui::run` uses.
+/// The app in a window with the photo at `path` open in the loupe: the
+/// photo is opened in the engine first, so a file that cannot be imported
+/// is reported before any window appears.
 pub fn run_window_with(options: AppOptions, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = options.open_engine()?;
-    let opened = open_in_engine(&mut engine, path, OPEN_TIMEOUT)?;
-    log::info!("opened {} (photo {})", opened.path.display(), opened.id);
-    let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Photo")
-            .with_inner_size([1600.0, 1000.0])
-            .with_min_inner_size([1100.0, 700.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Photo",
-        native,
-        Box::new(move |cc| {
-            let app = PhotoApp::new(cc, engine, options);
-            Ok(Box::new(InLoupe { app, pending: true }))
-        }),
-    )?;
-    Ok(())
-}
-
-/// The app, with E pressed in its first frame.
-struct InLoupe {
-    app: PhotoApp,
-    pending: bool,
-}
-
-impl eframe::App for InLoupe {
-    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.app.logic(ctx, frame);
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.app.ui(ui, frame);
-    }
-
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if std::mem::take(&mut self.pending) {
-            raw_input.events.extend(loupe_key_events());
-        }
-    }
+    let opened = photo_ui::open_in_engine(&mut engine, path, OPEN_TIMEOUT)?;
+    log::info!(
+        "opened {} (photo {})",
+        opened.path.display(),
+        opened.photo.0
+    );
+    photo_ui::run_with(engine, options, Module::Library, View::Loupe)
 }
 
 #[cfg(test)]
@@ -288,26 +126,5 @@ mod tests {
     fn real_storage_only_goes_with_the_harness_and_unknown_options_are_refused() {
         assert!(parse(&["--harness-real-storage"]).is_err());
         assert!(parse(&["--fullscreen"]).is_err());
-    }
-
-    #[test]
-    fn the_loupe_key_is_pressed_and_released() {
-        let [press, release] = loupe_key_events();
-        assert!(matches!(
-            press,
-            Event::Key {
-                key: Key::E,
-                pressed: true,
-                ..
-            }
-        ));
-        assert!(matches!(
-            release,
-            Event::Key {
-                key: Key::E,
-                pressed: false,
-                ..
-            }
-        ));
     }
 }

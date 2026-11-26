@@ -106,6 +106,7 @@ fn controls_are_found_and_operated_by_role_and_name() -> TestResult {
 /// What the listing test shows: a text, a number and a switch.
 struct Listed {
     text: String,
+    caption: String,
     amount: f32,
     on: bool,
 }
@@ -118,6 +119,7 @@ fn every_control_is_listed_with_its_role_name_value_state_and_place() -> TestRes
 
     let state = Listed {
         text: "dusk".to_owned(),
+        caption: "Low tide".to_owned(),
         amount: 0.25,
         on: true,
     };
@@ -126,6 +128,9 @@ fn every_control_is_listed_with_its_role_name_value_state_and_place() -> TestRes
         ui.add_enabled(false, egui::Button::new("Not now"));
         ui.add(egui::TextEdit::singleline(&mut state.text))
             .accessible_name("Notes");
+        let caption = ui.label("Caption");
+        ui.add(egui::TextEdit::singleline(&mut state.caption))
+            .labelled_by(caption.id);
         AdjSlider::new(Adj::Exposure.spec(), &mut state.amount, 0.0).show(ui);
         ui.checkbox(&mut state.on, "Sharpen");
         ui.label("Plain words");
@@ -149,6 +154,15 @@ fn every_control_is_listed_with_its_role_name_value_state_and_place() -> TestRes
     assert!(!controls[find(Role::Button, "Not now")].enabled);
     let notes = &controls[find(Role::TextInput, "Notes")];
     assert_eq!(notes.value.as_deref(), Some("dusk"));
+    // A field with a label beside it is named by that label.
+    let captioned = &controls[find(Role::TextInput, "Caption")];
+    assert_eq!(captioned.value.as_deref(), Some("Low tide"));
+    // The field's text is the field's; the runs it is drawn in are layout.
+    let runs: Vec<_> = controls
+        .iter()
+        .filter(|control| control.role == Role::TextRun)
+        .collect();
+    assert!(!runs.is_empty() && runs.iter().all(|run| run.is_layout()));
     let slider = &controls[find(Role::Slider, "Exposure")];
     assert_eq!(
         (slider.numeric, slider.min, slider.max),

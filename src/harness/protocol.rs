@@ -10,8 +10,10 @@ use std::fmt;
 use serde_json::{Map, Value, json};
 
 /// The protocol's version, reported by `ping`. Raised when a command or a
-/// response changes in a way a client could notice.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// response changes in a way a client could notice. Version 2: `open` opens
+/// the photo in the running app (it used to start the app again) and
+/// answers the module and view showing.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Why a request failed, as the `code` of its error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

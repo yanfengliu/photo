@@ -12,10 +12,12 @@
 //!
 //! The pieces: [`server`] owns the socket and the run directory's records;
 //! `driver` the running app; `observed` the wrapper that lets the harness
-//! see each frame, and `tree` the accessibility tree it copies; `commands`
-//! what each command does; [`stats`] the pixel statistics.
+//! see the toasts of each frame, and `controls` the accessibility tree's
+//! nodes as they are reported; `commands` what each command does; [`stats`]
+//! the pixel statistics.
 
 mod commands;
+mod controls;
 mod driver;
 mod gpu;
 mod keys;
@@ -24,7 +26,6 @@ pub mod protocol;
 pub mod run;
 pub mod server;
 pub mod stats;
-mod tree;
 
 use std::path::PathBuf;
 

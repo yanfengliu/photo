@@ -66,7 +66,7 @@ An action's data can carry `warnings`: the UI was still changing when the action
 | `compare_images` | `path_a`, `path_b` | How two images of one size differ (see below). |
 | `dump_render` | `source` (`current`, the default, or `original`), `max_dim` (2048, from 16 to 16384) | The active photo through the develop pipeline at full resolution: `current` with its settings as they are now (including an edit not yet committed in Develop), `original` with the defaults a new import of its kind gets. Answers the render's size and time, the statistics of the full render (see below), and a PNG artifact scaled down so its longer side is at most `max_dim` (never enlarged). `unavailable` when no photo is active. |
 | `import_folder` | `path`, `recursive` (true), `timeout_ms` (120000) | Through the real Import dialog: opens it (its button, or ⇧⌘I when the panels are hidden), sets "Include subfolders", types the path into the folder field and presses Enter, waits for the scan, and presses `Import N Photos`. Answers what the scan found and what was ticked; with nothing to import it cancels the dialog and says why. |
-| `open` | `path` | As `photo PATH` does: starts the app again on the same storage with the photo imported in place (unless the catalog holds it), made active and shown in the loupe. |
+| `open` | `path` | Opens the photo in the running app: imported in place (unless the catalog holds it), made active, alone in the selection, and shown, in the loupe from the Library and in Develop when that is the module. Answers the photo (`opened.id`, `file_name`, `path`, `imported`) and the `module` and `view` now showing. |
 | `click` | `name`, `role` | Clicks the middle of the control with that accessible name. |
 | `double_click` | `name`, `role` | Double-clicks it. |
 | `key` | `name`, `mods` | Presses and releases a key with modifiers held: `{"name": "z", "mods": ["cmd", "shift"]}` or `"mods": "cmd+shift"`. |
@@ -158,7 +158,7 @@ Time in the app passes only as frames run, a sixtieth of a second each. The harn
 
 A control that is disabled, or whose middle lies outside the window (scrolled out of view), is `unavailable` to `click`; scroll or change the view first, as a user would.
 
-`open` restarts the app on the same storage, as quitting and running `photo PATH` would: the panels, view and undo stack start afresh. The catalog and everything in it stay.
+`open` does not start the app again: the panels, the view's settings and the undo stack are as they were. A photo that was new to the catalog leaves the Previous Import showing, as every import does; one the catalog held but the list did not show is found in All Photographs with the filter cleared. (Until protocol version 2, `open` restarted the app and answered `relaunched`.)
 
 `key` presses keys; it does not type. Text goes in with `type_text`, after a click has given a text field focus.
 

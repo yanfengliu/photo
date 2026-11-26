@@ -7,6 +7,7 @@ use photo_engine::{
 use serde_json::{Value, json};
 
 use super::Session;
+use crate::harness::controls;
 use crate::harness::protocol::{CmdError, PROTOCOL_VERSION, Params};
 
 /// The most photos one `observe_library` page holds.
@@ -43,8 +44,8 @@ pub fn observe(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, 
     params.only(&["controls"])?;
     // The controls come from a frame run now, so what follows is read from
     // that same frame.
-    let controls = match params.opt_bool("controls")?.unwrap_or(true) {
-        true => Some(session.driver.controls()?),
+    let listed = match params.opt_bool("controls")?.unwrap_or(true) {
+        true => Some(session.driver.controls()),
         false => None,
     };
     let driver = &*session.driver;
@@ -64,8 +65,8 @@ pub fn observe(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, 
     let counts = engine.source_counts();
     let sort = engine.sort();
     let mut data = json!({
-        "module": snake(&format!("{:?}", app.module())),
-        "view": snake(&format!("{:?}", app.view())),
+        "module": module_name(app.module()),
+        "view": view_name(app.view()),
         "zoom": snake(&format!("{:?}", app.zoom())),
         "dialog_open": app.dialog_open(),
         "layout": {
@@ -132,11 +133,21 @@ pub fn observe(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, 
         "pointer": pointer,
         "window": window_json(session),
     });
-    if let Some(controls) = controls {
-        data["control_count"] = json!(controls.len());
-        data["controls"] = controls.iter().map(|control| control.to_json()).collect();
+    if let Some(listed) = listed {
+        data["control_count"] = json!(listed.len());
+        data["controls"] = listed.iter().map(controls::to_json).collect();
     }
     Ok(data)
+}
+
+/// A module's name as `observe` and `open` report it: `library`, `develop`.
+pub(super) fn module_name(module: photo_ui::Module) -> String {
+    snake(&format!("{module:?}"))
+}
+
+/// A view's name as `observe` and `open` report it: `grid`, `loupe`.
+pub(super) fn view_name(view: photo_ui::View) -> String {
+    snake(&format!("{view:?}"))
 }
 
 /// A page of the photo list, in the order the grid shows it.

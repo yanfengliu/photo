@@ -19,7 +19,7 @@ fn main() -> ExitCode {
         }
     };
     if let Some(path) = &args.open
-        && let Err(error) = launch::openable(path)
+        && let Err(error) = photo_ui::openable(path)
     {
         eprintln!("Photo cannot open {}: {error}", path.display());
         return ExitCode::FAILURE;

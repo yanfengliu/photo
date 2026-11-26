@@ -33,7 +33,7 @@ pub use self::develop::{
     BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Lights, MaskKind, Tool,
 };
 use self::develop::{DevelopState, Frames};
-pub use self::open::{OpenError, Opened};
+pub use self::open::{OpenError, Opened, open_in_engine, openable};
 use self::state::UiState;
 pub use self::state::{Layout, Module, View, Zoom};
 use self::textures::Textures;

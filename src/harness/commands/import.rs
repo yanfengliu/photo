@@ -1,5 +1,5 @@
 //! Getting photos in: `import_folder` through the real Import dialog, and
-//! `open`, which starts the app again with a photo as `photo PATH` does.
+//! `open`, which opens one photo by its path in the running app.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -8,11 +8,12 @@ use egui::accesskit::Role;
 use egui::{Key, Modifiers};
 use serde_json::{Value, json};
 
+use super::observe::{module_name, view_name};
 use super::{Session, performed};
+use crate::harness::controls::Control;
 use crate::harness::driver::{Driver, finish};
 use crate::harness::keys::parse_modifiers;
 use crate::harness::protocol::{CmdError, Code, Params};
-use crate::harness::tree::Control;
 
 /// The Library's button that opens the dialog.
 const IMPORT_BUTTON: &str = "Import…";
@@ -102,7 +103,7 @@ pub fn import_folder(params: &Params<'_>, session: &mut Session<'_>) -> Result<V
         .unwrap_or_default();
     warnings.extend(driver.settle());
 
-    let controls = driver.controls()?;
+    let controls = driver.controls();
     let (button, ticked) = confirm_button(&controls)
         .ok_or_else(|| CmdError::internal("the Import dialog shows no `Import N Photos` button"))?;
     let name = button.name.clone().unwrap_or_default();
@@ -208,24 +209,27 @@ fn confirm_button(controls: &[Control]) -> Option<(&Control, usize)> {
         })
 }
 
-/// `open {path}`: start the app again on the same storage with the photo
-/// open, exactly as `photo PATH` does: imported in place if the catalog
-/// does not hold it, made active, shown in the loupe. The presentation
-/// state and the undo stack start afresh, as after a restart.
+/// `open {path}`: open the photo in the running app: imported in place if
+/// the catalog does not hold it, made active, and shown, in the loupe from
+/// the Library and in Develop when that is the module. The app is not
+/// started again, so the panels, the view's settings and the undo stack
+/// are as they were.
 pub fn open(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, CmdError> {
     params.only(&["path"])?;
     let path = session.photo_path(params.string("path")?);
-    let opened = session.driver.relaunch(&path)?;
-    Ok(json!({
+    let (opened, warnings) = session.driver.open(&path)?;
+    let app = session.driver.app();
+    let data = json!({
         "opened": {
-            "id": opened.id,
+            "id": opened.photo.0,
             "file_name": opened.file_name,
             "path": opened.path,
             "imported": opened.imported,
         },
-        "relaunched": true,
-        "view": "loupe",
-    }))
+        "module": module_name(app.module()),
+        "view": view_name(app.view()),
+    });
+    Ok(performed(data, warnings))
 }
 
 #[cfg(test)]
@@ -234,21 +238,9 @@ mod tests {
 
     fn button(name: &str) -> Control {
         Control {
-            role: Role::Button,
             name: Some(name.to_owned()),
-            value: None,
-            numeric: None,
-            min: None,
-            max: None,
-            step: None,
-            enabled: true,
-            rect: None,
-            toggled: None,
-            selected: None,
-            expanded: None,
-            focused: false,
             interactive: true,
-            description: None,
+            ..crate::harness::controls::blank(Role::Button)
         }
     }
 

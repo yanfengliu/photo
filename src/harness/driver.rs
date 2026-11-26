@@ -5,17 +5,16 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use egui::{Key, Modifiers};
 use photo_engine::Engine;
 use photo_ui::harness::{Harness, HarnessBuilder, HarnessError};
-use photo_ui::{AppOptions, PhotoApp};
+use photo_ui::{AppOptions, Module, OpenError, Opened, PhotoApp, View};
 use serde_json::{Value, json};
 
+use super::controls::{self, Control, role_matches, role_name};
 use super::gpu::{self, ChoiceSlot};
 use super::observed::Observed;
 use super::protocol::{CmdError, Code};
-use super::tree::{Control, Tree, role_matches};
-use crate::launch::{self, OpenError, Opened};
+use crate::launch;
 
 /// The window size and pixel density the app runs at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,14 +48,14 @@ pub struct Rest {
 /// Photo, running headless.
 pub struct Driver {
     harness: Harness<Observed>,
-    options: AppOptions,
     look: Look,
     adapter: ChoiceSlot,
 }
 
 impl Driver {
     /// Open the catalog `options` names and start the app on it; with
-    /// `open`, open that photo first and show it in the loupe.
+    /// `open`, open that photo first and start in the loupe, as `photo
+    /// PATH` does.
     pub fn start(
         options: AppOptions,
         look: Look,
@@ -71,47 +70,47 @@ impl Driver {
         })?;
         let opened = match open {
             Some(path) => Some(
-                launch::open_in_engine(&mut engine, path, launch::OPEN_TIMEOUT)
+                photo_ui::open_in_engine(&mut engine, path, launch::OPEN_TIMEOUT)
                     .map_err(|error| format!("cannot open {}: {error}", path.display()))?,
             ),
             None => None,
         };
-        let harness = build(&options, look, &adapter, engine);
+        let view = match opened {
+            Some(_) => View::Loupe,
+            None => View::Grid,
+        };
+        let harness = HarnessBuilder::new()
+            .size(look.size)
+            .pixels_per_point(look.pixels_per_point)
+            .max_steps(MAX_STEPS)
+            .show_pointer(false)
+            .wgpu_setup(gpu::hardware_first(adapter.clone()))
+            .build(move |cc| {
+                let app = PhotoApp::new(cc, engine, options).starting_in(Module::Library, view);
+                Observed::new(app)
+            });
         let mut driver = Self {
             harness,
-            options,
             look,
             adapter,
         };
         driver.settle();
-        if opened.is_some() {
-            driver.show_loupe().map_err(|error| error.message)?;
-        }
         Ok((driver, opened))
     }
 
-    /// Start the app again on the same catalog with the photo at `path`
-    /// open, as `photo PATH` does. The app on screen is left as it was when
-    /// the photo cannot be opened.
-    pub fn relaunch(&mut self, path: &Path) -> Result<Opened, CmdError> {
-        launch::openable(path).map_err(open_error)?;
-        let mut engine = self.options.open_engine().map_err(|error| {
-            CmdError::internal(format!("the catalog cannot be opened again: {error}"))
-        })?;
-        let opened =
-            launch::open_in_engine(&mut engine, path, launch::OPEN_TIMEOUT).map_err(open_error)?;
-        // The old app goes once the new one exists; its workers are joined
-        // as it is dropped.
-        self.harness = build(&self.options, self.look, &self.adapter, engine);
-        self.settle();
-        self.show_loupe()?;
-        Ok(opened)
-    }
-
-    /// Press E, the loupe, as the user does after opening a photo.
-    fn show_loupe(&mut self) -> Result<(), CmdError> {
-        let result = self.harness.press_key(Key::E, Modifiers::NONE);
-        finish(result).map(drop)
+    /// Open the photo at `path` in the running app: imported in place if
+    /// the catalog does not hold it, made active and shown, in the loupe
+    /// from the Library and in Develop when that is the module. The app is
+    /// not started again, so its panels, view settings and undo stack stay.
+    /// Returns the photo and what settling the frames said.
+    pub fn open(&mut self, path: &Path) -> Result<(Opened, Vec<String>), CmdError> {
+        let opened = self
+            .harness
+            .app_mut()
+            .app
+            .open_path(path, launch::OPEN_TIMEOUT)
+            .map_err(open_error)?;
+        Ok((opened, self.settle()))
     }
 
     /// The app.
@@ -178,26 +177,17 @@ impl Driver {
         finish(result).unwrap_or_else(|error| vec![error.message])
     }
 
-    /// Run one frame and take the accessibility tree it left.
-    pub fn tree(&mut self) -> Result<Tree, CmdError> {
-        self.harness.app_mut().capture_next_frame();
+    /// Every control on screen, from a frame run now.
+    pub fn controls(&mut self) -> Vec<Control> {
         self.harness.step(1);
-        self.harness
-            .app_mut()
-            .take_tree()
-            .ok_or_else(|| CmdError::internal("the frame left no accessibility tree"))
-    }
-
-    /// Every control on screen.
-    pub fn controls(&mut self) -> Result<Vec<Control>, CmdError> {
-        Ok(self.tree()?.controls())
+        controls::worth_listing(self.harness.controls())
     }
 
     /// The one control called `name`, of the role `role` names if given.
     /// When several roles share the name, an interactive control wins over
     /// text; a tie is an error that lists the roles.
     pub fn find(&mut self, name: &str, role: Option<&str>) -> Result<Control, CmdError> {
-        let controls = self.controls()?;
+        let controls = self.controls();
         let mut matches: Vec<&Control> = controls
             .iter()
             .filter(|control| control.name.as_deref() == Some(name))
@@ -210,8 +200,10 @@ impl Driver {
             [one] => Ok((*one).clone()),
             [] => Err(not_found(name, role, &controls)),
             several => {
-                let roles: Vec<String> =
-                    several.iter().map(|control| control.role_name()).collect();
+                let roles: Vec<String> = several
+                    .iter()
+                    .map(|control| role_name(control.role))
+                    .collect();
                 Err(CmdError::invalid(format!(
                     "{} controls are named {name:?} ({}); give `role` to say which",
                     several.len(),
@@ -282,23 +274,6 @@ impl Driver {
     }
 }
 
-/// Build the harness around a new app on `engine`.
-fn build(
-    options: &AppOptions,
-    look: Look,
-    adapter: &ChoiceSlot,
-    engine: Engine,
-) -> Harness<Observed> {
-    let options = options.clone();
-    HarnessBuilder::new()
-        .size(look.size)
-        .pixels_per_point(look.pixels_per_point)
-        .max_steps(MAX_STEPS)
-        .show_pointer(false)
-        .wgpu_setup(gpu::hardware_first(adapter.clone()))
-        .build(move |cc| Observed::new(PhotoApp::new(cc, engine, options)))
-}
-
 /// What an action's settling said: nothing, or warnings about a UI that
 /// was still changing or has unnamed controls (the action was carried out
 /// either way); a control that could not be found or used is an error.
@@ -329,7 +304,7 @@ fn not_found(name: &str, role: Option<&str>, controls: &[Control]) -> CmdError {
             found
                 .to_lowercase()
                 .contains(&wanted)
-                .then(|| format!("{} {found:?}", control.role_name()))
+                .then(|| format!("{} {found:?}", role_name(control.role)))
         })
         .take(8)
         .collect();

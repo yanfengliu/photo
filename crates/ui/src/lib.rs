@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 pub use app::{
     BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Layout, Lights, MaskKind, Module, OpenError,
-    Opened, PhotoApp, Tool, View, Zoom,
+    Opened, PhotoApp, Tool, View, Zoom, open_in_engine, openable,
 };
 use photo_engine::{Engine, EngineConfig, EngineError};
 

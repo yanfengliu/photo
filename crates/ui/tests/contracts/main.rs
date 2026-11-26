@@ -3,6 +3,7 @@
 //! controls by role and accessible name.
 
 mod attributes;
+mod dialog;
 mod gallery;
 mod harness;
 mod number;
