@@ -187,7 +187,11 @@ pub fn listing(root: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(metadata) = entry.metadata() else {
+            // Asked of the entry itself, not of the listing: on Windows a
+            // listing reports a folder's time as its parent last recorded
+            // it, which can lag behind the folder's own and catch up later
+            // with nothing written (CI run 45884862013).
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
             if metadata.is_dir() {

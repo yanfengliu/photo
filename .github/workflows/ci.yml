@@ -23,7 +23,9 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
+      # Every test binary runs even after one fails, so one run reports
+      # every failure: Windows is only ever tested here.
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
       - name: Build
         run: cargo build --locked
