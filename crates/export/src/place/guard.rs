@@ -2,12 +2,30 @@
 //! files its caller protects, recognised by file identity (device and
 //! inode on Unix, volume serial number and file index on Windows) rather
 //! than by name.
+//!
+//! A guarded path is looked up three times, because a path can stop or
+//! start leading to its file while an export runs:
+//!
+//! - when the export starts ([`Guarded::capture`]), which recognises a file
+//!   that is moved or renamed afterwards;
+//! - just before the overwrite policy moves aside what has the export's
+//!   name ([`Guarded::look`]), which recognises a file whose folder was away
+//!   at the start and has come back, while its path still leads to it;
+//! - after that move ([`Guarded::identify`]), which catches a path that
+//!   began to lead somewhere in between.
+//!
+//! All three compare identities of open files. One case identity cannot
+//! settle: a guarded path that led nowhere until the very file it names had
+//! been moved aside. That one is settled by name: the file came from the
+//! guarded path's own folder (by identity) and file name (ignoring case).
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use same_file::Handle;
 
+use super::moves::folder_of;
 use crate::item::ExportError;
 
 /// Why a file is guarded.
@@ -54,6 +72,10 @@ pub(crate) struct Guarded {
     files: Vec<Kept>,
 }
 
+/// What the guarded paths led to at one moment, held open so that the
+/// identities can still be compared after a file has been moved.
+pub(crate) struct Sighting(Vec<Option<Handle>>);
+
 impl Guarded {
     /// The files `source` and `protected` lead to now. A path that leads to
     /// no file yet (its folder is away, say) is looked at again whenever a
@@ -87,4 +109,63 @@ impl Guarded {
             .find(|kept| kept.is(&file))
             .map(|kept| kept.guard))
     }
+
+    /// What every guarded path leads to right now. Taken just before the
+    /// holder of a name is moved aside, while a guarded path that names it
+    /// can still lead to it.
+    pub(crate) fn look(&self) -> Sighting {
+        let seen = |kept: &Kept| Handle::from_path(&kept.path).ok();
+        Sighting(self.files.iter().map(seen).collect())
+    }
+
+    /// Which guarded file the thing at `aside` is, having just been moved
+    /// there from `name` in one rename, with `seen` looked up before that
+    /// move. A symbolic link counts as the file it leads to.
+    ///
+    /// It is guarded when it is the file a guarded path led to at the
+    /// start, at `seen` or now, or when a guarded path names the very
+    /// place it was moved from (see the module documentation). An error
+    /// means it is nothing an export may replace (a folder) or its identity
+    /// cannot be read.
+    pub(crate) fn identify(
+        &self,
+        aside: &Path,
+        seen: &Sighting,
+        name: &Path,
+    ) -> io::Result<Option<Guard>> {
+        if fs::symlink_metadata(aside)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                "a folder has the name of the export",
+            ));
+        }
+        let file = match Handle::from_path(aside) {
+            Ok(file) => Some(file),
+            // A symbolic link that leads nowhere.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let guarded = self.files.iter().zip(&seen.0).find(|(kept, seen)| {
+            let same = file
+                .as_ref()
+                .is_some_and(|file| seen.as_ref() == Some(file) || kept.is(file));
+            same || names_entry(&kept.path, name)
+        });
+        Ok(guarded.map(|(kept, _)| kept.guard))
+    }
+}
+
+/// True when `path` names the directory entry `name`: the same folder by
+/// identity and the same file name, ignoring case as the common file
+/// systems do. Deliberately generous: a path that might name the entry is
+/// treated as naming it.
+fn names_entry(path: &Path, name: &Path) -> bool {
+    let lower = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+    };
+    let folder = |path: &Path| Handle::from_path(folder_of(path)).ok();
+    lower(path).is_some()
+        && lower(path) == lower(name)
+        && folder(path).is_some_and(|a| folder(name).is_some_and(|b| a == b))
 }

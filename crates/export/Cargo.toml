@@ -18,9 +18,9 @@ log = { workspace = true }
 rayon = { workspace = true }
 same-file = { workspace = true }
 serde = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 kamadak-exif = { workspace = true }
 photo-testkit = { workspace = true }
-tempfile = { workspace = true }
