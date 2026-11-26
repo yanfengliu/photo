@@ -29,7 +29,7 @@ At v0.3.2 both modules run end to end: the engine drives the develop pipeline fo
 | `photo-imaging` | `crates/imaging` | Buffer primitives: planes, mip pyramid, resampling, geometry mapping, filters, mask rasterization, healing, histogram. | core, rayon | Done |
 | `photo-develop` | `crates/develop` | The pipeline: stage order, region and scale handling, stage caches, auto tone and auto white balance; the single source of the rotated, cropped output rectangle. | core, color, imaging, rayon | Done |
 | `photo-decode` | `crates/decode` | Files in; `SourceImage`, `PhotoMetadata` and an embedded preview out. | core, image, rawler, kamadak-exif, rayon | Done |
-| `photo-catalog` | `crates/catalog` | The SQLite catalog: schema 1, format numbers on stored settings and rules, restore records for every removal and deletion. | core, rusqlite, serde, serde_json | Done, reviewed |
+| `photo-catalog` | `crates/catalog` | The SQLite catalog: schema 1, format numbers on stored settings and rules, restore records for every removal and deletion; `same_name_key`, the one comparison of file names (composed, then case-folded) that decides which originals an export protects. | core, rusqlite, serde, serde_json, icu_normalizer | Done, reviewed |
 | `photo-xmp` | `crates/xmp` | XMP sidecar parsing and writing; never overwrites what it cannot read. | core, quick-xml, serde_json | Done, reviewed |
 | `photo-export` | `crates/export` | Rendering through `photo-develop` in strips and encoding to JPEG, PNG and TIFF; sizing, name templates, ICC profiles, metadata, output sharpening, watermark. `place/` gives a finished file its name without ever replacing a file it has not identified: the source and the caller's protected files are recognised by file identity at the moment of replacement. | core, decode, develop, imaging, image, same-file, tempfile, serde, rayon | Done, reviewed |
 | `photo-engine` | `crates/engine` | The application without a UI: open catalog, background jobs, preview service, undo, selection, organisation, import, sidecars; the develop session (canvas frames, history, snapshots, presets, copy and paste, Quick Develop, auto adjustments) and export jobs with their guard for the catalog's originals. | core, catalog, decode, xmp, imaging, develop, export, color (re-exported curve shapes only), image, same-file, serde_json | Working, reviewed |
@@ -93,6 +93,7 @@ At v0.3.2 both modules run end to end: the engine drives the develop pipeline fo
 | XML | quick-xml | 0.41 | XMP sidecars |
 | File dialogs | rfd | 0.18 | |
 | File identity | same-file | 1.0 | Export placement and the engine's export guard: is this the same file, whatever its name |
+| Unicode normalization | icu_normalizer | 2.4 | Composing file names before comparing them, as APFS does; already in the tree through `url` |
 | No-replace moves | tempfile | 3.27 | `persist_noclobber` in export placement; also test directories |
 | Platform paths | directories | 6.0 | Entry point only |
 | Serialization | serde, serde_json | 1.x | Develop settings as JSON |
