@@ -1,12 +1,15 @@
 //! The engine's last moments.
 //!
 //! Dropping the engine stops every render first (exports leave no file
-//! behind), then the workers. An edit still open in Develop is committed,
-//! as closing the photo commits it: nothing in the application has a save
-//! step, so quitting keeps the work. Then what the workers had finished is
-//! brought in as a last poll would, and every file an import has read and
-//! copied gets its record, so that closing during an import leaves no copy
-//! the catalog does not know.
+//! behind). Then an edit still open in Develop is committed, as closing the
+//! photo commits it: nothing in the application has a save step, so
+//! quitting keeps the work. That comes before anything that can wait: a
+//! worker stuck on a drive that has stalled can keep the workers from
+//! stopping for as long as the drive stalls, and the edit is in the catalog
+//! by then. Then the workers are stopped and waited for, what they had
+//! finished is brought in as a last poll would, and every file an import
+//! has read and copied gets its record, so that closing during an import
+//! leaves no copy the catalog does not know.
 //!
 //! Closing does not wait long for the catalog. One that another connection
 //! has locked is waited for no longer than [`CLOSING_PATIENCE`] in all, and
@@ -30,13 +33,14 @@ impl Drop for Engine {
     fn drop(&mut self) {
         self.shutdown.cancel();
         self.exports.cancel_all();
-        self.pool.shut_down();
         if std::thread::panicking() {
+            self.pool.shut_down();
             return;
         }
         let deadline = Instant::now() + self.closing_patience;
         self.imports.closing = Some(deadline);
         self.keep_open_edit(deadline);
+        self.pool.shut_down();
         while let Ok(event) = self.events.try_recv() {
             self.wait_for_catalog_until(deadline);
             self.handle(event);

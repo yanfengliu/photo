@@ -5,6 +5,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use photo_catalog::Catalog;
@@ -12,7 +13,8 @@ use photo_core::develop::Adj;
 use photo_core::meta::PhotoId;
 use tempfile::TempDir;
 
-use super::{Engine, engine_with, jpegs, logged};
+use super::{Engine, PATIENCE, engine_with, jpegs, logged};
+use crate::jobs::Lane;
 
 /// An engine with a photo open in Develop and its exposure moved, not
 /// committed; the catalog's file, and the photo's.
@@ -42,6 +44,48 @@ fn editing() -> Editing {
 fn saved_exposure(catalog_path: PathBuf, photo: PhotoId) -> f32 {
     let catalog = Catalog::open(catalog_path).unwrap();
     catalog.develop_settings(photo).unwrap().tone.exposure
+}
+
+#[test]
+fn closing_saves_the_open_edit_before_it_waits_for_a_worker() {
+    let Editing {
+        mut engine,
+        photo,
+        catalog_path,
+        _dirs,
+        ..
+    } = editing();
+    // A worker that is stuck (in a call to a drive that has stalled, say)
+    // and comes loose only once the edit is in the catalog, as another
+    // connection reads it. So that closing in the other order does not
+    // wait for ever, it gives up after a minute.
+    let reader = Catalog::open(&catalog_path).unwrap();
+    let (started, has_started) = mpsc::channel();
+    let (saw, seen) = mpsc::channel();
+    engine.submit(
+        Lane::Urgent,
+        None,
+        None,
+        move |_| {
+            started.send(()).unwrap();
+            let gives_up = Instant::now() + PATIENCE;
+            let saved = || reader.develop_settings(photo).unwrap().tone.exposure != 0.0;
+            while !saved() && Instant::now() < gives_up {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            saw.send(saved()).unwrap();
+            Box::new(|_: &mut Engine| false)
+        },
+        |_, _| false,
+    );
+    has_started.recv_timeout(PATIENCE).unwrap();
+
+    drop(engine);
+    assert!(
+        seen.recv().unwrap(),
+        "the edit was in the catalog while the worker was still stuck"
+    );
+    assert_eq!(saved_exposure(catalog_path, photo), 0.8);
 }
 
 #[test]
