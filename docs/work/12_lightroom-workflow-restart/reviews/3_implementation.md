@@ -93,8 +93,16 @@ Remarks on tests that carry no finding of their own: F41's ignored timing test d
 
 ## Verification
 
-Pending: the repairs of F29, F30, F33, F35 (test), F39 (test), F43, F45 (first part), F46 and F48 to F51 are with the two builders. To be completed when they land: the four gates on the merged tree, the coordinator's reading of the export placement code, and one more check of these repairs by the Codex lane.
+The repairs landed on `restart` between `58dcdb9` and `66c9fcf` on 2026-11-25, one commit per finding for the engine (`d394e3e` F48, `087883d` F49 and F39's test, `9ba9b5c` F50, `bf3614a` F51 and F45, `d2a4ca0` F43, `161c8af` F33) and for export `8ff0d67` (the contract with the engine), `f4ed351`, `89d25ad`, `eff6403`, `c14fe42`, `ac261f6` and `e12a8dc`.
+
+The coordinator ran the four gates on the whole workspace at `66c9fcf`: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (1,844 passed, none failed, 9 ignored, in 99 test binaries) and `cargo build`, all passing.
+
+The export builder ran the placement tests on real FAT32, exFAT and case-sensitive APFS disk images, which is how it found that its own first repair (`f4ed351`) compared an identity noted before a file had its first bytes with one read afterwards, and so never recognised its own file on FAT; `c14fe42` fixes that by reading both identities at the moment of each comparison.
+
+The coordinator drove the release build end to end through the agent harness on six synthetic photos, a Bayer DNG among them: import, rating, flagging and filtering, every Develop panel, crop, healing and the three mask tools, undo and redo, a snapshot, a preset, copy and paste, and an export of all six. A PNG export of the edited DNG differed from the full-size preview render by at most 1 level of 255 in any channel, and the seven source files had the same SHA-256 before and after.
+
+The Codex lane's check of these repairs is [review 4](4_implementation.md).
 
 ## Round outcome
 
-Open. Nine of review 2's seventeen findings are fixed. Eight were fixed only in part, three of them rated high, and all three are the same class as before: an export replacing a file it must not, now in a much narrower window. The repairs introduced six defects, none rated high. Twelve items go back to the builders; three are noted with reasons; one new defect (F47) is deferred in the plan's scope.
+Closed on 2026-11-25; what the check of its repairs found continues in review 4. As first written: nine of review 2's seventeen findings are fixed. Eight were fixed only in part, three of them rated high, and all three are the same class as before: an export replacing a file it must not, now in a much narrower window. The repairs introduced six defects, none rated high. Twelve items go back to the builders; three are noted with reasons; one new defect (F47) is deferred in the plan's scope.

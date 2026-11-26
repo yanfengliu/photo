@@ -17,7 +17,7 @@ Included: the catalog (import, folders, collections, smart collections, keywords
 
 Excluded, as [design.md](design.md) §1 lists: the Map, Book, Slideshow, Print and Web modules, tethering, cloud sync, AI masks, lens-profile databases, camera-matching profiles, HDR and panorama merge, content-aware remove, soft proofing, stacks, a second window and video.
 
-Deferred, each with the review finding that records it: carrying an unreadable-settings state in the catalog for a photo whose sidecar holds settings in a newer format (F40, to be designed with a second settings format; today the import names each such file and the sidecar keeps its own settings); and building the export guard off the engine's thread, so that starting an export cannot wait on storage that hangs (F47).
+Deferred, each with the review finding that records it: carrying an unreadable-settings state in the catalog for a photo whose sidecar holds settings in a newer format (F40, to be designed with a second settings format; today the import names each such file and the sidecar keeps its own settings); building the export guard off the engine's thread, so that starting an export cannot wait on storage that hangs (F47); keeping a file's hidden, system and read-only attributes when a refused export puts it back on a Windows volume without hard links (F60); and a sweep at start for hidden files an interrupted export left in a folder (F62).
 
 Ownership: the coordinator owns `photo-core`, the root package, the docs, integration and acceptance. Each other crate has one builder at a time, working only inside that crate.
 
