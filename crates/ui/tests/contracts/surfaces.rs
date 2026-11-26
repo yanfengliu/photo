@@ -361,6 +361,40 @@ fn the_confirm_button_sits_to_the_right_of_cancel() -> TestResult {
 }
 
 #[test]
+fn a_dialog_whose_body_gets_shorter_closes_up_at_once() -> TestResult {
+    let build = |extra: bool| {
+        HarnessBuilder::new()
+            .size([640.0, 420.0])
+            .strict_glyphs(true)
+            .build_ui(extra, |ui, extra: &mut bool| {
+                let _ = Dialog::new("Export").show(ui.ctx(), |ui| {
+                    ui.label("Body");
+                    if *extra {
+                        ui.label("One more row");
+                    }
+                });
+            })
+    };
+    // From the body's last line down to the buttons.
+    let gap = |harness: &Harness<Host<bool>>| -> Result<f32, Box<dyn std::error::Error>> {
+        let body = harness.control(Role::Label, "Body")?.rect;
+        let button = harness.control(Role::Button, "OK")?.rect;
+        Ok(button.top() - body.bottom())
+    };
+    let mut short = build(false);
+    short.run()?;
+    let mut shrunk = build(true);
+    shrunk.run()?;
+    assert!(gap(&shrunk)? > gap(&short)?, "the row is between them");
+
+    // The row goes away: one frame later nothing is left of it.
+    shrunk.app_mut().state = false;
+    shrunk.step(1);
+    assert_eq!(gap(&shrunk)?, gap(&short)?);
+    Ok(())
+}
+
+#[test]
 fn a_dialog_blocks_what_is_behind_it() -> TestResult {
     let mut harness = dialog();
     harness.run()?;

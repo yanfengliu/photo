@@ -103,6 +103,108 @@ fn controls_are_found_and_operated_by_role_and_name() -> TestResult {
     Ok(())
 }
 
+/// What the listing test shows: a text, a number and a switch.
+struct Listed {
+    text: String,
+    amount: f32,
+    on: bool,
+}
+
+#[test]
+fn every_control_is_listed_with_its_role_name_value_state_and_place() -> TestResult {
+    use egui::accesskit::Toggled;
+    use photo_core::develop::Adj;
+    use photo_ui::widgets::AdjSlider;
+
+    let state = Listed {
+        text: "dusk".to_owned(),
+        amount: 0.25,
+        on: true,
+    };
+    let mut harness = HarnessBuilder::new().build_ui(state, |ui, state| {
+        let _ = ui.button("Press me");
+        ui.add_enabled(false, egui::Button::new("Not now"));
+        ui.add(egui::TextEdit::singleline(&mut state.text))
+            .accessible_name("Notes");
+        AdjSlider::new(Adj::Exposure.spec(), &mut state.amount, 0.0).show(ui);
+        ui.checkbox(&mut state.on, "Sharpen");
+        ui.label("Plain words");
+    });
+    harness.run()?;
+
+    let controls = harness.controls();
+    let find = |role: Role, name: &str| {
+        controls
+            .iter()
+            .position(|control| control.role == role && control.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("no {role:?} named {name:?} is listed"))
+    };
+    let button = &controls[find(Role::Button, "Press me")];
+    assert!(button.enabled && button.interactive && !button.is_layout());
+    assert_eq!(
+        button.rect,
+        Some(harness.control(Role::Button, "Press me")?.rect),
+        "in points, as the lookups give it"
+    );
+    assert!(!controls[find(Role::Button, "Not now")].enabled);
+    let notes = &controls[find(Role::TextInput, "Notes")];
+    assert_eq!(notes.value.as_deref(), Some("dusk"));
+    let slider = &controls[find(Role::Slider, "Exposure")];
+    assert_eq!(
+        (slider.numeric, slider.min, slider.max),
+        (Some(0.25), Some(-5.0), Some(5.0))
+    );
+    assert_eq!(
+        controls[find(Role::CheckBox, "Sharpen")].toggled,
+        Some(Toggled::True)
+    );
+    let words = &controls[find(Role::Label, "Plain words")];
+    assert!(
+        !words.interactive && words.value.is_none(),
+        "a label's text is its name"
+    );
+    assert!(words.rect.is_some());
+
+    // In the order they are on screen, and the window itself left out.
+    assert!(find(Role::Button, "Press me") < find(Role::Button, "Not now"));
+    assert!(find(Role::Button, "Not now") < find(Role::TextInput, "Notes"));
+    assert!(controls.iter().all(|control| control.role != Role::Window));
+
+    // The listing follows the screen.
+    harness.click(Role::CheckBox, "Sharpen")?;
+    let controls = harness.controls();
+    let switch = controls
+        .iter()
+        .find(|control| control.name.as_deref() == Some("Sharpen"))
+        .ok_or("the switch is listed")?;
+    assert_eq!(switch.toggled, Some(Toggled::False));
+    Ok(())
+}
+
+#[test]
+fn a_drag_holds_its_modifiers_from_the_press_to_the_release() -> TestResult {
+    #[derive(Default)]
+    struct Held {
+        during: Vec<bool>,
+        after: bool,
+    }
+    let mut harness = HarnessBuilder::new().build_ui(Held::default(), |ui, held| {
+        let (down, alt) = ui.input(|input| (input.pointer.primary_down(), input.modifiers.alt));
+        if down {
+            held.during.push(alt);
+        }
+        held.after = alt;
+        ui.label("Drag here");
+    });
+    harness.run()?;
+    let from = egui::pos2(300.0, 300.0);
+    harness.drag_with(from, from + egui::vec2(90.0, 20.0), Modifiers::ALT)?;
+    let held = &harness.app().state;
+    assert!(held.during.len() >= 5 && held.during.iter().all(|alt| *alt));
+    assert!(!held.after, "let go with the button");
+    Ok(())
+}
+
 #[test]
 fn a_missing_control_is_an_error_not_a_panic() -> TestResult {
     let mut harness = HarnessBuilder::new().build_ui(Seen::default(), probe);

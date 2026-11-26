@@ -68,7 +68,14 @@ impl<A: eframe::App + 'static> Harness<A> {
                 let access = node.accesskit_node();
                 let data = access.data();
                 let role = access.role();
-                let name = access.label().filter(|name| !name.is_empty());
+                // A label keeps its text as its value; everything else is
+                // named by its own label or by what labels it.
+                let name = if role == Role::Label {
+                    access.value().or_else(|| access.label())
+                } else {
+                    access.label()
+                }
+                .filter(|name| !name.is_empty());
                 // The tree is in physical pixels.
                 let rect = access.bounding_box().map(|bounds| {
                     let point = |x: f64, y: f64| Pos2::new((x / scale) as f32, (y / scale) as f32);

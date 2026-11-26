@@ -117,7 +117,11 @@ impl<'a> Dialog<'a> {
             ui.add_space(space::XL);
 
             let (mut confirmed, mut cancelled) = (false, false);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // A row exactly as tall as its buttons: laid out in whatever
+            // height is left, they would hang in the space a body that got
+            // shorter left behind.
+            let row = vec2(ui.available_width(), BUTTON.y);
+            ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = space::LG - space::XS;
                 // In a right-to-left row the first button added is rightmost.
                 for is_confirm in [confirm_first, !confirm_first] {

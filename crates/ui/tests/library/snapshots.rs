@@ -36,12 +36,18 @@ pub fn snap(harness: &mut Harness<PhotoApp>, name: &str, scale: u32) -> TestResu
 
 /// Render the frame as it is, while work may still be running.
 pub fn snap_now(harness: &mut Harness<PhotoApp>, name: &str, scale: u32) -> TestResult {
+    save(harness, &format!("library-{name}"), scale)
+}
+
+/// Render the frame as it is to `{stem}.png` (`{stem}@2x.png` at two
+/// pixels per point), or say why not.
+pub fn save(harness: &mut Harness<PhotoApp>, stem: &str, scale: u32) -> TestResult {
     let suffix = if scale == 1 {
         String::new()
     } else {
         format!("@{scale}x")
     };
-    let file = format!("library-{name}{suffix}.png");
+    let file = format!("{stem}{suffix}.png");
     let window = harness.ctx().content_rect().size() * scale as f32;
     match harness.save_png(snapshot_path(&file)) {
         Ok(()) => {
@@ -93,7 +99,7 @@ fn landscape(width: u32, height: u32, palette: [[u8; 3]; 4], sun: (f32, f32)) ->
 
 /// A shoot of photos to look at: generated landscapes in two dated folders
 /// and four photos with full camera metadata.
-fn shoot() -> Result<(TempDir, Vec<PathBuf>), Box<dyn std::error::Error>> {
+pub fn shoot() -> Result<(TempDir, Vec<PathBuf>), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let coast = dir.path().join("2024-05-02 Coast");
     let hills = dir.path().join("2024-06-18 Hills");

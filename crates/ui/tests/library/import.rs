@@ -234,6 +234,51 @@ fn a_running_import_shows_its_progress_and_can_be_cancelled() -> TestResult {
 }
 
 #[test]
+fn a_folder_typed_and_entered_is_looked_in_once() -> TestResult {
+    let library = TempLibrary::new();
+    let studio = Studio::new();
+    let mut harness = studio.app();
+    harness.run()?;
+    harness.click(Role::Button, "Import…")?;
+    harness.click(Role::TextInput, "Source folder")?;
+    harness.type_text(&library.root().display().to_string())?;
+    harness.press_key(Key::Enter, Modifiers::NONE)?;
+    settle(&mut harness)?;
+    assert!(
+        harness.app().dialog_open(),
+        "Enter looks; it does not import"
+    );
+    assert!(shows(&harness, "6 photos found, 6 ticked"));
+    let scans: Vec<&TaskState> = harness
+        .app()
+        .engine()
+        .tasks()
+        .iter()
+        .filter(|task| task.kind == TaskKind::Scan)
+        .map(|task| &task.state)
+        .collect();
+    assert_eq!(
+        scans,
+        [&TaskState::Finished],
+        "one scan, not one cancelled for another"
+    );
+
+    // Leaving the field again without changing it does not look again.
+    harness.click(Role::TextInput, "Source folder")?;
+    harness.click(Role::TextInput, "Import keywords")?;
+    settle(&mut harness)?;
+    let scans = harness
+        .app()
+        .engine()
+        .tasks()
+        .iter()
+        .filter(|task| task.kind == TaskKind::Scan)
+        .count();
+    assert_eq!(scans, 1);
+    Ok(())
+}
+
+#[test]
 fn a_folder_that_is_not_there_is_said_so() -> TestResult {
     let studio = Studio::new();
     let mut harness = studio.app();

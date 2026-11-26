@@ -187,7 +187,19 @@ impl ExportDialog {
     /// The saved presets: load one, save the settings as one, delete one.
     fn preset_rows(&mut self, ui: &mut Ui, cx: &mut Cx<'_>) {
         row(ui, "Preset", |ui| {
-            let shown = self.chosen.as_deref().unwrap_or(NO_PRESET).to_owned();
+            // The preset loaded last, and whether the settings are still
+            // its own.
+            let saved = self
+                .chosen
+                .as_ref()
+                .and_then(|name| self.presets.iter().find(|(other, _)| other == name));
+            let shown = match (&self.chosen, saved) {
+                (Some(name), Some((_, settings))) if *settings != self.settings => {
+                    format!("{name} (changed)")
+                }
+                (Some(name), _) => name.clone(),
+                (None, _) => NO_PRESET.to_owned(),
+            };
             let mut picked = None;
             ComboBox::from_id_salt("export-preset")
                 .selected_text(shown)
@@ -397,20 +409,24 @@ impl ExportDialog {
                 .accessible_name("Extension case");
         });
         let example = self.example(cx).map(Path::to_path_buf);
-        row(ui, "Example", |ui| match &example {
-            Some(path) => {
-                ui.label(RichText::new(text::file_name(path)).color(palette::TEXT_STRONG));
-                if let Some(folder) = path.parent() {
-                    ui.label(
-                        RichText::new(format!("in {}", folder.display()))
-                            .color(palette::TEXT_DIM)
-                            .small(),
-                    );
+        row(ui, "Example", |ui| {
+            // Flowing like text: a long folder goes on to the next line
+            // instead of widening the dialog.
+            ui.horizontal_wrapped(|ui| match &example {
+                Some(path) => {
+                    ui.label(RichText::new(text::file_name(path)).color(palette::TEXT_STRONG));
+                    if let Some(folder) = path.parent() {
+                        ui.label(
+                            RichText::new(format!("in {}", folder.display()))
+                                .color(palette::TEXT_DIM)
+                                .small(),
+                        );
+                    }
                 }
-            }
-            None => {
-                ui.label(RichText::new("No photo to name").color(palette::TEXT_DIM));
-            }
+                None => {
+                    ui.label(RichText::new("No photo to name").color(palette::TEXT_DIM));
+                }
+            });
         });
     }
 }

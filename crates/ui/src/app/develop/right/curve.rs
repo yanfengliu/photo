@@ -224,3 +224,96 @@ fn curve_line(painter: &egui::Painter, plot: Rect, value: impl Fn(f32) -> f32, c
         .collect();
     painter.add(Shape::line(line, Stroke::new(1.5, color)));
 }
+
+#[cfg(test)]
+mod tests {
+    use photo_core::develop::{CurvePoint, ParametricCurve, Tone};
+    use photo_core::meta::FileKind;
+    use photo_engine::ToneCurves;
+
+    use super::*;
+
+    fn points(pairs: &[(f32, f32)]) -> PointCurve {
+        PointCurve::new(pairs.iter().map(|(x, y)| CurvePoint::new(*x, *y)))
+    }
+
+    /// Tone curves with something in every part.
+    fn busy() -> ToneCurve {
+        ToneCurve {
+            parametric: ParametricCurve {
+                shadows: 40.0,
+                darks: -30.0,
+                lights: 25.0,
+                highlights: -60.0,
+                split_shadows: 20.0,
+                split_midtones: 45.0,
+                split_highlights: 80.0,
+            },
+            rgb: points(&[(0.0, 0.0), (0.3, 0.2), (0.7, 0.85), (1.0, 1.0)]),
+            red: points(&[(0.0, 0.1), (0.4, 0.5), (1.0, 0.9)]),
+            green: points(&[(0.0, 0.0), (0.5, 0.35), (1.0, 1.0)]),
+            blue: points(&[(0.05, 0.0), (0.6, 0.7), (0.95, 1.0)]),
+        }
+    }
+
+    #[test]
+    fn what_the_panel_plots_is_the_curve_the_pipeline_renders() {
+        let curves = busy();
+        let rendered = ToneCurves::new(&Tone::default(), &curves, FileKind::Raster);
+        let parametric = plotted(&curves, CurveChannel::Parametric);
+        let channels = [
+            plotted(&curves, CurveChannel::Red),
+            plotted(&curves, CurveChannel::Green),
+            plotted(&curves, CurveChannel::Blue),
+        ];
+        for step in 0..=200 {
+            let v = step as f32 / 200.0;
+            assert_eq!(
+                parametric(v),
+                rendered.parametric().eval(v),
+                "parametric at {v}"
+            );
+            for (index, channel) in channels.iter().enumerate() {
+                assert_eq!(
+                    channel(v),
+                    rendered.channel(index, v),
+                    "channel {index} at {v}"
+                );
+            }
+        }
+
+        // With nothing else set, the RGB point curve is all the pipeline
+        // does to a neutral value.
+        let only_rgb = ToneCurve {
+            rgb: curves.rgb.clone(),
+            ..ToneCurve::default()
+        };
+        let rendered = ToneCurves::new(&Tone::default(), &only_rgb, FileKind::Raster);
+        let rgb = plotted(&only_rgb, CurveChannel::Rgb);
+        for step in 0..=200 {
+            let v = step as f32 / 200.0;
+            assert!((rgb(v) - rendered.eval(v)).abs() < 1.0e-5, "rgb at {v}");
+        }
+        // And an untouched channel is drawn as the straight line it is.
+        let untouched = plotted(&ToneCurve::default(), CurveChannel::Red);
+        assert!((untouched(0.37) - 0.37).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn the_split_marks_are_where_the_pipeline_puts_them() {
+        let default = ParametricShape::new(&ParametricCurve::default());
+        assert_eq!(splits(&default), [0.25, 0.5, 0.75]);
+        // Out of order: the pipeline keeps them in order and apart, and the
+        // marks say so.
+        let crossed = ParametricShape::new(&ParametricCurve {
+            split_shadows: 80.0,
+            split_midtones: 20.0,
+            split_highlights: 50.0,
+            ..ParametricCurve::default()
+        });
+        let marks = splits(&crossed);
+        for (mark, expected) in marks.iter().zip([0.8, 0.85, 0.9]) {
+            assert!((mark - expected).abs() < 1.0e-5, "{marks:?}");
+        }
+    }
+}
