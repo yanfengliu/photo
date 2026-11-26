@@ -115,6 +115,75 @@ fn a_protected_file_moved_onto_the_destination_during_the_export_survives() {
     assert_eq!(names(&fixture.out_dir()), ["b.tif"]);
 }
 
+/// Review finding F52: the original, or a protected file, is there but
+/// cannot be opened, so its identity cannot be read and nothing could tell
+/// it from the file at the destination (it could be moved there while the
+/// export renders). Under the overwrite policy the export is refused before
+/// anything is rendered: before the original is even decoded. Skip and
+/// unique name replace nothing and go on. An original that is simply not
+/// there, rendered from memory, is no reason to refuse.
+#[cfg(unix)]
+#[test]
+fn a_guarded_file_whose_identity_cannot_be_read_refuses_an_overwrite_before_rendering() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::named("a.tif", 64, 48);
+    let protected = fixture.dir.path().join("catalogued.tif");
+    fs::write(&protected, b"a catalogued original").unwrap();
+    fixture.protected = vec![protected.clone()];
+    let mut settings = fixture.settings_out();
+    settings.naming.template = "b".into();
+    settings.format = Format::Tiff {
+        depth: BitDepth::Eight,
+    };
+    fs::create_dir_all(fixture.out_dir()).unwrap();
+    let destination = fixture.out_dir().join("b.tif");
+    fs::write(&destination, b"an older export").unwrap();
+    let cancel = CancelToken::new();
+    for unreadable in [fixture.original.clone(), protected.clone()] {
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&unreadable).is_ok() {
+            // Whoever runs this (root) is stopped by no permission.
+            return;
+        }
+        settings.location.existing = ExistingFile::Overwrite;
+        for from_memory in [true, false] {
+            let mut item = fixture.item();
+            if !from_memory {
+                item.source = None;
+            }
+            let result = export(&item, &settings, &cancel);
+            let context = format!("{}, from memory: {from_memory}", unreadable.display());
+            assert!(
+                matches!(&result, Err(ExportError::CannotIdentify { path, source })
+                    if *path == unreadable && source.kind() == std::io::ErrorKind::PermissionDenied),
+                "{context}: {result:?}"
+            );
+            assert_eq!(fs::read(&destination).unwrap(), b"an older export");
+            assert_eq!(names(&fixture.out_dir()), ["b.tif"], "{context}");
+        }
+        settings.location.existing = ExistingFile::Skip;
+        let skipped = export(&fixture.item(), &settings, &cancel).unwrap();
+        assert_eq!(
+            skipped,
+            ExportOutcome::Skipped {
+                path: destination.clone()
+            }
+        );
+        settings.location.existing = ExistingFile::UniqueName;
+        let (path, _, _) = written(&export(&fixture.item(), &settings, &cancel).unwrap());
+        assert_eq!(path, fixture.out_dir().join("b-2.tif"));
+        fs::remove_file(path).unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    // Not there at all: rendered from memory, and the older export replaced.
+    fs::remove_file(&fixture.original).unwrap();
+    settings.location.existing = ExistingFile::Overwrite;
+    let (path, _, _) = written(&export(&fixture.item(), &settings, &cancel).unwrap());
+    assert_eq!(path, destination);
+    assert_ne!(fs::read(&destination).unwrap(), b"an older export");
+    assert_eq!(names(&fixture.out_dir()), ["b.tif"]);
+}
+
 /// The engine names files an export must never replace (catalogued
 /// originals). Under the overwrite policy each is refused by identity:
 /// under its own name, through a hard link and through a symbolic link.

@@ -17,6 +17,7 @@
 //! bytes): `TMPDIR=/Volumes/<name> cargo test -p photo-export`. There only
 //! the kinds the volume can stage are run ([`kinds`]).
 
+mod identity;
 mod no_replace;
 mod overwrite;
 

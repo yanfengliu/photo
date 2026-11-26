@@ -72,7 +72,11 @@
 //!   moving it when it has the name as the export comes to place its file.
 //!   Only a guarded file that takes the name in the instant after that
 //!   last look is moved aside with it; it is then put back. A file that
-//!   cannot be opened to be identified is refused in the same way. So is
+//!   cannot be opened to be identified is refused in the same way, and so
+//!   is any file when the original or a protected path leads to a file
+//!   that cannot be opened ([`ExportError::CannotIdentify`]): when that is
+//!   so as the export starts, before anything is rendered, even if nothing
+//!   has the name yet, because that file could be moved there. So is
 //!   a file moved aside from the very place a guarded path names (the same
 //!   folder and the same name, ignoring case), which on a file system that
 //!   tells such names apart can be another file: the doubt goes to the
@@ -101,8 +105,9 @@
 //!   protect it: nothing then tells the file from any other. A path that
 //!   reaches the file only through the export's own name (a symbolic link
 //!   to that name, say) must lead there by the export's last look at the
-//!   name, because moving the file aside breaks such a path. A path that
-//!   cannot be opened protects nothing while it cannot.
+//!   name, because moving the file aside breaks such a path. (A path that
+//!   leads to a file that cannot be opened is another matter: see
+//!   [`ExportError::CannotIdentify`].)
 //! - An original or protected file that takes the export's name in the
 //!   instant between the export's last look at the name and its move is
 //!   moved aside with it: until it is put back it is whole, but under a
@@ -197,10 +202,13 @@ pub fn export(
             return Ok(ExportOutcome::Skipped { path: target });
         }
         ExistingFile::Overwrite => {
-            // Refused before anything is rendered.
+            // Refused before anything is rendered: an original or a
+            // protected file that cannot be told from what has the name,
+            // or that has it.
+            guarded.readable().map_err(|doubt| doubt.error(&target))?;
             if let Some(guard) = guarded
                 .guards(&target)
-                .map_err(|error| ExportError::io(&target, error))?
+                .map_err(|doubt| doubt.error(&target))?
             {
                 return Err(guard.refusal(target));
             }

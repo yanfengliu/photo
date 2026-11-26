@@ -104,10 +104,10 @@ fn take_over(
                 "a folder has the name of the export",
             )));
         }
-        if let Some(guard) = guarded.guards(name).map_err(failed)? {
+        if let Some(guard) = guarded.guards(name).map_err(|doubt| doubt.error(name))? {
             return Err(guard.refusal(name.to_path_buf()));
         }
-        let seen = guarded.look();
+        let seen = guarded.look().map_err(|doubt| doubt.error(name))?;
         let Some(hidden) = set_aside(disk, name, "previous").map_err(failed)? else {
             // It left by itself; the name may be free now.
             continue;
@@ -116,7 +116,7 @@ fn take_over(
         match guarded.identify(&hidden, &seen, name) {
             Ok(None) => aside.push(hidden),
             Ok(Some(guard)) => return Err(guard.refusal(put_back(disk, &hidden, name))),
-            Err(error) => return Err(ExportError::io(&put_back(disk, &hidden, name), error)),
+            Err(doubt) => return Err(doubt.error(&put_back(disk, &hidden, name))),
         }
     }
     if move_new(disk, finished, name).map_err(failed)? {

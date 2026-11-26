@@ -32,8 +32,10 @@ pub struct ExportItem<'a> {
     /// identity, not by path, with the file the export would replace. A
     /// path that leads to no file when the export starts is looked at
     /// again when the file is placed. Replacing one of them is refused
-    /// with [`ExportError::WouldOverwriteProtected`]. Only the overwrite
-    /// policy replaces anything, so only it reads this.
+    /// with [`ExportError::WouldOverwriteProtected`], and a path that leads
+    /// to a file that cannot be opened refuses the overwrite with
+    /// [`ExportError::CannotIdentify`] (as the original does). Only the
+    /// overwrite policy replaces anything, so only it reads this.
     pub protected: &'a [PathBuf],
 }
 
@@ -121,6 +123,20 @@ pub enum ExportError {
     /// file is, as for [`Self::WouldOverwriteSource`].
     #[error("{0} is protected; this export never replaces it")]
     WouldOverwriteProtected(PathBuf),
+    /// The original or one of the item's [protected](ExportItem::protected)
+    /// files is there, but cannot be opened to read its identity (for want
+    /// of permission, say), so nothing could tell it from the file the
+    /// overwrite policy would replace. The export is refused: before
+    /// anything is rendered when that is so as it starts, and otherwise as
+    /// it comes to place its file. A path that leads to no file at all is
+    /// no reason to refuse.
+    #[error("cannot read the identity of {path}, a file this export must never replace: {source}")]
+    CannotIdentify {
+        /// The original or the protected file.
+        path: PathBuf,
+        /// Why its identity cannot be read.
+        source: io::Error,
+    },
     /// The settings ask for something this crate cannot write, such as a
     /// size of zero pixels or a JPEG wider than 65535 pixels.
     #[error("cannot export: {0}")]
