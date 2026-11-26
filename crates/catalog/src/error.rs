@@ -223,4 +223,79 @@ impl CatalogError {
     pub(crate) fn not_found(entity: Entity, id: i64) -> Self {
         Self::NotFound { entity, id }
     }
+
+    /// True when the catalog as a whole could not be used, whatever the
+    /// call asked for: another connection has it locked (see
+    /// [`Catalog::set_busy_timeout`]), its file is write-protected, damaged
+    /// or could not be read or written, or there was no room for the
+    /// change. The same call with other values would fail the same way, so
+    /// nothing is gained by trying the items of a refused batch one by one.
+    ///
+    /// [`Catalog::set_busy_timeout`]: crate::Catalog::set_busy_timeout
+    pub fn is_catalog_wide(&self) -> bool {
+        use rusqlite::ErrorCode as Code;
+        match self {
+            Self::ReadOnly | Self::Io(_) => true,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(failure, _)) => matches!(
+                failure.code,
+                Code::DatabaseBusy
+                    | Code::DatabaseLocked
+                    | Code::ReadOnly
+                    | Code::PermissionDenied
+                    | Code::SystemIoFailure
+                    | Code::DatabaseCorrupt
+                    | Code::NotADatabase
+                    | Code::DiskFull
+                    | Code::CannotOpen
+                    | Code::FileLockingProtocolFailed
+                    | Code::NoLargeFileSupport
+                    | Code::OutOfMemory
+            ),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::ffi;
+
+    use super::*;
+
+    fn sqlite(code: std::ffi::c_int) -> CatalogError {
+        CatalogError::Sqlite(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None))
+    }
+
+    #[test]
+    fn failures_of_the_file_or_its_lock_are_catalog_wide_and_refused_values_are_not() {
+        let whole = [
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_LOCKED,
+            ffi::SQLITE_READONLY,
+            ffi::SQLITE_IOERR,
+            ffi::SQLITE_IOERR_FSYNC,
+            ffi::SQLITE_CORRUPT,
+            ffi::SQLITE_FULL,
+            ffi::SQLITE_CANTOPEN,
+        ];
+        for code in whole {
+            assert!(sqlite(code).is_catalog_wide(), "code {code}");
+        }
+        assert!(CatalogError::ReadOnly.is_catalog_wide());
+        assert!(CatalogError::Io(std::io::Error::other("unplugged")).is_catalog_wide());
+
+        let of_one_record = [
+            ffi::SQLITE_CONSTRAINT,
+            ffi::SQLITE_CONSTRAINT_UNIQUE,
+            ffi::SQLITE_TOOBIG,
+            ffi::SQLITE_MISMATCH,
+            ffi::SQLITE_RANGE,
+        ];
+        for code in of_one_record {
+            assert!(!sqlite(code).is_catalog_wide(), "code {code}");
+        }
+        assert!(!CatalogError::DuplicatePath("/r/a.jpg".to_string()).is_catalog_wide());
+        assert!(!CatalogError::EmptyName.is_catalog_wide());
+        assert!(!CatalogError::Sqlite(rusqlite::Error::QueryReturnedNoRows).is_catalog_wide());
+    }
 }

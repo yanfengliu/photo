@@ -1,7 +1,7 @@
 //! Opening a catalog and the plumbing every other module builds on.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use photo_core::meta::CollectionId;
 use rusqlite::config::DbConfig;
@@ -33,6 +33,10 @@ pub struct Catalog {
 impl Catalog {
     /// The schema version this build reads and writes.
     pub const SCHEMA_VERSION: u32 = migrate::latest(MIGRATIONS);
+
+    /// How long a call waits for another connection that has the catalog
+    /// locked, unless [`Catalog::set_busy_timeout`] says otherwise.
+    pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Open the catalog at `path`, creating it if the file is missing or
     /// empty and upgrading it if it was written by an older schema.
@@ -73,6 +77,14 @@ impl Catalog {
         self.read_only
     }
 
+    /// How long a call waits for another connection that has the catalog
+    /// locked before it fails ([`CatalogError::is_catalog_wide`] is then
+    /// true of its error). A catalog waits [`Catalog::BUSY_TIMEOUT`] until
+    /// told otherwise; with zero it does not wait at all.
+    pub fn set_busy_timeout(&self, timeout: Duration) -> Result<()> {
+        Ok(self.conn.busy_timeout(timeout)?)
+    }
+
     /// The schema version stored in the file (`PRAGMA user_version`). After a
     /// successful open this equals [`Catalog::SCHEMA_VERSION`].
     pub fn schema_version(&self) -> Result<u32> {
@@ -107,6 +119,7 @@ impl Catalog {
     }
 
     fn initialise(mut conn: Connection) -> Result<Self> {
+        conn.busy_timeout(Self::BUSY_TIMEOUT)?;
         // Checked again on the connection that will write, before the first
         // statement that could change anything (switching the journal mode
         // rewrites the file header).
@@ -349,5 +362,24 @@ mod tests {
     fn a_time_stamp_at_the_end_of_time_does_not_overflow_the_clock() {
         let mut clock = Clock { last: i64::MAX };
         assert_eq!(clock.tick(), i64::MAX);
+    }
+
+    #[test]
+    fn a_catalog_waits_for_a_lock_as_long_as_it_is_told_to() {
+        let catalog = Catalog::open_in_memory().unwrap();
+        // What SQLite itself says it will wait, in milliseconds.
+        let waits = || -> i64 {
+            catalog
+                .conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(waits(), 5000, "until told otherwise");
+        catalog
+            .set_busy_timeout(Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(waits(), 250);
+        catalog.set_busy_timeout(Duration::ZERO).unwrap();
+        assert_eq!(waits(), 0, "not at all");
     }
 }

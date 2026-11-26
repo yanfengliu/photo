@@ -31,7 +31,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 photo-testkit = { workspace = true }
-# Only so a test can plant develop settings written by a newer build, which
-# no catalog API writes. Already in the workspace through photo-catalog.
+# Only so a test can do to a catalog what no catalog API does: plant develop
+# settings written by a newer build, and hold the file locked from a second
+# connection. Already in the workspace through photo-catalog.
 rusqlite = { workspace = true }
 tempfile = { workspace = true }

@@ -8,6 +8,7 @@ use photo_catalog::{CatalogError, NewPhoto, Source};
 use photo_core::time::DateTime;
 
 use super::files::{self, Copied, CopyError, ReadFile};
+use super::record::record;
 use super::{BATCH, CopyLayout, FileIssue, ImportMode, ImportSummary, SUMMARIES_KEPT};
 use crate::browse::{Change, Refresh};
 use crate::engine::{Engine, JobFailure};
@@ -301,6 +302,15 @@ impl Engine {
         }
     }
 
+    /// Hand a batch to the catalog and note what became of it (see
+    /// [`record`]). A photo that did not go in is reported, and its copy
+    /// deleted again: one the catalog refused, and every photo of a batch
+    /// the catalog could not take at all.
+    ///
+    /// As the engine closes there is no one to report to and no time to
+    /// wait or to tidy up. The catalog is waited for only as long as
+    /// closing still has, and what it could not take stays where it is and
+    /// is named in the log.
     fn insert_batch(&mut self, task: TaskId, batch: Vec<NewPhoto>) {
         let Some(import) = self.import_summary(task).map(|summary| summary.import) else {
             return;
@@ -308,28 +318,48 @@ impl Engine {
         if batch.is_empty() {
             return;
         }
-        let mut imported = Vec::with_capacity(batch.len());
+        let closing = self.imports.closing;
+        if let Some(deadline) = closing {
+            self.wait_for_catalog_until(deadline);
+        }
+        let recorded = record(
+            &mut self.catalog,
+            &batch,
+            |catalog, photos| catalog.insert_photos(import, photos),
+            |catalog, photo| catalog.insert_photo(import, photo),
+        );
         let mut issues = Vec::new();
-        match self.catalog.insert_photos(import, &batch) {
-            Ok(ids) => imported = ids,
-            // One bad file must not sink the others: retry them one by one.
-            Err(_) => {
-                for photo in &batch {
-                    match self.catalog.insert_photo(import, photo) {
-                        Ok(id) => imported.push(id),
-                        Err(error) => {
-                            self.forget_copy(task, photo);
-                            issues.push(FileIssue {
-                                path: photo.path.clone(),
-                                message: error.to_string(),
-                            });
-                        }
-                    }
+        let mut issue = |photo: &NewPhoto, error: &CatalogError| {
+            issues.push(FileIssue {
+                path: photo.path.clone(),
+                message: error.to_string(),
+            });
+        };
+        for (photo, error) in &recorded.refused {
+            self.forget_copy(task, photo);
+            if closing.is_some() {
+                log::error!(
+                    "{} was not imported as the application closed: {error}",
+                    photo.path.display()
+                );
+            }
+            issue(photo, error);
+        }
+        if let Some((photos, error)) = &recorded.stranded {
+            for photo in *photos {
+                if closing.is_some() {
+                    log::error!(
+                        "{} could not be recorded in the catalog as the application closed ({error}); the file is left where it is, and importing its folder adds it",
+                        photo.path.display()
+                    );
+                } else {
+                    self.forget_copy(task, photo);
                 }
+                issue(photo, error);
             }
         }
         if let Some(summary) = self.summary_mut(task) {
-            summary.imported.extend(imported);
+            summary.imported.extend(recorded.ids);
             summary.errors.extend(issues);
         }
         self.refresh_after(&[Change::Photos]);

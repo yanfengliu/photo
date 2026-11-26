@@ -1,17 +1,20 @@
 //! Tests that need to see inside the engine: what was decoded, when a
 //! preview is looked at again, and what happens while its workers are held.
 
+mod imports;
 mod saves;
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Once;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
 use photo_core::meta::PhotoId;
 use tempfile::TempDir;
 
-use super::{Engine, EngineConfig};
+use super::{Engine, EngineConfig, EngineEvent};
 use crate::develop::worker::{Delivery, Frame, Outcome, Purpose, Work};
 use crate::develop::{CanvasView, DevelopLoad};
 use crate::import::{ImportMode, ImportRequest};
@@ -69,6 +72,53 @@ fn hold_worker(engine: &mut Engine) -> Sender<()> {
     );
     has_started.recv_timeout(PATIENCE).unwrap();
     release
+}
+
+/// Leave the release of a held worker to the queue: the worker stays busy
+/// until the pool, shutting down, has dropped everything still queued. So
+/// what is queued behind it never runs, and the pool posts nothing for it.
+fn release_at_shutdown(engine: &mut Engine, release: Sender<()>) {
+    engine.submit(
+        Lane::Background,
+        None,
+        None,
+        move |_| {
+            drop(release);
+            Box::new(|_: &mut Engine| false)
+        },
+        |_, _| false,
+    );
+}
+
+/// Take the next thing a worker has posted, without applying it. With one
+/// worker, results come in the order the jobs were queued.
+fn next_event(engine: &Engine) -> EngineEvent {
+    engine.events.recv_timeout(PATIENCE).unwrap()
+}
+
+/// What the calling thread logs while `work` runs.
+fn logged(work: impl FnOnce()) -> Vec<String> {
+    struct Capture;
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            LINES.with_borrow_mut(|lines| lines.push(record.args().to_string()));
+        }
+        fn flush(&self) {}
+    }
+    thread_local! {
+        static LINES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        log::set_logger(&Capture).unwrap();
+        log::set_max_level(log::LevelFilter::Trace);
+    });
+    LINES.with_borrow_mut(Vec::clear);
+    work();
+    LINES.take()
 }
 
 fn jpegs(count: usize, width: u32, height: u32) -> (TempDir, Vec<PathBuf>) {

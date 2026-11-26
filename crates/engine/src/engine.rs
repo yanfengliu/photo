@@ -5,6 +5,8 @@
 //! an [`Apply`]: a closure that the engine's thread runs during
 //! [`Engine::poll`] to fold the result into state and into catalog writes.
 
+mod closing;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -134,6 +136,8 @@ pub struct Engine {
     pub(crate) next_auto: u64,
     /// Displayed sizes of photos, each with the develop version it is for.
     pub(crate) shapes: Lru<PhotoId, (u64, (u32, u32))>,
+    /// How long, in all, closing waits for a catalog it cannot write.
+    pub(crate) closing_patience: Duration,
     wake: Arc<Mutex<Option<Wake>>>,
     jobs: HashMap<JobId, OnFailure>,
     pool: Pool<Apply, Apply>,
@@ -187,6 +191,7 @@ impl Engine {
             autos: HashMap::new(),
             next_auto: 0,
             shapes: Lru::new(SHAPES_MEMORY),
+            closing_patience: closing::CLOSING_PATIENCE,
             wake,
             jobs: HashMap::new(),
             pool,
@@ -436,26 +441,6 @@ impl Engine {
         if develop_changed || photos_changed {
             self.reload_develop();
         }
-    }
-}
-
-impl Drop for Engine {
-    /// Stop every render first (exports leave no file behind), then the
-    /// workers. What they had finished is brought in as a last poll would,
-    /// and every file an import has read and copied gets its record, so
-    /// that closing during an import leaves no copy the catalog does not
-    /// know.
-    fn drop(&mut self) {
-        self.shutdown.cancel();
-        self.exports.cancel_all();
-        self.pool.shut_down();
-        if std::thread::panicking() {
-            return;
-        }
-        while let Ok(event) = self.events.try_recv() {
-            self.handle(event);
-        }
-        self.record_ready_imports();
     }
 }
 

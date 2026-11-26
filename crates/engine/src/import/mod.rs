@@ -7,11 +7,13 @@
 //! still recorded, so every copy has its catalog record.
 
 mod files;
+mod record;
 mod run;
 mod scan;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use photo_core::meta::{ImportId, PhotoId};
 
@@ -111,6 +113,10 @@ pub(crate) struct Imports {
     summaries: HashMap<TaskId, ImportSummary>,
     finished: Vec<TaskId>,
     pub(crate) scan: Option<ImportScan>,
+    /// Set while the engine closes: when it stops waiting for a catalog
+    /// that another connection has locked. While closing, a photo that
+    /// cannot be recorded is named in the log.
+    pub(crate) closing: Option<Instant>,
 }
 
 impl Engine {

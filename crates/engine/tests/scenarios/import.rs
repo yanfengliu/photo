@@ -419,8 +419,12 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Closing wherever the workers happen to be. Whether a finished copy is
+/// waiting for its record at that moment is left to chance here; the test
+/// that puts one in place is
+/// `engine::tests::imports::closing_the_app_during_a_copy_import_leaves_no_file_without_a_record`.
 #[test]
-fn closing_the_app_during_a_copy_import_leaves_no_file_without_a_record() {
+fn closing_the_app_part_way_through_a_copy_import_leaves_no_file_without_a_record() {
     let (_files_dir, files) = many_jpegs(300, 24, 16);
     let destination = tempfile::tempdir().unwrap();
     let mut studio = Studio::with_workers(1);
