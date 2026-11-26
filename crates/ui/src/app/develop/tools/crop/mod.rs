@@ -4,15 +4,15 @@
 //! rectangle over it (see `canvas`); everything it changes is one step,
 //! recorded when the tool is put away.
 
-pub(crate) mod aspect;
+mod aspect;
 pub(crate) mod canvas;
 pub(crate) mod rect;
 
 use egui::{Button, ComboBox, DragValue, Pos2, RichText, Ui, Vec2, vec2};
-use photo_core::develop::{Adj, Crop, CropConstraint, CropRect, DevelopSettings};
+use photo_core::develop::{Adj, Crop, CropConstraint, CropRect, DevelopSettings, Turn};
 use photo_engine::Geometry;
 
-use self::aspect::{ASPECTS, Aspect, Turn};
+use self::aspect::{ASPECTS, Aspect};
 use self::rect::{Handle, Upright};
 use super::{edit, editing};
 use crate::app::Cx;
@@ -264,11 +264,11 @@ pub(crate) fn turn(cx: &mut Cx<'_>, way: Turn) -> bool {
         return false;
     };
     let mut settings = editing.settings.clone();
-    aspect::turn(&mut settings, way);
+    settings.turn(way);
     let tool = &mut cx.ui.develop.tools.crop;
     tool.drag = None;
     tool.turning = None;
-    if matches!(way, Turn::Left | Turn::Right) {
+    if way.is_quarter() {
         tool.custom = (tool.custom.1, tool.custom.0);
     }
     if cx.ui.develop.tools.open == Some(super::Tool::Crop) {

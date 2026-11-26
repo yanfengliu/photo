@@ -1,74 +1,9 @@
-//! What the crop tool does to the rectangle's shape and the photo's
-//! orientation: the aspect menu and the ratio it locks, and quarter turns
-//! and mirrors that carry the crop with the photo.
+//! What the crop tool does to the rectangle's shape: the aspect menu and
+//! the ratio it locks. (Quarter turns and mirrors, which carry the crop
+//! with the photo, are `photo_core::develop::DevelopSettings::turn`.)
 
 use egui::Vec2;
-use photo_core::develop::{CropConstraint, CropRect, DevelopSettings};
-
-/// A quarter turn or a mirror of the photo as it is seen.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Turn {
-    Left,
-    Right,
-    FlipHorizontal,
-    FlipVertical,
-}
-
-/// Turn or mirror the photo, the crop with it: the rectangle stays on the
-/// content it was on, where the engine's own rotation leaves it at the same
-/// place of a frame that has turned under it.
-pub(crate) fn turn(settings: &mut DevelopSettings, turn: Turn) {
-    let orientation = settings.orientation;
-    settings.orientation = match turn {
-        Turn::Left => orientation.rotated_ccw(),
-        Turn::Right => orientation.rotated_cw(),
-        Turn::FlipHorizontal => orientation.flipped_horizontal(),
-        Turn::FlipVertical => orientation.flipped_vertical(),
-    };
-    let crop = &mut settings.crop;
-    let quarter = matches!(turn, Turn::Left | Turn::Right);
-    if let Some(rect) = &mut crop.rect {
-        let CropRect {
-            cx,
-            cy,
-            width,
-            height,
-        } = *rect;
-        *rect = match turn {
-            Turn::Right => CropRect {
-                cx: 1.0 - cy,
-                cy: cx,
-                width: height,
-                height: width,
-            },
-            Turn::Left => CropRect {
-                cx: cy,
-                cy: 1.0 - cx,
-                width: height,
-                height: width,
-            },
-            Turn::FlipHorizontal => CropRect {
-                cx: 1.0 - cx,
-                ..*rect
-            },
-            Turn::FlipVertical => CropRect {
-                cy: 1.0 - cy,
-                ..*rect
-            },
-        };
-    }
-    if quarter {
-        if let CropConstraint::Ratio { width, height } = crop.constraint {
-            crop.constraint = CropConstraint::Ratio {
-                width: height,
-                height: width,
-            };
-        }
-    } else {
-        // A mirror turns the other way.
-        crop.angle = -crop.angle;
-    }
-}
+use photo_core::develop::CropConstraint;
 
 /// An entry of the aspect menu.
 #[derive(Clone, Copy, Debug, PartialEq)]

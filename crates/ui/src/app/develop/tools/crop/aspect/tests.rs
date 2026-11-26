@@ -1,80 +1,11 @@
-//! Turns, mirrors and the aspect menu, on a 1200 x 800 frame.
+//! The aspect menu, on a 1200 x 800 frame.
 
 use egui::{Vec2, vec2};
-use photo_core::develop::{Crop, CropConstraint, CropRect, DevelopSettings, Orientation};
-use photo_core::geom::Point;
-use photo_engine::Geometry;
+use photo_core::develop::CropConstraint;
 
 use super::*;
 
-const SOURCE: (u32, u32) = (1200, 800);
 const FRAME: Vec2 = vec2(1200.0, 800.0);
-
-/// The source positions of the output's four corners.
-fn shown(settings: &DevelopSettings) -> Vec<Point> {
-    let geometry = Geometry::from_settings(SOURCE.0, SOURCE.1, settings);
-    let (width, height) = geometry.output_size();
-    let (width, height) = (width as f32, height as f32);
-    [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)]
-        .iter()
-        .map(|(x, y)| geometry.out_to_src(Point::new(*x, *y)))
-        .collect()
-}
-
-#[test]
-fn a_turned_or_mirrored_crop_stays_on_its_content() {
-    let settings = DevelopSettings {
-        orientation: Orientation::new(0, true),
-        crop: Crop {
-            rect: Some(CropRect {
-                cx: 0.3,
-                cy: 0.6,
-                width: 0.4,
-                height: 0.25,
-            }),
-            angle: 8.0,
-            constraint: CropConstraint::Ratio {
-                width: 16.0,
-                height: 9.0,
-            },
-        },
-        ..DevelopSettings::default()
-    };
-    let before = shown(&settings);
-    for way in [
-        Turn::Right,
-        Turn::Left,
-        Turn::FlipHorizontal,
-        Turn::FlipVertical,
-    ] {
-        let mut turned = settings.clone();
-        turn(&mut turned, way);
-        let after = shown(&turned);
-        for corner in &before {
-            let nearest = after
-                .iter()
-                .map(|other| other.distance(*corner))
-                .fold(f32::MAX, f32::min);
-            assert!(
-                nearest < 1.5,
-                "{way:?}: {corner:?} is {nearest} px from any corner"
-            );
-        }
-    }
-    let mut quarter = settings.clone();
-    turn(&mut quarter, Turn::Right);
-    assert_eq!(
-        quarter.crop.constraint,
-        CropConstraint::Ratio {
-            width: 9.0,
-            height: 16.0
-        }
-    );
-    assert_eq!(quarter.crop.angle, 8.0);
-    let mut mirrored = settings.clone();
-    turn(&mut mirrored, Turn::FlipHorizontal);
-    assert_eq!(mirrored.crop.angle, -8.0);
-}
 
 #[test]
 fn the_menu_reads_a_stored_ratio_either_way_round() {

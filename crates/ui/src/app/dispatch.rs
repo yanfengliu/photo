@@ -3,13 +3,13 @@
 //! to the selection in the grid and to the photo looked at elsewhere, and
 //! Develop has keys of its own.
 
+use photo_core::develop::Turn;
 use photo_core::meta::Rating;
 use photo_engine::{CollectionKind, Movement, Source, Target};
 
 use super::Cx;
 use super::actions::Action;
 use super::develop::actions::DevelopAction;
-use super::develop::tools::crop::aspect::Turn;
 use super::develop::tools::{self, crop};
 use super::develop::{self, BeforeAfter, Tool, canvas};
 use super::dialogs;

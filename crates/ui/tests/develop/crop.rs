@@ -24,6 +24,16 @@ fn shown_centre(harness: &Harness<PhotoApp>) -> Point {
     geometry.out_to_src(Point::new(width as f32 / 2.0, height as f32 / 2.0))
 }
 
+/// The source positions shown at the output's four corners: the part of
+/// the photo that is in the rectangle.
+fn shown_corners(harness: &Harness<PhotoApp>) -> [Point; 4] {
+    let geometry = session(harness).geometry().expect("the photo is decoded");
+    let (width, height) = geometry.output_size();
+    let (width, height) = (width as f32, height as f32);
+    [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)]
+        .map(|(x, y)| geometry.out_to_src(Point::new(x, y)))
+}
+
 /// What a test of the crop tool starts with: the folder of the scene's
 /// files, the catalog, and the app with the PNG open and the tool up.
 type Cropping = (tempfile::TempDir, Studio, Harness<PhotoApp>);
@@ -138,13 +148,16 @@ fn the_panels_turn_and_flip_buttons_carry_the_crop_with_the_photo() -> TestResul
 
     let (_dir, _studio, mut harness) = cropping()?;
     let steps = history(&harness).len();
-    // A crop off the centre: the bottom right corner pulled in.
+    // A crop off the centre and tilted: the bottom right corner pulled in,
+    // then four degrees of straightening.
     let rect = harness.app().crop_rect().ok_or("the rectangle is drawn")?;
     let corner = rect.right_bottom();
     harness.drag(corner, corner - vec2(240.0, 120.0))?;
+    harness.set_value(Role::Slider, "Crop Angle", 4.0)?;
     settle(&mut harness)?;
     let size = output(&harness);
     let centre = shown_centre(&harness);
+    let content = shown_corners(&harness);
     assert!(size.0 < 1000 && size.1 < 700, "{size:?}");
     assert!(
         centre.distance(Point::new(600.0, 400.0)) > 60.0,
@@ -153,13 +166,14 @@ fn the_panels_turn_and_flip_buttons_carry_the_crop_with_the_photo() -> TestResul
     let upright = settings(&harness).orientation;
 
     // Each button is an icon with a name, and each leaves the same part of
-    // the photo in the rectangle.
+    // the photo in the rectangle: its four corners are on the same places
+    // of the photo. Seen in a mirror, the tilt leans the other way.
     let sideways = (size.1, size.0);
-    for (button, expected) in [
-        ("Rotate right", sideways),
-        ("Rotate left", size),
-        ("Flip horizontal", size),
-        ("Flip vertical", size),
+    for (button, expected, angle) in [
+        ("Rotate right", sideways, 4.0),
+        ("Rotate left", size, 4.0),
+        ("Flip horizontal", size, -4.0),
+        ("Flip vertical", size, 4.0),
     ] {
         harness.click(Role::Button, button)?;
         settle(&mut harness)?;
@@ -169,6 +183,18 @@ fn the_panels_turn_and_flip_buttons_carry_the_crop_with_the_photo() -> TestResul
             now.distance(centre) < 1.5,
             "{button}: {centre:?} -> {now:?}"
         );
+        let corners = shown_corners(&harness);
+        for corner in &content {
+            let nearest = corners
+                .iter()
+                .map(|other| other.distance(*corner))
+                .fold(f32::MAX, f32::min);
+            assert!(
+                nearest < 2.0,
+                "{button}: {corner:?} is {nearest} px from any corner now"
+            );
+        }
+        assert_eq!(settings(&harness).crop.angle, angle, "after {button}");
         assert_eq!(harness.app().tool(), Some(Tool::Crop), "the tool stays up");
     }
     // Mirrored both ways is the photo turned half round.
