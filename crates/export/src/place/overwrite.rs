@@ -7,15 +7,21 @@
 //!
 //! 1. The export tries to take the name without replacing ([`move_new`]).
 //!    When nothing has the name, that is all.
-//! 2. Otherwise what has the name is moved aside under a hidden name in the
-//!    same folder. That is one rename, so what is aside is exactly what had
-//!    the name.
-//! 3. What is aside is identified. If it is the original or a protected
-//!    file it is put back and the export is refused. Otherwise it stays
-//!    aside and the export tries step 1 again; something new that has
-//!    appeared at the name meanwhile is unverified, so it is moved aside
-//!    and identified too, [`ROUNDS`] times at most.
-//! 4. Only once the export has the name is what was moved aside removed.
+//! 2. Otherwise the export looks at what has the name. A folder, the
+//!    original, a protected file or a file that cannot be identified is
+//!    refused where it is, without being moved. This look decides nothing
+//!    about what is replaced: it only spares what is plainly not
+//!    replaceable the move of the next step.
+//! 3. What has the name is moved aside under a hidden name in the same
+//!    folder. That is one rename, so what is aside is exactly what had the
+//!    name, whether or not it is what step 2 looked at.
+//! 4. What is aside is identified. If it is the original or a protected
+//!    file (it took the name after the look of step 2) it is put back and
+//!    the export is refused. Otherwise it stays aside and the export tries
+//!    step 1 again; something new that has appeared at the name meanwhile
+//!    is unverified, so it is looked at, moved aside and identified too,
+//!    [`ROUNDS`] times at most.
+//! 5. Only once the export has the name is what was moved aside removed.
 //!    If the export fails instead, everything moved aside is put back.
 //!
 //! A file is put back without replacing: under its own name when that is
@@ -72,7 +78,7 @@ pub(crate) fn replace(
     result
 }
 
-/// Steps 1 to 3 of the module documentation. Files moved aside and found
+/// Steps 1 to 4 of the module documentation. Files moved aside and found
 /// replaceable are pushed onto `aside`; the caller removes them or puts
 /// them back.
 fn take_over(
@@ -87,14 +93,20 @@ fn take_over(
         if move_new(disk, finished, name).map_err(failed)? {
             return Ok(());
         }
-        // A folder is nothing an export replaces; better not to move it.
+        disk.reached(Step::Look);
+        // What can be seen not to be replaceable is refused where it is: a
+        // folder, the original, a protected file, a file that cannot be
+        // identified. Moving it aside would only put it at risk. The move
+        // below is for what takes the name after this look.
         if fs::symlink_metadata(name).is_ok_and(|meta| meta.is_dir()) {
             return Err(failed(io::Error::new(
                 io::ErrorKind::IsADirectory,
                 "a folder has the name of the export",
             )));
         }
-        disk.reached(Step::Look);
+        if let Some(guard) = guarded.guards(name).map_err(failed)? {
+            return Err(guard.refusal(name.to_path_buf()));
+        }
         let seen = guarded.look();
         let hidden = hidden_name(folder_of(name), "previous");
         disk.reached(Step::SetAside);

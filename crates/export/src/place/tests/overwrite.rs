@@ -6,6 +6,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 
+use same_file::Handle;
+
 use super::{Folder, KINDS, Kind, at_every_step, same_file};
 use crate::item::ExportError;
 use crate::place::Placed;
@@ -209,59 +211,59 @@ fn what_was_moved_aside_is_removed_only_once_the_export_has_the_name() {
     }
 }
 
-/// The name leads to a protected file through a hard link or a symbolic
-/// link: it is put back as it was and the export is refused.
+/// The export's name leads to a protected file when the export comes to
+/// place its file: the file itself got there while the export rendered, or
+/// the name is a hard link or a symbolic link to it. The export is refused
+/// and what has the name is not even moved aside: on a file system where it
+/// could only be put back as a copy, it is still the very same file.
 #[test]
-fn a_protected_file_reached_through_a_link_is_put_back_and_refused() {
+fn a_guarded_file_that_has_the_name_is_refused_where_it_is() {
     for kind in KINDS {
-        for symbolic in [false, true] {
-            // Making a symbolic link needs a privilege on Windows.
-            if symbolic && cfg!(not(unix)) {
-                continue;
-            }
+        for arrival in Arrival::all() {
             let (folder, guarded) = scene();
             let name = folder.at("x.jpg");
-            fs::remove_file(&name).unwrap();
-            if symbolic {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(folder.at("p.tif"), &name).unwrap();
-            } else {
-                fs::hard_link(folder.at("p.tif"), &name).unwrap();
-            }
-            let (result, _) = folder.place(kind, Overwrite, &guarded, &mut |_, _| {});
-            let context = format!("{kind:?}, symbolic link: {symbolic}");
+            let before = Handle::from_path(folder.at("p.tif")).unwrap();
+            arrival.arrive(&folder, "p.tif");
+            let (result, steps) = folder.place(kind, Overwrite, &guarded, &mut |_, _| {});
+            let context = format!("{kind:?}, {arrival:?}");
             assert!(
                 matches!(&result, Err(ExportError::WouldOverwriteProtected(path)) if *path == name),
                 "{context}: {result:?}"
             );
-            // Where a file can only be put back by copying it, a hard link
-            // comes back as a file of its own with the same bytes; a
-            // symbolic link is made anew and leads where it led.
-            if symbolic || kind != Kind::Neither {
-                assert!(same_file(&name, &folder.at("p.tif")), "{context}");
-            }
-            assert_eq!(folder.read("x.jpg").unwrap(), b"protected", "{context}");
+            assert!(!steps.contains(&Step::SetAside), "{context}: {steps:?}");
+            assert!(
+                Handle::from_path(&name).unwrap() == before,
+                "{context}: another file has the name"
+            );
             let link = fs::symlink_metadata(&name).unwrap().is_symlink();
-            assert_eq!(link, symbolic, "{context}");
-            assert_eq!(folder.read("p.tif").unwrap(), b"protected", "{context}");
-            assert_eq!(folder.names(), ["a.tif", "p.tif", "x.jpg"], "{context}");
+            assert_eq!(link, arrival == Arrival::SymbolicLink, "{context}");
+            assert_eq!(folder.read("x.jpg").unwrap(), b"protected", "{context}");
+            let names: &[&str] = match arrival {
+                Arrival::Moved => &["a.tif", "x.jpg"],
+                Arrival::HardLink | Arrival::SymbolicLink => &["a.tif", "p.tif", "x.jpg"],
+            };
+            assert_eq!(folder.names(), names, "{context}");
         }
     }
 }
 
-/// The original is moved aside to be identified, and before it can go back
-/// another program takes its name: it gets a visible name beside it, which
-/// the refusal gives, and the other program's file is left alone.
+/// The original takes the name after the export's look, so it is moved
+/// aside to be identified, and before it can go back another program takes
+/// its name: it gets a visible name beside it, which the refusal gives, and
+/// the other program's file is left alone.
 #[test]
 fn a_guarded_file_whose_name_is_taken_again_gets_a_visible_name_beside_it() {
     for kind in KINDS {
         let (folder, guarded) = scene();
         let name = folder.at("x.jpg");
-        fs::rename(folder.at("a.tif"), &name).unwrap();
-        let mut intruder = |_: usize, step: Step| {
-            if step == Step::PutBack && !name.exists() {
+        let mut intruder = |_: usize, step: Step| match step {
+            Step::SetAside if folder.at("a.tif").exists() => {
+                fs::rename(folder.at("a.tif"), &name).unwrap();
+            }
+            Step::PutBack if !name.exists() => {
                 folder.put("x.jpg", b"theirs");
             }
+            _ => {}
         };
         let (result, _) = folder.place(kind, Overwrite, &guarded, &mut intruder);
         let kept = folder.at("x-kept.jpg");
@@ -295,6 +297,68 @@ fn a_folder_with_the_name_is_never_moved_or_replaced() {
         assert_eq!(fs::read(name.join("inside")).unwrap(), b"kept", "{kind:?}");
         assert!(!steps.contains(&Step::SetAside), "{kind:?}: {steps:?}");
         assert!(folder.hidden().is_empty(), "{kind:?}: {:?}", folder.names());
+    }
+}
+
+/// A file that cannot be opened cannot be identified, so nothing replaces
+/// it: the export fails and the file is not moved.
+#[cfg(unix)]
+#[test]
+fn a_file_that_cannot_be_identified_is_refused_where_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    for kind in KINDS {
+        let (folder, guarded) = scene();
+        let name = folder.at("x.jpg");
+        fs::set_permissions(&name, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&name).is_ok() {
+            // Whoever runs this (root) is stopped by no permission.
+            return;
+        }
+        let (result, steps) = folder.place(kind, Overwrite, &guarded, &mut |_, _| {});
+        assert!(
+            matches!(&result, Err(ExportError::Io { path, source })
+                if *path == name && source.kind() == io::ErrorKind::PermissionDenied),
+            "{kind:?}: {result:?}"
+        );
+        assert!(!steps.contains(&Step::SetAside), "{kind:?}: {steps:?}");
+        fs::set_permissions(&name, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(folder.read("x.jpg").unwrap(), b"previous", "{kind:?}");
+        assert_eq!(folder.names(), ["a.tif", "p.tif", "x.jpg"], "{kind:?}");
+    }
+}
+
+/// A folder takes the name in the instant between the export's look and its
+/// move, so it is the folder that is moved aside. It is kept whole: put back
+/// under the name where a folder can be moved without replacing (an
+/// exclusive rename), and elsewhere left under the hidden name that the
+/// error gives.
+#[test]
+fn a_folder_that_takes_the_name_at_the_last_instant_is_kept_whole() {
+    for kind in KINDS {
+        let (folder, guarded) = scene();
+        let name = folder.at("x.jpg");
+        let mut intruder = |_: usize, step: Step| {
+            if step == Step::SetAside && name.is_file() {
+                fs::remove_file(&name).unwrap();
+                fs::create_dir(&name).unwrap();
+                fs::write(name.join("inside"), b"kept").unwrap();
+            }
+        };
+        let (result, _) = folder.place(kind, Overwrite, &guarded, &mut intruder);
+        let Err(ExportError::Io { path, source }) = &result else {
+            panic!("{kind:?}: {result:?}");
+        };
+        assert_eq!(source.kind(), io::ErrorKind::IsADirectory, "{kind:?}");
+        assert_eq!(fs::read(path.join("inside")).unwrap(), b"kept", "{kind:?}");
+        let exclusive = matches!(kind, Kind::Both | Kind::ExclusiveOnly);
+        assert_eq!(*path == name, exclusive, "{kind:?}: {}", path.display());
+        let hidden = folder.hidden();
+        assert_eq!(hidden.is_empty(), exclusive, "{kind:?}: {hidden:?}");
+        // The export itself is gone, the original and the protected file are
+        // where they were.
+        assert_eq!(folder.read("a.tif").unwrap(), b"the original", "{kind:?}");
+        assert_eq!(folder.read("p.tif").unwrap(), b"protected", "{kind:?}");
+        assert!(holding(&folder, b"export").is_empty(), "{kind:?}");
     }
 }
 
