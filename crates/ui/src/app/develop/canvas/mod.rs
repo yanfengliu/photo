@@ -230,11 +230,12 @@ fn crop_stage(
     let angle = editing.settings.crop.angle;
     let source = geometry.source_size();
     let straight = Straight::new(&editing.settings, source, angle, to_pixels(stage, ppp));
-    let view = crop::canvas::view(session, straight.scale);
+    let limit = ui.ctx().input(|input| input.max_texture_side) as f32;
+    let view = crop::canvas::view(session, straight.scale, limit);
     let map = CanvasMap {
         ppp,
         geometry,
-        display: Display::Straight(straight.clone()),
+        display: Display::Straight(Box::new(straight.clone())),
     };
     let response = ui.interact(
         stage,

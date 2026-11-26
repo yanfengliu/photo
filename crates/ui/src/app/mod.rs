@@ -122,7 +122,15 @@ impl PhotoApp {
     /// first one.
     pub fn starting_in(mut self, module: Module, view: View) -> Self {
         self.ui.view = view;
-        self.ui.module = module;
+        let wants_photo = module == Module::Develop || view != View::Grid;
+        if wants_photo && self.engine.active_photo().is_none() {
+            self.engine
+                .move_active(photo_engine::Movement::First, false);
+        }
+        // Develop has nothing to open in an empty catalog.
+        if module == Module::Library || self.engine.photo_count() > 0 {
+            self.ui.module = module;
+        }
         self
     }
 

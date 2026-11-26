@@ -4,6 +4,7 @@
 //! rectangle over it (see `canvas`); everything it changes is one step,
 //! recorded when the tool is put away.
 
+pub(crate) mod aspect;
 pub(crate) mod canvas;
 pub(crate) mod rect;
 
@@ -11,7 +12,8 @@ use egui::{Button, ComboBox, DragValue, Pos2, RichText, Ui, Vec2, vec2};
 use photo_core::develop::{Adj, Crop, CropConstraint, CropRect, DevelopSettings};
 use photo_engine::Geometry;
 
-use self::rect::{ASPECTS, Aspect, Handle, Turn, Upright};
+use self::aspect::{ASPECTS, Aspect, Turn};
+use self::rect::{Handle, Upright};
 use super::{edit, editing};
 use crate::app::Cx;
 use crate::app::actions::Action;
@@ -29,6 +31,8 @@ pub(crate) struct Drag {
     pub(crate) start: Upright,
     /// Where the pointer was pressed, in points.
     pub(crate) pressed: Pos2,
+    /// Where the pointer was when the rectangle was last worked out.
+    pub(crate) at: Pos2,
 }
 
 /// What the crop tool remembers between frames.
@@ -166,7 +170,7 @@ pub(crate) fn set_angle(
 fn constrain(cx: &mut Cx<'_>, editing: &Editing, frame: &Frame, constraint: CropConstraint) {
     let mut settings = editing.settings.clone();
     settings.crop.constraint = constraint;
-    if let Some(ratio) = rect::locked_ratio(constraint, frame.size) {
+    if let Some(ratio) = aspect::locked_ratio(constraint, frame.size) {
         let angle = settings.crop.angle;
         let current = rect::upright_of(&settings.crop, frame.size);
         if let Some(upright) = frame.largest(current.center, ratio, frame.cap(), angle) {
@@ -260,7 +264,7 @@ pub(crate) fn turn(cx: &mut Cx<'_>, way: Turn) -> bool {
         return false;
     };
     let mut settings = editing.settings.clone();
-    rect::turn(&mut settings, way);
+    aspect::turn(&mut settings, way);
     let tool = &mut cx.ui.develop.tools.crop;
     tool.drag = None;
     tool.turning = None;
@@ -386,7 +390,10 @@ pub(crate) fn panel(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
     ui.horizontal(|ui| {
         // The size is the engine's: the one rectangle every view and the
         // export are cut to.
-        let size = cx.engine.develop().and_then(|session| session.output_size());
+        let size = cx
+            .engine
+            .develop()
+            .and_then(|session| session.output_size());
         if let Some((width, height)) = size {
             ui.label(
                 RichText::new(format!("{width} x {height} px"))

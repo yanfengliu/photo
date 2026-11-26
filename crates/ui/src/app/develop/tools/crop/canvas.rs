@@ -12,6 +12,7 @@ use egui::{Color32, CursorIcon, Painter, Pos2, Rect, Response, Stroke, Ui, Vec2,
 use photo_core::geom::{self, Point};
 use photo_engine::{CanvasView, DevelopSession};
 
+use super::aspect;
 use super::rect::{self, Handle, Upright};
 use super::{CropTool, Drag, Frame, set_angle, set_rect};
 use crate::app::Cx;
@@ -29,9 +30,11 @@ const PAD: f32 = 48.0;
 
 /// What to ask the engine to render while cropping: the whole frame,
 /// straightened, as a region of the session's own output at `scale` screen
-/// pixels per pixel. `None` when the frame's centre has no place in the
-/// output (a transform beyond its horizon).
-pub(crate) fn view(session: &DevelopSession, scale: f32) -> Option<CanvasView> {
+/// pixels per pixel, or fewer where that would make a frame with a side
+/// over `limit` pixels (the most a texture can have). `None` when the
+/// frame's centre has no place in the output (a transform beyond its
+/// horizon).
+pub(crate) fn view(session: &DevelopSession, scale: f32, limit: f32) -> Option<CanvasView> {
     let geometry = session.geometry()?;
     let settings = session.settings();
     let frame = frame_geometry(settings, geometry.source_size());
@@ -46,6 +49,7 @@ pub(crate) fn view(session: &DevelopSession, scale: f32) -> Option<CanvasView> {
         (center.x + half.x).ceil(),
         (center.y + half.y).ceil(),
     );
+    let scale = scale.min(limit / roi.width()).min(limit / roi.height());
     Some(CanvasView::Region { roi, scale })
 }
 
@@ -153,25 +157,35 @@ pub(crate) fn interact(
         let start = if fits(upright) {
             upright
         } else {
-            rect::largest(upright.center, upright.aspect(), frame.min(), upright.size, &fits)
-                .unwrap_or(upright)
+            rect::largest(
+                upright.center,
+                upright.aspect(),
+                frame.min(),
+                upright.size,
+                &fits,
+            )
+            .unwrap_or(upright)
         };
         cx.ui.develop.tools.crop.drag = Some(Drag {
             handle,
             start,
             pressed: from,
+            at: from,
         });
     }
+    // Only when the pointer has moved: a pointer held still asks for
+    // nothing.
     if response.dragged()
-        && let (Some(drag), Some(at)) = (cx.ui.develop.tools.crop.drag, pointer)
+        && let (Some(drag), Some(at)) = (cx.ui.develop.tools.crop.drag.as_mut(), pointer)
+        && drag.at != at
     {
+        drag.at = at;
+        let drag = *drag;
         let delta = (at - drag.pressed) * ppp / straight.scale;
-        let ratio = rect::locked_ratio(crop.constraint, frame.size);
+        let ratio = aspect::locked_ratio(crop.constraint, frame.size);
         let fits = frame.fits(angle);
         let moved = rect::dragged(drag.start, drag.handle, delta, ratio, frame.min(), &fits);
-        if moved != upright {
-            set_rect(cx, editing, frame, moved, angle);
-        }
+        set_rect(cx, editing, frame, moved, angle);
     }
     if response.drag_stopped() {
         cx.ui.develop.tools.crop.drag = None;

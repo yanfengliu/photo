@@ -67,19 +67,19 @@ const STRIP: [(ToolKey, Icon, &str, &str); 5] = [
     (
         ToolKey::Mask(MaskKind::Linear),
         Icon::LinearMask,
-        "Linear gradient",
+        "Linear gradient mask",
         "Mask with a linear gradient (M)",
     ),
     (
         ToolKey::Mask(MaskKind::Radial),
         Icon::RadialMask,
-        "Radial gradient",
+        "Radial gradient mask",
         "Mask with a radial gradient (Shift+M)",
     ),
     (
         ToolKey::Mask(MaskKind::Brush),
         Icon::Brush,
-        "Brush",
+        "Brush mask",
         "Mask with the brush (K)",
     ),
 ];
@@ -281,7 +281,11 @@ pub(crate) fn strip(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
                         }
                     };
                     let button = IconButton::new(icon, name).selected(lit);
-                    if ui.add_enabled(enabled, button).on_hover_text(hint).clicked() {
+                    if ui
+                        .add_enabled(enabled, button)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
                         pressed = Some(key);
                     }
                 }
@@ -323,21 +327,28 @@ pub(crate) fn panel(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
                 Tool::Mask => mask::panel(ui, cx, editing),
             });
             ui.add_space(space::LG);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(Button::new("Done").fill(palette::ACCENT_DIM).min_size(vec2(64.0, 22.0)))
-                    .on_hover_text("Keep what the tool changed, as one step (Enter)")
-                    .clicked()
-                {
-                    put_away(cx);
-                }
-                if ui
-                    .add(Button::new("Discard").min_size(vec2(64.0, 22.0)))
-                    .on_hover_text("Drop what the tool changed (Escape)")
-                    .clicked()
-                {
-                    discard(cx);
-                }
+            // In a row of its own, or the right-to-left layout would take
+            // all the height the column has left.
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let done = Button::new("Done")
+                        .fill(palette::ACCENT_DIM)
+                        .min_size(vec2(64.0, 22.0));
+                    if ui
+                        .add(done)
+                        .on_hover_text("Keep what the tool changed, as one step (Enter)")
+                        .clicked()
+                    {
+                        put_away(cx);
+                    }
+                    if ui
+                        .add(Button::new("Discard").min_size(vec2(64.0, 22.0)))
+                        .on_hover_text("Drop what the tool changed (Escape)")
+                        .clicked()
+                    {
+                        discard(cx);
+                    }
+                });
             });
         });
 }

@@ -108,10 +108,7 @@ pub(crate) fn handles(shape: &MaskShape, map: &CanvasMap) -> Vec<(Handle, Point)
                 (Handle::RadialY(true), p(middle + y)),
                 (Handle::RadialY(false), p(middle - y)),
                 (Handle::RadialSize, p(middle + (x + y) * diagonal)),
-                (
-                    Handle::RadialTurn,
-                    p(middle + x + x.normalized() * arm),
-                ),
+                (Handle::RadialTurn, p(middle + x + x.normalized() * arm)),
             ]
         }
         MaskShape::Brush { .. } => Vec::new(),
@@ -235,7 +232,10 @@ pub(crate) fn pulled_radial(
 
 /// A line that reads on any photo.
 fn line(painter: &Painter, ends: [Pos2; 2], color: Color32, width: f32) {
-    painter.line_segment(ends, Stroke::new(width + 2.0, Color32::from_black_alpha(120)));
+    painter.line_segment(
+        ends,
+        Stroke::new(width + 2.0, Color32::from_black_alpha(120)),
+    );
     painter.line_segment(ends, Stroke::new(width, color));
 }
 
@@ -282,7 +282,11 @@ pub(crate) fn paint(painter: &Painter, shape: &MaskShape, map: &CanvasMap, selec
                     map.source_to_screen(p(on + across * far)),
                 ];
                 if let [Some(from), Some(to)] = ends {
-                    let tone = if offset == 0.0 { palette::TEXT_DIM } else { color };
+                    let tone = if offset == 0.0 {
+                        palette::TEXT_DIM
+                    } else {
+                        color
+                    };
                     line(painter, [from, to], tone, width);
                 }
             }
@@ -341,7 +345,8 @@ mod tests {
     fn map() -> CanvasMap {
         let geometry = Geometry::from_settings(1200, 800, &DevelopSettings::default());
         let canvas = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(632.0, 432.0));
-        let placement = Placement::new(CanvasZoom::Fit, vec2(0.5, 0.5), vec2(1200.0, 800.0), canvas);
+        let placement =
+            Placement::new(CanvasZoom::Fit, vec2(0.5, 0.5), vec2(1200.0, 800.0), canvas);
         CanvasMap {
             ppp: 1.0,
             geometry,
@@ -408,7 +413,10 @@ mod tests {
         };
         let (from, to) = (map.pixels(start), map.pixels(end));
         assert!((from.y - 400.0).abs() < 1.0e-2 && (to.y - 400.0).abs() < 1.0e-2);
-        assert!((from.distance(to) - 400.0).abs() < 1.0e-2, "the length is kept");
+        assert!(
+            (from.distance(to) - 400.0).abs() < 1.0e-2,
+            "the length is kept"
+        );
         // And the handle is where the pointer took it.
         let back = at(&turned_shape, Handle::LinearTurn, &map);
         assert!((back.x - 600.0).abs() < 1.0e-2 && back.y > 400.0);
@@ -420,7 +428,12 @@ mod tests {
         let shape = radial();
         let right = at(&shape, Handle::RadialX(true), &map);
         assert_eq!((right.x, right.y), (840.0, 400.0));
-        let wider = moved(&shape, Handle::RadialX(true), Point::new(900.0, 380.0), &map);
+        let wider = moved(
+            &shape,
+            Handle::RadialX(true),
+            Point::new(900.0, 380.0),
+            &map,
+        );
         let MaskShape::Radial {
             radius_x, radius_y, ..
         } = wider
@@ -430,7 +443,10 @@ mod tests {
         assert_eq!((radius_x, radius_y), (0.25, 0.1), "only its own axis");
 
         let corner = at(&shape, Handle::RadialSize, &map);
-        let twice = Point::new(600.0 + 2.0 * (corner.x - 600.0), 400.0 + 2.0 * (corner.y - 400.0));
+        let twice = Point::new(
+            600.0 + 2.0 * (corner.x - 600.0),
+            400.0 + 2.0 * (corner.y - 400.0),
+        );
         let MaskShape::Radial {
             radius_x, radius_y, ..
         } = moved(&shape, Handle::RadialSize, twice, &map)
@@ -452,14 +468,25 @@ mod tests {
         let map = map();
         let shape = radial();
         let centre = map.source_to_screen(Point::new(600.0, 400.0)).unwrap();
-        assert_eq!(hit(&shape, &map, centre).map(|found| found.0), Some(Handle::Move));
+        assert_eq!(
+            hit(&shape, &map, centre).map(|found| found.0),
+            Some(Handle::Move)
+        );
         let right = map.source_to_screen(Point::new(840.0, 400.0)).unwrap();
         assert_eq!(
             hit(&shape, &map, right + vec2(3.0, -2.0)).map(|found| found.0),
             Some(Handle::RadialX(true))
         );
         assert_eq!(hit(&shape, &map, centre + vec2(40.0, 30.0)), None);
-        assert!(handles(&MaskShape::Brush { strokes: Vec::new() }, &map).is_empty());
+        assert!(
+            handles(
+                &MaskShape::Brush {
+                    strokes: Vec::new()
+                },
+                &map
+            )
+            .is_empty()
+        );
     }
 
     #[test]

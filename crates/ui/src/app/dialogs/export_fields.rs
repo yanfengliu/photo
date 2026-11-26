@@ -52,8 +52,11 @@ enum Kind {
 }
 
 impl Kind {
-    const ALL: [(Self, &'static str); 3] =
-        [(Self::Jpeg, "JPEG"), (Self::Png, "PNG"), (Self::Tiff, "TIFF")];
+    const ALL: [(Self, &'static str); 3] = [
+        (Self::Jpeg, "JPEG"),
+        (Self::Png, "PNG"),
+        (Self::Tiff, "TIFF"),
+    ];
 
     fn of(format: Format) -> Self {
         match format {

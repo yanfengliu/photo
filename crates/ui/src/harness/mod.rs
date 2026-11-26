@@ -236,13 +236,40 @@ impl<A: eframe::App + 'static> Harness<A> {
     /// release there. The button is released even if a step on the way
     /// reports an error; the first error is the one returned.
     pub fn drag(&mut self, from: Pos2, to: Pos2) -> Result<(), HarnessError> {
+        self.drag_with(from, to, Modifiers::NONE)
+    }
+
+    /// [`Self::drag`] with `modifiers` held from the press to the release
+    /// (Alt to erase with a brush, say).
+    pub fn drag_with(
+        &mut self,
+        from: Pos2,
+        to: Pos2,
+        modifiers: Modifiers,
+    ) -> Result<(), HarnessError> {
         const STEPS: usize = 5;
-        let mut result = self.pointer_down(from);
+        self.inner.event(Event::PointerMoved(from));
+        if modifiers.any() {
+            self.inner.event(Event::ModifiersChanged(modifiers));
+        }
+        self.inner.event(pointer_button(
+            from,
+            PointerButton::Primary,
+            true,
+            modifiers,
+        ));
+        let mut result = self.run().map(drop);
         for step in 1..=STEPS {
             let moved = self.pointer_move(from.lerp(to, step as f32 / STEPS as f32));
             result = result.and(moved);
         }
-        let released = self.pointer_up(to);
+        let started = self.time();
+        self.inner
+            .event(pointer_button(to, PointerButton::Primary, false, modifiers));
+        if modifiers.any() {
+            self.inner.event(Event::ModifiersChanged(Modifiers::NONE));
+        }
+        let released = self.settle_release(to, started);
         result.and(released)
     }
 

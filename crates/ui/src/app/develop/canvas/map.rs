@@ -128,7 +128,7 @@ pub(crate) enum Display {
     /// The output, placed as the zoom says.
     Output(Placement),
     /// The crop tool's straightened frame.
-    Straight(Straight),
+    Straight(Box<Straight>),
 }
 
 /// The mapping between the screen and the open photo's source.
@@ -311,7 +311,7 @@ impl CanvasMap {
 
 #[cfg(test)]
 mod tests {
-    use photo_core::develop::{CropRect, Orientation};
+    use photo_core::develop::{Crop, CropRect, Orientation};
 
     use super::*;
     use crate::app::develop::canvas::mapping::CanvasZoom;
@@ -339,21 +339,25 @@ mod tests {
         CanvasMap {
             ppp: 2.0,
             geometry: Geometry::from_settings(SOURCE.0, SOURCE.1, settings),
-            display: Display::Straight(straight),
+            display: Display::Straight(Box::new(straight)),
         }
     }
 
     fn cropped() -> DevelopSettings {
-        let mut settings = DevelopSettings::default();
-        settings.orientation = Orientation::new(1, false);
-        settings.crop.angle = 12.0;
-        settings.crop.rect = Some(CropRect {
-            cx: 0.45,
-            cy: 0.55,
-            width: 0.4,
-            height: 0.3,
-        });
-        settings
+        DevelopSettings {
+            orientation: Orientation::new(1, false),
+            crop: Crop {
+                rect: Some(CropRect {
+                    cx: 0.45,
+                    cy: 0.55,
+                    width: 0.4,
+                    height: 0.3,
+                }),
+                angle: 12.0,
+                ..Crop::default()
+            },
+            ..DevelopSettings::default()
+        }
     }
 
     #[test]
@@ -392,8 +396,14 @@ mod tests {
             .iter()
             .map(|corner| straight.to_screen(vec2(corner.x * 800.0, corner.y * 1200.0)))
             .collect();
-        assert!((on_screen[0].y - on_screen[1].y).abs() < 0.01, "top is level");
-        assert!((on_screen[1].x - on_screen[2].x).abs() < 0.01, "right is upright");
+        assert!(
+            (on_screen[0].y - on_screen[1].y).abs() < 0.01,
+            "top is level"
+        );
+        assert!(
+            (on_screen[1].x - on_screen[2].x).abs() < 0.01,
+            "right is upright"
+        );
         let back = straight.to_frame(on_screen[2]);
         assert!((back - vec2(corners[2].x * 800.0, corners[2].y * 1200.0)).length() < 0.01);
     }

@@ -6,7 +6,9 @@
 //! a spot stays on its content however the photo is turned or cropped.
 
 use egui::epaint::Shape;
-use egui::{Button, Color32, CursorIcon, Painter, Pos2, Response, RichText, Stroke, Ui, Vec2, vec2};
+use egui::{
+    Button, Color32, CursorIcon, Painter, Pos2, Response, RichText, Stroke, Ui, Vec2, vec2,
+};
 use photo_core::develop::{AdjSpec, SettingsGroup, Spot, SpotMode};
 use photo_core::geom::Point;
 
@@ -287,7 +289,10 @@ fn ring(painter: &Painter, points: &[Pos2], width: f32, color: Color32) {
     }
     let shadow = Stroke::new(width + 2.0, Color32::from_black_alpha(140));
     painter.add(Shape::closed_line(points.to_vec(), shadow));
-    painter.add(Shape::closed_line(points.to_vec(), Stroke::new(width, color)));
+    painter.add(Shape::closed_line(
+        points.to_vec(),
+        Stroke::new(width, color),
+    ));
 }
 
 /// How far a ring's points are from `center`, on average.
@@ -305,7 +310,7 @@ pub(crate) fn paint(painter: &Painter, tool: &HealTool, spots: &[Spot], map: &Ca
         let target = map.circle(map.pixels(spot.target), radius);
         let source = map.circle(map.pixels(spot.source), radius);
         let (strong, quiet) = if selected {
-            (palette::TEXT_STRONG, palette::ACCENT_STRONG)
+            (palette::TEXT_STRONG, palette::TEXT_STRONG)
         } else {
             (palette::TEXT, palette::TEXT_DIM)
         };
@@ -346,12 +351,7 @@ pub(crate) fn panel(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
     let was = match selected {
         Some(index) => {
             let spot = &spots[index];
-            (
-                spot.mode,
-                spot.radius * 100.0,
-                spot.feather,
-                spot.opacity,
-            )
+            (spot.mode, spot.radius * 100.0, spot.feather, spot.opacity)
         }
         None => (tool.mode, tool.size, tool.feather, tool.opacity),
     };

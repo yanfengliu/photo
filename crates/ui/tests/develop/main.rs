@@ -3,7 +3,10 @@
 //! clicks and drags on controls found by role and accessible name, and
 //! checked against what the engine then holds and what the canvas shows.
 
+mod crop;
+mod heal;
 mod looks;
+mod masks;
 mod module;
 mod performance;
 mod protected;
@@ -11,6 +14,7 @@ mod quick;
 mod settings;
 mod sliders;
 mod snapshots;
+mod tool_snapshots;
 mod tools;
 
 use std::path::{Path, PathBuf};
@@ -267,6 +271,21 @@ pub fn mean_rgb(image: &Rgba8Image, x: u32, y: u32, width: u32, height: u32) -> 
     }
     let count = f64::from(width * height);
     sum.map(|total| total / count)
+}
+
+/// The pixels of the open photo's newest frame.
+pub fn frame_image(harness: &Harness<PhotoApp>) -> std::sync::Arc<Rgba8Image> {
+    let frame = session(harness).frame().expect("a frame");
+    std::sync::Arc::clone(frame.image())
+}
+
+/// The mean of red, green and blue around the pixel of `image` (a frame of
+/// the whole photo) that shows the point at fractions `(u, v)` of it.
+pub fn luma_at(image: &Rgba8Image, u: f32, v: f32) -> f64 {
+    let x = ((u * image.width as f32) as u32).clamp(1, image.width - 2);
+    let y = ((v * image.height as f32) as u32).clamp(1, image.height - 2);
+    let [red, green, blue] = mean_rgb(image, x - 1, y - 1, 3, 3);
+    (red + green + blue) / 3.0
 }
 
 /// The mean luma of the open photo's newest frame.

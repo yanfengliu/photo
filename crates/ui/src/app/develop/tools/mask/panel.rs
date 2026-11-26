@@ -6,8 +6,8 @@
 use egui::{Align, Button, Layout, RichText, TextEdit, Ui, vec2};
 use photo_core::develop::{AdjSpec, LocalAdj, MaskShape, SettingsGroup};
 
-use super::brush;
 use super::Armed;
+use super::brush;
 use crate::app::Cx;
 use crate::app::develop::right::Editing;
 use crate::app::develop::tools::{MaskKind, edit};
@@ -85,7 +85,8 @@ fn list(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
         let number = index + 1;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = space::XS;
-            let switch = IconButton::new(Icon::Eye, &format!("Enable mask {number}"))
+            let switch_name = format!("Enable mask {number}");
+            let switch = IconButton::new(Icon::Eye, &switch_name)
                 .selected(mask.enabled)
                 .side(size::ROW);
             if ui.add(switch).clicked() {
@@ -176,8 +177,16 @@ fn selected(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing, index: usize) {
     }
     ui.horizontal(|ui| {
         for (subtract, title, hint) in [
-            (false, "Add", "Add a shape to this mask: choose one, then drag on the photo"),
-            (true, "Subtract", "Cut a shape out of this mask: choose one, then drag on the photo"),
+            (
+                false,
+                "Add",
+                "Add a shape to this mask: choose one, then drag on the photo",
+            ),
+            (
+                true,
+                "Subtract",
+                "Cut a shape out of this mask: choose one, then drag on the photo",
+            ),
         ] {
             let armed = cx.ui.develop.tools.mask.armed;
             let lit = armed.is_some_and(|armed| armed.into == Some(subtract));
@@ -231,7 +240,9 @@ fn selected(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing, index: usize) {
             .show(ui)
             .changed
         {
-            change(cx, &|mask| adj.set(&mut mask.adjust, adj.spec().clamp(value)));
+            change(cx, &|mask| {
+                adj.set(&mut mask.adjust, adj.spec().clamp(value))
+            });
         }
     }
 

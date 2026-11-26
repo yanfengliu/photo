@@ -118,7 +118,10 @@ pub(crate) fn paint_cursor(painter: &Painter, map: &CanvasMap, at: Pos2, options
     }
     let shadow = Stroke::new(3.0, Color32::from_black_alpha(130));
     painter.add(Shape::closed_line(edge.clone(), shadow));
-    painter.add(Shape::closed_line(edge, Stroke::new(1.0, palette::TEXT_STRONG)));
+    painter.add(Shape::closed_line(
+        edge,
+        Stroke::new(1.0, palette::TEXT_STRONG),
+    ));
     let solid = 1.0 - options.feather / 100.0;
     if solid > 0.05 && solid < 0.95 {
         let core = map.circle(center, radius * solid);
@@ -143,7 +146,8 @@ mod tests {
     fn map() -> CanvasMap {
         let geometry = Geometry::from_settings(1000, 500, &DevelopSettings::default());
         let canvas = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(1032.0, 532.0));
-        let placement = Placement::new(CanvasZoom::Fit, vec2(0.5, 0.5), vec2(1000.0, 500.0), canvas);
+        let placement =
+            Placement::new(CanvasZoom::Fit, vec2(0.5, 0.5), vec2(1000.0, 500.0), canvas);
         CanvasMap {
             ppp: 1.0,
             geometry,

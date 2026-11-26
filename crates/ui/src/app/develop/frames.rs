@@ -155,7 +155,11 @@ impl Layouts {
     /// Keep the layout of the session's current version, if it is new.
     pub(crate) fn note(&mut self, session: &DevelopSession) {
         let version = session.version();
-        if self.versions.back().is_some_and(|(last, _)| *last >= version) {
+        if self
+            .versions
+            .back()
+            .is_some_and(|(last, _)| *last >= version)
+        {
             return;
         }
         let Some(geometry) = session.geometry() else {
@@ -193,8 +197,6 @@ pub(crate) struct MaskTexture {
     pub(crate) roi: geom::Rect,
     /// The settings version it was computed from.
     pub(crate) version: u64,
-    /// Which mask it shows.
-    pub(crate) mask: usize,
 }
 
 impl MaskTexture {
@@ -205,7 +207,6 @@ impl MaskTexture {
             handle: ctx.load_texture("develop-mask-overlay", image, TextureOptions::LINEAR),
             roi: overlay.view().roi(),
             version: overlay.version(),
-            mask: overlay.mask(),
         })
     }
 
@@ -308,13 +309,19 @@ impl Frames {
     }
 }
 
-/// Whether `frame` shows the whole photo of `output` pixels.
+/// Whether `frame` shows the whole photo of `output` pixels, and no more:
+/// a frame the crop tool asked for reaches past the photo on every side,
+/// and is not what the Navigator shows.
 fn covers_whole(frame: &DevelopFrame, output: Option<(u32, u32)>) -> bool {
     let Some((width, height)) = output else {
         return false;
     };
     let roi = frame.view().roi();
-    roi.x0 <= 0.5 && roi.y0 <= 0.5 && roi.x1 >= width as f32 - 0.5 && roi.y1 >= height as f32 - 0.5
+    let near = |value: f32, edge: f32| (value - edge).abs() <= 0.5;
+    near(roi.x0, 0.0)
+        && near(roi.y0, 0.0)
+        && near(roi.x1, width as f32)
+        && near(roi.y1, height as f32)
 }
 
 /// The pixels as egui takes them; `None` when they do not match their size.
@@ -396,7 +403,10 @@ mod tests {
         assert!(image.pixels[1].a() > 60 && image.pixels[1].a() < 90);
         let full = image.pixels[2];
         assert_eq!(full.a(), 150);
-        assert!(full.r() > full.g() * 3 && full.r() > full.b() * 3, "{full:?}");
+        assert!(
+            full.r() > full.g() * 3 && full.r() > full.b() * 3,
+            "{full:?}"
+        );
         assert!(mask_image(&Plane::new(0, 0)).is_none());
     }
 

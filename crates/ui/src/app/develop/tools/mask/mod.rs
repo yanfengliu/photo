@@ -324,14 +324,15 @@ pub(crate) fn interact(
         };
         ui.ctx().set_cursor_icon(icon);
     }
-    if response.drag_started()
-        && let Some(from) = pressed
-    {
-        begin(cx, editing, map, from, erase);
-    }
-    if response.dragged()
+    if response.drag_started() {
+        if let Some(from) = pressed {
+            begin(cx, editing, map, from, erase);
+        }
+    } else if response.dragged()
         && let Some(at) = pointer
     {
+        // Not in the frame the drag began: what `begin` made is not in
+        // the settings this frame was handed.
         carry(cx, editing, map, at);
     }
     if response.drag_stopped() {

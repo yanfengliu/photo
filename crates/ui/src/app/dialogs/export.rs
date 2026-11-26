@@ -25,7 +25,10 @@ use crate::widgets::{Dialog, DialogOutcome};
 /// The tokens a name template takes, with what each stands for.
 const TOKENS: [(&str, &str); 4] = [
     ("{name}", "The original file's name"),
-    ("{seq}", "The photo's number in the export ({seq:3} pads it to three digits)"),
+    (
+        "{seq}",
+        "The photo's number in the export ({seq:3} pads it to three digits)",
+    ),
     ("{date}", "The capture date, as 2024-03-15"),
     ("{text}", "The custom text"),
 ];
