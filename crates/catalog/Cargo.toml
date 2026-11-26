@@ -10,9 +10,14 @@ workspace = true
 
 [dependencies]
 photo-core = { workspace = true }
+# Canonical composition (NFC) of file names, so that names a file system
+# takes for one name compare equal. Already in the build through `url`;
+# only its compiled data, nothing else.
+icu_normalizer = { workspace = true }
 log = { workspace = true }
 # `functions` (no extra crates) lets the catalog register its Unicode
-# case-folding SQL function, used for case-insensitive text matching.
+# case-folding SQL functions, used for case-insensitive text matching and
+# for comparing file names.
 rusqlite = { workspace = true, features = ["functions"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

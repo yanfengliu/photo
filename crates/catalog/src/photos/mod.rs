@@ -278,21 +278,23 @@ impl Catalog {
     }
 
     /// For each of `names`, in order, the paths of the catalogued files
-    /// that have that name, whatever the letter case: `IMG_1.JPG` and
-    /// `img_1.jpg` are one name on the file systems photos usually live
-    /// on. Virtual copies have no file of their own and are not listed.
+    /// that have that name as a file system that ignores letter case sees
+    /// it: names with the same [`same_name_key`](crate::same_name_key) are
+    /// one name, so `IMG_1.JPG` and `img_1.jpg` are, and so are `café`
+    /// with its accent as one character and `CAFE` followed by a combining
+    /// accent. Virtual copies have no file of their own and are not listed.
     /// The files of one name are in the order they were added. One query
     /// however many names; it reads the name of every photo.
     pub fn files_named(&self, names: &[&str]) -> Result<Vec<Vec<PathBuf>>> {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        let folded: Vec<String> = names.iter().map(|name| text::fold(name)).collect();
-        let wanted = serde_json::Value::from(folded.clone()).to_string();
+        let keys: Vec<String> = names.iter().map(|name| text::same_name_key(name)).collect();
+        let wanted = serde_json::Value::from(keys.clone()).to_string();
         let mut stmt = self.conn.prepare_cached(
             "SELECT file_name, path FROM photos
              WHERE master_id IS NULL
-               AND photo_fold(file_name) IN (SELECT value FROM json_each(?1))
+               AND photo_name_key(file_name) IN (SELECT value FROM json_each(?1))
              ORDER BY id",
         )?;
         let rows = stmt.query_map([wanted], |row| {
@@ -302,13 +304,13 @@ impl Catalog {
         for row in rows {
             let (name, path) = row?;
             found
-                .entry(text::fold(&name))
+                .entry(text::same_name_key(&name))
                 .or_default()
                 .push(PathBuf::from(path));
         }
-        Ok(folded
+        Ok(keys
             .iter()
-            .map(|name| found.get(name).cloned().unwrap_or_default())
+            .map(|key| found.get(key).cloned().unwrap_or_default())
             .collect())
     }
 }

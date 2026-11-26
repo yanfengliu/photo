@@ -14,9 +14,11 @@
 //! how its path is spelled: a folder the catalog reached through a symbolic
 //! link, a junction or another spelling is the same folder. Folders that
 //! are not there to ask (a drive that is away) are compared by their paths,
-//! resolved as far as they exist and ignoring letter case. File names are
-//! compared ignoring letter case, as on the file systems photos usually
-//! live on.
+//! resolved as far as they exist. Names, of files and in those paths, are
+//! compared as the file systems photos usually live on compare them:
+//! ignoring letter case, and with an accent written as part of its letter
+//! or as a combining character after it counting as the same, by the key
+//! `Catalog::files_named` uses ([`same_name_key`]).
 //!
 //! The guard looks when the export starts, and a path says nothing about a
 //! folder that is away then: one the catalog reached through a link is not
@@ -30,11 +32,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use photo_catalog::{Catalog, CatalogError, PhotoQuery, Source};
+use photo_catalog::{Catalog, CatalogError, PhotoQuery, Source, same_name_key};
 use same_file::Handle;
 
 /// A folder the export writes into, and the names of the catalog's
-/// originals in it, in lower case.
+/// originals in it, each as its [`same_name_key`].
 #[derive(Debug)]
 struct Destination {
     folder: PathBuf,
@@ -97,7 +99,7 @@ impl Guard {
                     names = Some(
                         photos
                             .iter()
-                            .map(|photo| photo.file_name.to_lowercase())
+                            .map(|photo| same_name_key(&photo.file_name))
                             .collect(),
                     );
                 }
@@ -125,7 +127,7 @@ impl Guard {
                 target.display()
             ));
         }
-        let name = target.file_name()?.to_string_lossy().to_lowercase();
+        let name = same_name_key(&target.file_name()?.to_string_lossy());
         let taken = self.destinations.iter().any(|destination| {
             destination.originals.contains(&name)
                 && (destination.key == key
@@ -146,7 +148,8 @@ pub(super) fn is_an_original(original: &Path) -> String {
 /// For each export, given as the file it is planned to write and the
 /// photo's own file: the originals of the catalog it must not replace.
 /// Those are the files the catalog knows under the planned file's name,
-/// whatever the letter case and in whatever folder, other than the photo's
+/// compared as a file system that ignores letter case compares names (see
+/// `Catalog::files_named`) and in whatever folder, other than the photo's
 /// own. Read from the catalog in one query; no file is touched.
 pub(super) fn originals_in_the_way(
     catalog: &Catalog,
@@ -174,8 +177,9 @@ pub(super) fn originals_in_the_way(
 }
 
 /// `path` with symbolic links resolved as far as it exists (the nearest
-/// existing folder made canonical, the rest added back), in lower case,
-/// for comparing folders that are not both there to be asked who they are.
+/// existing folder made canonical, the rest added back), as its
+/// [`same_name_key`], for comparing folders that are not both there to be
+/// asked who they are.
 fn folder_key(path: &Path) -> PathBuf {
     let mut existing = path;
     let mut rest = Vec::new();
@@ -194,7 +198,7 @@ fn folder_key(path: &Path) -> PathBuf {
             _ => break path.to_path_buf(),
         }
     };
-    PathBuf::from(resolved.to_string_lossy().to_lowercase())
+    PathBuf::from(same_name_key(&resolved.to_string_lossy()))
 }
 
 #[cfg(test)]
@@ -301,6 +305,45 @@ mod tests {
         let guard = Guard::new(&catalog, &[], [away.clone()]).unwrap();
         assert!(guard.refusal(&away.join("img_1.jpg")).is_some());
         assert!(guard.refusal(&away.join("IMG_9.jpg")).is_none());
+    }
+
+    #[test]
+    fn names_a_file_system_takes_for_one_name_are_one_name_however_their_letters_are_written() {
+        // "café" with a plain e and a combining accent after it, and "CAFÉ"
+        // with the accented capital as one character: one name on APFS,
+        // which compares names in a normalised form, and ignoring case.
+        let combining = "cafe\u{301}.jpg";
+        let precomposed = "CAF\u{C9}.jpg";
+        let dir = tempfile::tempdir().unwrap();
+        let here = dir.path().join("shots");
+        std::fs::create_dir(&here).unwrap();
+        let away = dir.path().join("card");
+        for (catalogued, exported) in [(combining, precomposed), (precomposed, combining)] {
+            for folder in [&here, &away] {
+                let original = folder.join(catalogued);
+                let catalog = catalog_with(&original);
+                let guard = Guard::new(&catalog, &[], [folder.clone()]).unwrap();
+                assert!(
+                    guard.refusal(&folder.join(exported)).is_some(),
+                    "{exported:?} beside the original {catalogued:?} in {}",
+                    folder.display()
+                );
+                let planned = dir.path().join("out").join(exported);
+                let exports = [(planned.as_path(), Path::new("/raw/a.CR2"))];
+                let told = originals_in_the_way(&catalog, &exports).unwrap();
+                assert_eq!(told, [vec![original]], "{exported:?} for {catalogued:?}");
+            }
+        }
+
+        // A folder that is away is compared by its path, whose names are
+        // compared the same way.
+        let catalog = catalog_with(&dir.path().join("Caf\u{E9}").join("IMG_1.jpg"));
+        let guard = Guard::new(&catalog, &[], [dir.path().join("CAFE\u{301}")]).unwrap();
+        assert!(
+            guard
+                .refusal(&dir.path().join("cafe\u{301}").join("img_1.JPG"))
+                .is_some()
+        );
     }
 
     #[test]

@@ -42,6 +42,34 @@ fn files_are_found_by_name_whatever_the_letter_case_and_the_folder() {
 }
 
 #[test]
+fn names_a_file_system_takes_for_one_name_are_found_however_their_letters_are_written() {
+    // "café" with a plain e and a combining accent after it, and "CAFÉ"
+    // with the accented capital as one character: one name in a folder on
+    // APFS, which compares names in a normalised form, and ignoring case.
+    let combining = "cafe\u{301}.jpg";
+    let precomposed = "CAF\u{C9}.JPG";
+    let mut catalog = memory();
+    import_paths(
+        &mut catalog,
+        &[
+            &format!("/shots/{combining}"),
+            &format!("/card/{precomposed}"),
+            "/shots/cafe.jpg",
+        ],
+    );
+    let both = paths(&[
+        &format!("/shots/{combining}"),
+        &format!("/card/{precomposed}"),
+    ]);
+    let found = catalog.files_named(&[precomposed, combining]).unwrap();
+    assert_eq!(
+        found,
+        [both.clone(), both],
+        "each spelling finds the file written the other way, and the plain cafe.jpg is another name"
+    );
+}
+
+#[test]
 fn a_name_asked_for_twice_is_answered_twice_and_no_names_ask_nothing() {
     let mut catalog = memory();
     import_paths(&mut catalog, &["/shots/a.jpg"]);

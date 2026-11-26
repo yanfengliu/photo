@@ -25,7 +25,10 @@
 //!   matches `ss`, `ﬁ` matches `fi` and `µ` matches `μ`. Text is not
 //!   normalised, so a letter with a combining accent does not match the
 //!   same letter written as one character, and Greek letters with accents
-//!   or iota subscript match only their own lower and upper case.
+//!   or iota subscript match only their own lower and upper case. File
+//!   names looked up as names ([`Catalog::files_named`]) are the exception:
+//!   they are compared as a file system sees them, normalised first (see
+//!   [`same_name_key`]).
 //! - **Mutations can be undone.** Setters take one value per photo, develop
 //!   writes return a [`DevelopChange`], membership changes report exactly
 //!   what they added or removed, and removing photos or deleting keywords
@@ -105,3 +108,4 @@ pub use removal::RemovedPhotos;
 pub use smart::{SmartField, SmartOp, SmartRule, SmartRules, SmartValue, SmartValueKind};
 pub use snapshots::Snapshot;
 pub use stats::CatalogStats;
+pub use text::same_name_key;

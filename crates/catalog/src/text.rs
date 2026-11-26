@@ -1,14 +1,41 @@
 //! Text handling SQLite cannot do on its own: Unicode case folding for
-//! matching, and a sort key that puts `IMG_2` before `IMG_10`.
+//! matching, the key under which two file names are one name, and a sort
+//! key that puts `IMG_2` before `IMG_10`.
 
 use std::fmt::Write as _;
 
+use icu_normalizer::ComposingNormalizerBorrowed;
 use rusqlite::Connection;
 use rusqlite::functions::FunctionFlags;
 
 /// Name of the SQL function that applies [`fold`]. Only ever used in queries,
 /// never in the schema, so a catalog stays readable by any SQLite tool.
 pub(crate) const FOLD_FUNCTION: &str = "photo_fold";
+
+/// Name of the SQL function that applies [`same_name_key`]. Like
+/// [`FOLD_FUNCTION`], only ever used in queries.
+pub(crate) const NAME_KEY_FUNCTION: &str = "photo_name_key";
+
+/// The key under which file names that a file system takes for one name
+/// are equal: the name in canonical composition (Unicode's NFC), then
+/// case-folded as [`fold`] does it.
+///
+/// A letter can be written as one character or as a letter followed by a
+/// combining accent: `café` and `cafe` with U+0301 after the `e` are
+/// different text, but APFS compares names in a normalised form, so they
+/// are one name in a folder there, and so is `CAFÉ` where letter case is
+/// ignored, as it is by default on APFS, NTFS and FAT. Composing first
+/// makes the two spellings one; folding then makes the cases one.
+///
+/// Nothing stored is computed with this key, so it can change without a
+/// migration. Text matching ([`fold`]) does not normalise.
+pub fn same_name_key(name: &str) -> String {
+    if name.is_ascii() {
+        // ASCII is its own canonical composition.
+        return name.to_ascii_lowercase();
+    }
+    fold(&ComposingNormalizerBorrowed::new_nfc().normalize(name))
+}
 
 /// Fold text for case-insensitive comparison. The same function runs on both
 /// sides of every text match (stored value in SQL, needle in Rust), which is
@@ -97,18 +124,25 @@ fn full_folding(character: char) -> Option<&'static str> {
     })
 }
 
-/// Make [`fold`] callable from SQL as `photo_fold(text)`; `NULL` stays `NULL`.
+/// Make [`fold`] callable from SQL as `photo_fold(text)`, and
+/// [`same_name_key`] as `photo_name_key(text)`; `NULL` stays `NULL`.
 pub(crate) fn register_functions(conn: &Connection) -> rusqlite::Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8
         | FunctionFlags::SQLITE_DETERMINISTIC
         | FunctionFlags::SQLITE_INNOCUOUS;
-    conn.create_scalar_function(FOLD_FUNCTION, 1, flags, |context| {
-        let text = context
-            .get_raw(0)
-            .as_str_or_null()
-            .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
-        Ok(text.map(fold))
-    })
+    for (name, apply) in [
+        (FOLD_FUNCTION, fold as fn(&str) -> String),
+        (NAME_KEY_FUNCTION, same_name_key),
+    ] {
+        conn.create_scalar_function(name, 1, flags, move |context| {
+            let text = context
+                .get_raw(0)
+                .as_str_or_null()
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+            Ok(text.map(apply))
+        })?;
+    }
+    Ok(())
 }
 
 /// A key whose plain byte order is the natural order of file names: case is
@@ -279,5 +313,50 @@ mod tests {
             .query_row("SELECT photo_fold(NULL)", [], |row| row.get(0))
             .unwrap();
         assert_eq!(null, None);
+
+        let name = "CAFE\u{301} Été.JPG";
+        let key: String = conn
+            .query_row("SELECT photo_name_key(?1)", [name], |row| row.get(0))
+            .unwrap();
+        assert_eq!(key, same_name_key(name));
+        let null: Option<String> = conn
+            .query_row("SELECT photo_name_key(NULL)", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(null, None);
+    }
+
+    #[test]
+    fn names_written_with_other_characters_for_the_same_letters_share_a_key() {
+        for (one, other) in [
+            ("cafe\u{301}.jpg", "CAF\u{C9}.JPG"), // combining acute, precomposed capital
+            ("CAFE\u{301}.jpg", "caf\u{E9}.jpg"), // and the other way round
+            ("\u{212B}ngstr\u{F6}m", "\u{C5}NGSTRO\u{308}M"), // Angstrom sign, A with ring
+            ("a\u{323}\u{302}", "\u{1EAD}"),      // two accents in either order
+            ("a\u{302}\u{323}", "\u{1EAC}"),
+            ("Straße.tif", "STRASSE.TIF"),
+            ("IMG_0001.JPG", "img_0001.jpg"),
+        ] {
+            assert_eq!(
+                same_name_key(one),
+                same_name_key(other),
+                "{one:?} and {other:?}"
+            );
+        }
+        for (one, other) in [
+            ("cafe.jpg", "caf\u{E9}.jpg"),
+            ("e\u{301}", "e\u{300}"),
+            ("IMG_1.jpg", "IMG_01.jpg"),
+        ] {
+            assert_ne!(
+                same_name_key(one),
+                same_name_key(other),
+                "{one:?} and {other:?}"
+            );
+        }
+        assert_eq!(
+            same_name_key("cafe\u{301}"),
+            "caf\u{E9}",
+            "composed, then folded"
+        );
     }
 }
