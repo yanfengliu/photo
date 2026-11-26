@@ -23,9 +23,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use same_file::Handle;
-
 use super::disk::{Disk, Step};
+use super::held::Held;
 use crate::naming::occupied;
 
 /// Distinguishes the hidden names made by one process.
@@ -117,11 +116,13 @@ fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     };
-    // The open handle is how this file is told from any other that comes
-    // to have its name.
-    let mut created = Handle::from_file(created)?;
-    let filled = fill(disk, from, created.as_file_mut());
-    let still_here = Handle::from_path(to).is_ok_and(|now| now == created);
+    // The open file is how this file is told from any other that comes to
+    // have its name. Its identity is read when it is compared, not noted
+    // here: on FAT and exFAT, the very file systems this is for, a file's
+    // identity changes with its first bytes.
+    let mut created = Held::keep(created)?;
+    let filled = fill(disk, from, created.file());
+    let still_here = created.is_at(to);
     match filled {
         Ok(()) if still_here => {
             drop(created);
@@ -209,11 +210,10 @@ fn fill(disk: &mut dyn Disk, from: &Path, into: &mut File) -> io::Result<()> {
 /// that what is examined is exactly what had it: if that is the file
 /// `created`, it is removed; if another program put its own file there in
 /// between, that file is put back untouched.
-fn give_back(disk: &mut dyn Disk, to: &Path, created: Handle) {
+fn give_back(disk: &mut dyn Disk, to: &Path, created: Held) {
     disk.reached(Step::GiveBack);
-    let is_created = |path: &Path| Handle::from_path(path).is_ok_and(|file| file == created);
     // Looked at first, so that another program's file is not even moved.
-    if !is_created(to) {
+    if !created.is_at(to) {
         return;
     }
     let aside = hidden_name(folder_of(to), "discard");
@@ -221,7 +221,7 @@ fn give_back(disk: &mut dyn Disk, to: &Path, created: Handle) {
         log::warn!("cannot remove the unfinished {}: {error}", to.display());
         return;
     }
-    let ours = is_created(&aside);
+    let ours = created.is_at(&aside);
     drop(created);
     if ours {
         if let Err(error) = fs::remove_file(&aside) {

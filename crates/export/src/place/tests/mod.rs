@@ -8,6 +8,14 @@
 //! repeats a scene with the intruder acting before each step in turn, so a
 //! property is shown for every interleaving of one such act, not for one
 //! chosen order.
+//!
+//! The temporary folders are where `TMPDIR` says. A stand-in can take a
+//! move away from the real file system but cannot give it one, and it
+//! cannot change how the real file system numbers its files, so the tests
+//! are worth running on a FAT and an exFAT volume as well (measured under
+//! macOS: neither move, and a file's identity changes with its first
+//! bytes): `TMPDIR=/Volumes/<name> cargo test -p photo-export`. There only
+//! the kinds the volume can stage are run ([`kinds`]).
 
 mod no_replace;
 mod overwrite;
@@ -15,12 +23,13 @@ mod overwrite;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use same_file::Handle;
 use tempfile::TempDir;
 
 use super::disk::{self, Disk, Step};
 use super::guard::{Guard, Guarded};
+use super::held::Held;
 use super::{Placed, TempFile};
 use crate::item::ExportError;
 use crate::naming::NamePlan;
@@ -39,12 +48,45 @@ enum Kind {
     Neither,
 }
 
-const KINDS: [Kind; 4] = [
-    Kind::Both,
-    Kind::LinksOnly,
-    Kind::ExclusiveOnly,
-    Kind::Neither,
-];
+/// Which moves that cannot replace the volume the tests run on really has.
+#[derive(Clone, Copy, Debug)]
+struct Volume {
+    links: bool,
+    exclusive: bool,
+}
+
+/// What the volume under the temporary folders has, tried once.
+fn volume() -> Volume {
+    static VOLUME: OnceLock<Volume> = OnceLock::new();
+    *VOLUME.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        fs::write(&from, b"probe").unwrap();
+        Volume {
+            links: fs::hard_link(&from, dir.path().join("linked")).is_ok(),
+            exclusive: disk::rename_exclusive(&from, &dir.path().join("renamed")).is_ok(),
+        }
+    })
+}
+
+/// The kinds of file system that can be staged on this volume: every kind
+/// whose moves the volume really has.
+fn kinds() -> Vec<Kind> {
+    let volume = volume();
+    let staged = |kind: &Kind| match kind {
+        Kind::Both => volume.links && volume.exclusive,
+        Kind::LinksOnly => volume.links,
+        Kind::ExclusiveOnly => volume.exclusive,
+        Kind::Neither => true,
+    };
+    let all = [
+        Kind::Both,
+        Kind::LinksOnly,
+        Kind::ExclusiveOnly,
+        Kind::Neither,
+    ];
+    all.into_iter().filter(staged).collect()
+}
 
 /// The real file system as a file system of `kind` would behave, calling
 /// `intruder` with each step's number and name just before the step.
@@ -101,12 +143,15 @@ impl Folder {
         fs::read(self.at(name)).ok()
     }
 
-    /// Every name in the folder, sorted.
+    /// Every name in the folder, sorted. The `._name` companions that macOS
+    /// keeps beside files on a volume without extended attributes are its
+    /// own business and are left out.
     fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.0.path())
             .unwrap()
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with("._"))
             .collect();
         names.sort();
         names
@@ -182,7 +227,7 @@ fn nothing_guarded(folder: &Folder) -> Guarded {
 /// own fresh folder, checks its own outcome and returns the number of steps
 /// its placement went through.
 fn at_every_step(mut scene: impl FnMut(Kind, Option<usize>) -> usize) {
-    for kind in KINDS {
+    for kind in kinds() {
         assert!(scene(kind, None) > 0, "{kind:?}: no step was reached");
         let mut when = 0;
         while when < scene(kind, Some(when)) {
@@ -193,7 +238,7 @@ fn at_every_step(mut scene: impl FnMut(Kind, Option<usize>) -> usize) {
 
 /// True when the two paths lead to one file.
 fn same_file(a: &Path, b: &Path) -> bool {
-    Handle::from_path(a).unwrap() == Handle::from_path(b).unwrap()
+    Held::open(a).unwrap().is_at(b)
 }
 
 #[test]
@@ -205,17 +250,28 @@ fn the_guard_knows_a_file_by_identity_not_by_bytes_or_name() {
     assert_eq!(guarded.guards(&original).unwrap(), Some(Guard::Source));
     assert_eq!(guarded.guards(&other).unwrap(), None);
     assert_eq!(guarded.guards(&folder.at("absent.tif")).unwrap(), None);
-    fs::hard_link(&original, folder.at("link.tif")).unwrap();
-    assert_eq!(
-        guarded.guards(&folder.at("link.tif")).unwrap(),
-        Some(Guard::Source)
-    );
+    if volume().links {
+        fs::hard_link(&original, folder.at("link.tif")).unwrap();
+        assert_eq!(
+            guarded.guards(&folder.at("link.tif")).unwrap(),
+            Some(Guard::Source)
+        );
+    }
     // Moved: its old name no longer leads to it, its identity still does.
     fs::rename(&original, folder.at("moved.tif")).unwrap();
     assert_eq!(
         guarded.guards(&folder.at("moved.tif")).unwrap(),
         Some(Guard::Source)
     );
+    // Cut to nothing, written again and moved once more. On exFAT that
+    // gives the file another number; it is the original all the same.
+    fs::write(folder.at("moved.tif"), b"written again").unwrap();
+    fs::rename(folder.at("moved.tif"), folder.at("again.tif")).unwrap();
+    assert_eq!(
+        guarded.guards(&folder.at("again.tif")).unwrap(),
+        Some(Guard::Source)
+    );
+    assert_eq!(guarded.guards(&other).unwrap(), None);
     // A path that led nowhere at the start is looked up again.
     let late = Guarded::capture(&folder.at("late.tif"), std::slice::from_ref(&other));
     assert_eq!(late.guards(&other).unwrap(), Some(Guard::Protected));

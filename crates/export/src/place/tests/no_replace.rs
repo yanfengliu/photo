@@ -5,9 +5,11 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
-use super::{Folder, Staged, at_every_step, nothing_guarded, same_file};
+use super::{Folder, Staged, at_every_step, kinds, nothing_guarded};
+use crate::item::ExportError;
 use crate::place::disk::Step;
-use crate::place::{Placed, TempFile};
+use crate::place::held::Held;
+use crate::place::{Placed, TempFile, UNIQUE_TRIES};
 use crate::settings::ExistingFile;
 
 const POLICIES: [ExistingFile; 2] = [ExistingFile::Skip, ExistingFile::UniqueName];
@@ -112,13 +114,16 @@ fn a_failure_gives_back_only_what_the_export_created() {
                 let folder = Folder::new();
                 let name = folder.at("x.jpg");
                 let mut acted = false;
+                // Their file, kept open: that is how it is told afterwards
+                // from the empty file the export creates.
+                let mut theirs = None;
                 let (result, steps) =
                     folder.place_with(kind, policy, &nothing_guarded(&folder), when, &mut || {
                         acted = true;
                         if with_their_file {
-                            let theirs = folder.put("theirs.tmp", b"");
-                            fs::hard_link(&theirs, folder.at("theirs.link")).unwrap();
-                            fs::rename(theirs, &name).unwrap();
+                            let file = folder.put("theirs.tmp", b"");
+                            theirs = Some(Held::open(&file).unwrap());
+                            fs::rename(file, &name).unwrap();
                         }
                         if let Some(finished) = folder.temporary() {
                             fs::remove_file(finished).unwrap();
@@ -127,9 +132,9 @@ fn a_failure_gives_back_only_what_the_export_created() {
                 let context = format!(
                     "{policy:?} on {kind:?}, failing before step {when:?}, their file: {with_their_file}"
                 );
-                if with_their_file && acted {
+                if let Some(theirs) = &theirs {
                     assert!(
-                        folder.at("x.jpg").exists() && same_file(&name, &folder.at("theirs.link")),
+                        theirs.is_at(&name),
                         "{context}: their file is gone: {:?}",
                         folder.names()
                     );
@@ -146,6 +151,40 @@ fn a_failure_gives_back_only_what_the_export_created() {
                 );
                 steps.len()
             });
+        }
+    }
+}
+
+/// Another program takes every name the export goes for, just before the
+/// export can have it. The export gives up after a bounded number of names
+/// instead of going on without end, and every one of their files is intact.
+#[test]
+fn after_too_many_taken_names_the_unique_name_policy_gives_up() {
+    for kind in kinds() {
+        let folder = Folder::new();
+        let mut taken = 0;
+        let mut intruder = |_: usize, step: Step| {
+            // Each try starts here: they take the name it is about to go
+            // for. They stop a little after the export should have.
+            if step == Step::Link && taken < UNIQUE_TRIES + 5 {
+                taken += 1;
+                let name = match taken {
+                    1 => "x.jpg".to_string(),
+                    number => format!("x-{number}.jpg"),
+                };
+                folder.put(&name, b"theirs");
+            }
+        };
+        let guarded = nothing_guarded(&folder);
+        let (result, _) = folder.place(kind, ExistingFile::UniqueName, &guarded, &mut intruder);
+        assert!(
+            matches!(result, Err(ExportError::Io { .. })),
+            "{kind:?}: {result:?}"
+        );
+        let names = folder.names();
+        assert_eq!(names.len() as u32, UNIQUE_TRIES, "{kind:?}: {names:?}");
+        for name in &names {
+            assert_eq!(folder.read(name).unwrap(), b"theirs", "{kind:?}: {name}");
         }
     }
 }

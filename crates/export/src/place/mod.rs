@@ -8,14 +8,18 @@
 //!   did not create. The name is taken by an operation that cannot replace
 //!   (see [`moves`]).
 //! - The overwrite policy replaces what has the name, but never the
-//!   original photo or a protected file: what has the name is moved aside
-//!   and identified before the export takes its place (see [`overwrite`]).
+//!   original photo or a protected file: one that is seen to have the name
+//!   is refused where it is, and what has the name is moved aside and
+//!   identified before the export takes its place (see [`overwrite`]).
 //! - A failure leaves nothing of the export behind and nothing of anyone
-//!   else's missing.
+//!   else's missing: a file that was moved aside is put back, without
+//!   replacing anything, under its name or a visible name beside it.
 //!
 //! One thing is out of scope: another program writing to this export's own
 //! hidden names, `.photo-export-<process>-<number>.<role>` in the
-//! destination folder.
+//! destination folder. The crate documentation lists what else is not
+//! guaranteed, among it the few cases in which a file cannot be put back
+//! and stays, whole, under its hidden name.
 //!
 //! # What a crash leaves on disk
 //!
@@ -31,11 +35,21 @@
 //! | overwrite: after what had the name is moved aside, before the export has the name | what had the name, whole, under `….previous`; the finished `….part`; nothing under the final name |
 //! | overwrite: after the export has the name, before the old file is removed | the export under its final name; the old file under `….previous` |
 //!
-//! The fifth row is also where an original or protected file is for the
-//! instant between being moved aside and being put back.
+//! The fifth row is also where an original or protected file is between
+//! being moved aside and being put back, which happens only to one that
+//! takes the name in the instant after the export's look at it. A file
+//! that is being put back goes through the second, third or fourth row
+//! with `….previous` in the place of `….part`; a copy that failed is under
+//! `….discard` for the instant before it is removed.
+//!
+//! All of this is about the process stopping. Against power loss only the
+//! copy of the fourth row is synced, before the file it was made from is
+//! removed; an export that takes its name by a hard link or an exclusive
+//! rename is not synced first.
 
 mod disk;
 mod guard;
+mod held;
 mod moves;
 mod overwrite;
 
@@ -53,6 +67,12 @@ use self::moves::{hidden_name, move_new};
 use crate::item::ExportError;
 use crate::naming::NamePlan;
 use crate::settings::ExistingFile;
+
+/// How many names in a row the unique-name policy goes for and finds taken
+/// in the instant before it could have them, before it gives up. Losing
+/// once takes another program acting at that very moment; a run this long
+/// means something is wrong, and going on would write without end.
+pub(crate) const UNIQUE_TRIES: u32 = 100;
 
 /// A file under a hidden temporary name, removed when dropped unless it has
 /// been placed.
@@ -138,10 +158,17 @@ impl TempFile {
             }
             ExistingFile::UniqueName => {
                 let mut number = first;
+                let mut lost = 0;
                 loop {
                     let target = plan.candidate(number);
                     if take(disk, &self.path, &target)? {
                         break target;
+                    }
+                    lost += 1;
+                    if lost >= UNIQUE_TRIES {
+                        let error =
+                            io::Error::other("other files kept taking the names of the export");
+                        return Err(ExportError::io(&target, error));
                     }
                     number = plan.first_free(number + 1);
                 }

@@ -1,7 +1,8 @@
 //! The files an export must never replace: the original photo and the
-//! files its caller protects, recognised by file identity (device and
-//! inode on Unix, volume serial number and file index on Windows) rather
-//! than by name.
+//! files its caller protects, recognised by file identity rather than by
+//! name. Each is kept open ([`Held`]) and its identity read afresh at every
+//! comparison, because on FAT and exFAT a file's identity changes over its
+//! life.
 //!
 //! A guarded path is looked up three times, because a path can stop or
 //! start leading to its file while an export runs:
@@ -23,8 +24,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use same_file::Handle;
-
+use super::held::Held;
 use super::moves::folder_of;
 use crate::item::ExportError;
 
@@ -48,33 +48,41 @@ impl Guard {
 }
 
 /// One guarded file: the path it was named by and, when that path led to a
-/// file as the export started, that file.
+/// file as the export started, that file, kept open.
 struct Kept {
     guard: Guard,
     path: PathBuf,
-    at_start: Option<Handle>,
+    at_start: Option<Held>,
 }
 
 impl Kept {
     /// True when `file` is the file this path led to at the start, or the
-    /// file it leads to now.
-    fn is(&self, file: &Handle) -> bool {
-        self.at_start.as_ref() == Some(file)
-            || Handle::from_path(&self.path).is_ok_and(|now| now == *file)
+    /// file it leads to now. A path that cannot be opened now leads to
+    /// nothing that could be compared.
+    fn is(&self, file: &Held) -> io::Result<bool> {
+        if let Some(start) = &self.at_start
+            && start.is(file)?
+        {
+            return Ok(true);
+        }
+        match Held::open(&self.path) {
+            Ok(now) => now.is(file),
+            Err(_) => Ok(false),
+        }
     }
 }
 
 /// The original photo and the protected files of one export, as they were
-/// when it started. Their handles stay open for the whole export, which
-/// keeps the identities valid on Windows; they are opened for reading and
-/// shared, so the files can still be read, moved or renamed meanwhile.
+/// when it started. They stay open for the whole export, so that each can
+/// be recognised wherever it has been moved; they are opened for reading
+/// and shared, so the files can still be read, moved or renamed meanwhile.
 pub(crate) struct Guarded {
     files: Vec<Kept>,
 }
 
-/// What the guarded paths led to at one moment, held open so that the
-/// identities can still be compared after a file has been moved.
-pub(crate) struct Sighting(Vec<Option<Handle>>);
+/// What the guarded paths led to at one moment, kept open so that it can
+/// still be recognised after a file has been moved.
+pub(crate) struct Sighting(Vec<Option<Held>>);
 
 impl Guarded {
     /// The files `source` and `protected` lead to now. A path that leads to
@@ -84,7 +92,7 @@ impl Guarded {
         let kept = |guard, path: &Path| Kept {
             guard,
             path: path.to_path_buf(),
-            at_start: Handle::from_path(path).ok(),
+            at_start: Held::open(path).ok(),
         };
         let mut files = vec![kept(Guard::Source, source)];
         files.extend(protected.iter().map(|path| kept(Guard::Protected, path)));
@@ -97,24 +105,25 @@ impl Guarded {
     /// guarded by nothing. An error means the file is there but its
     /// identity cannot be read, so nothing should replace it unverified.
     pub(crate) fn guards(&self, path: &Path) -> io::Result<Option<Guard>> {
-        let file = match Handle::from_path(path) {
+        let file = match Held::open(path) {
             Ok(file) => file,
             // Nothing has the name, or a symbolic link that leads nowhere.
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        Ok(self
-            .files
-            .iter()
-            .find(|kept| kept.is(&file))
-            .map(|kept| kept.guard))
+        for kept in &self.files {
+            if kept.is(&file)? {
+                return Ok(Some(kept.guard));
+            }
+        }
+        Ok(None)
     }
 
     /// What every guarded path leads to right now. Taken just before the
     /// holder of a name is moved aside, while a guarded path that names it
     /// can still lead to it.
     pub(crate) fn look(&self) -> Sighting {
-        let seen = |kept: &Kept| Handle::from_path(&kept.path).ok();
+        let seen = |kept: &Kept| Held::open(&kept.path).ok();
         Sighting(self.files.iter().map(seen).collect())
     }
 
@@ -139,19 +148,28 @@ impl Guarded {
                 "a folder has the name of the export",
             ));
         }
-        let file = match Handle::from_path(aside) {
+        let file = match Held::open(aside) {
             Ok(file) => Some(file),
             // A symbolic link that leads nowhere.
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        let guarded = self.files.iter().zip(&seen.0).find(|(kept, seen)| {
-            let same = file
-                .as_ref()
-                .is_some_and(|file| seen.as_ref() == Some(file) || kept.is(file));
-            same || names_entry(&kept.path, name)
-        });
-        Ok(guarded.map(|(kept, _)| kept.guard))
+        for (kept, seen) in self.files.iter().zip(&seen.0) {
+            if let Some(file) = &file {
+                if let Some(seen) = seen
+                    && seen.is(file)?
+                {
+                    return Ok(Some(kept.guard));
+                }
+                if kept.is(file)? {
+                    return Ok(Some(kept.guard));
+                }
+            }
+            if names_entry(&kept.path, name) {
+                return Ok(Some(kept.guard));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -164,8 +182,9 @@ fn names_entry(path: &Path, name: &Path) -> bool {
         path.file_name()
             .map(|name| name.to_string_lossy().to_lowercase())
     };
-    let folder = |path: &Path| Handle::from_path(folder_of(path)).ok();
+    let folder = |path: &Path| Held::open(folder_of(path)).ok();
+    // Two folders that are there but cannot be compared might be one.
     lower(path).is_some()
         && lower(path) == lower(name)
-        && folder(path).is_some_and(|a| folder(name).is_some_and(|b| a == b))
+        && folder(path).is_some_and(|a| folder(name).is_some_and(|b| a.is(&b).unwrap_or(true)))
 }

@@ -6,13 +6,12 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 
-use same_file::Handle;
-
-use super::{Folder, KINDS, Kind, at_every_step, same_file};
+use super::{Folder, Kind, at_every_step, kinds, same_file, volume};
 use crate::item::ExportError;
 use crate::place::Placed;
 use crate::place::disk::Step;
 use crate::place::guard::{Guard, Guarded};
+use crate::place::held::Held;
 use crate::place::overwrite::ROUNDS;
 use crate::settings::ExistingFile::Overwrite;
 
@@ -36,7 +35,7 @@ fn holding(folder: &Folder, bytes: &[u8]) -> Vec<String> {
 
 #[test]
 fn undisturbed_the_export_replaces_what_had_the_name() {
-    for kind in KINDS {
+    for kind in kinds() {
         let (folder, guarded) = scene();
         let (result, steps) = folder.place(kind, Overwrite, &guarded, &mut |_, _| {});
         assert_eq!(result.unwrap(), Placed::At(folder.at("x.jpg")), "{kind:?}");
@@ -58,10 +57,13 @@ enum Arrival {
 }
 
 impl Arrival {
-    /// The ways this platform has (making a symbolic link needs a
-    /// privilege on Windows).
+    /// The ways this platform and this volume have (making a symbolic link
+    /// needs a privilege on Windows; FAT and exFAT have no hard links).
     fn all() -> Vec<Self> {
-        let mut all = vec![Self::Moved, Self::HardLink];
+        let mut all = vec![Self::Moved];
+        if volume().links {
+            all.push(Self::HardLink);
+        }
         if cfg!(unix) {
             all.push(Self::SymbolicLink);
         }
@@ -187,7 +189,7 @@ fn a_new_file_at_the_name_is_identified_before_the_export_takes_its_place() {
 /// At no step is the previous file gone before the export has the name.
 #[test]
 fn what_was_moved_aside_is_removed_only_once_the_export_has_the_name() {
-    for kind in KINDS {
+    for kind in kinds() {
         let (folder, guarded) = scene();
         let mut discarding = false;
         let mut intruder = |index: usize, step: Step| {
@@ -218,11 +220,11 @@ fn what_was_moved_aside_is_removed_only_once_the_export_has_the_name() {
 /// could only be put back as a copy, it is still the very same file.
 #[test]
 fn a_guarded_file_that_has_the_name_is_refused_where_it_is() {
-    for kind in KINDS {
+    for kind in kinds() {
         for arrival in Arrival::all() {
             let (folder, guarded) = scene();
             let name = folder.at("x.jpg");
-            let before = Handle::from_path(folder.at("p.tif")).unwrap();
+            let before = Held::open(&folder.at("p.tif")).unwrap();
             arrival.arrive(&folder, "p.tif");
             let (result, steps) = folder.place(kind, Overwrite, &guarded, &mut |_, _| {});
             let context = format!("{kind:?}, {arrival:?}");
@@ -231,10 +233,7 @@ fn a_guarded_file_that_has_the_name_is_refused_where_it_is() {
                 "{context}: {result:?}"
             );
             assert!(!steps.contains(&Step::SetAside), "{context}: {steps:?}");
-            assert!(
-                Handle::from_path(&name).unwrap() == before,
-                "{context}: another file has the name"
-            );
+            assert!(before.is_at(&name), "{context}: another file has the name");
             let link = fs::symlink_metadata(&name).unwrap().is_symlink();
             assert_eq!(link, arrival == Arrival::SymbolicLink, "{context}");
             assert_eq!(folder.read("x.jpg").unwrap(), b"protected", "{context}");
@@ -253,7 +252,7 @@ fn a_guarded_file_that_has_the_name_is_refused_where_it_is() {
 /// the other program's file is left alone.
 #[test]
 fn a_guarded_file_whose_name_is_taken_again_gets_a_visible_name_beside_it() {
-    for kind in KINDS {
+    for kind in kinds() {
         let (folder, guarded) = scene();
         let name = folder.at("x.jpg");
         let mut intruder = |_: usize, step: Step| match step {
@@ -283,7 +282,7 @@ fn a_guarded_file_whose_name_is_taken_again_gets_a_visible_name_beside_it() {
 
 #[test]
 fn a_folder_with_the_name_is_never_moved_or_replaced() {
-    for kind in KINDS {
+    for kind in kinds() {
         let (folder, guarded) = scene();
         let name = folder.at("x.jpg");
         fs::remove_file(&name).unwrap();
@@ -306,7 +305,7 @@ fn a_folder_with_the_name_is_never_moved_or_replaced() {
 #[test]
 fn a_file_that_cannot_be_identified_is_refused_where_it_is() {
     use std::os::unix::fs::PermissionsExt;
-    for kind in KINDS {
+    for kind in kinds() {
         let (folder, guarded) = scene();
         let name = folder.at("x.jpg");
         fs::set_permissions(&name, fs::Permissions::from_mode(0o000)).unwrap();
@@ -334,7 +333,7 @@ fn a_file_that_cannot_be_identified_is_refused_where_it_is() {
 /// error gives.
 #[test]
 fn a_folder_that_takes_the_name_at_the_last_instant_is_kept_whole() {
-    for kind in KINDS {
+    for kind in kinds() {
         let (folder, guarded) = scene();
         let name = folder.at("x.jpg");
         let mut intruder = |_: usize, step: Step| {
@@ -368,7 +367,7 @@ fn a_folder_that_takes_the_name_at_the_last_instant_is_kept_whole() {
 /// the previous file under visible names beside it.
 #[test]
 fn after_too_many_new_files_the_export_gives_up_and_everything_is_back() {
-    for kind in KINDS {
+    for kind in kinds() {
         let (folder, guarded) = scene();
         let name = folder.at("x.jpg");
         let mut arrivals = 0;
