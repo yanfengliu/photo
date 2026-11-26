@@ -51,10 +51,10 @@ Releases follow what a user can see: 0.3.0 was the foundation, the next bump is 
 - [x] `photo-develop`: the pipeline over `photo-color` and `photo-imaging`, with its contracts and a rendered tuning grid (2026-11-20; the recovery recipe's top-stop re-clipping is an open tuning item).
 - [x] `photo-engine`, Library side: catalog session, import, previews, selection, undoable attributes, collections, keywords, sidecars (2026-11-20).
 - [x] Independent review of the catalog and sidecars, rounds 0 and 1, and their repairs ([reviews](reviews/)).
-- [ ] `photo-export`, and the engine's Develop side: edit session, render worker, history, snapshots, presets, copy and paste, export jobs. Built; reviewed in rounds 2 and 3; round 3's repairs are with the two builders (2026-11-25).
+- [x] `photo-export`, and the engine's Develop side: edit session, render worker, history, snapshots, presets, copy and paste, export jobs. Reviewed in rounds 2 to 4 (2026-11-26).
 - [x] Library module: shell, grid, loupe, compare, survey, panels, filter bar, filmstrip, import dialog. Version 0.3.1 (2026-11-20).
-- [ ] Develop module: canvas, every panel, crop, healing and masking tools, before and after, export dialog. Version 0.3.2.
-- [ ] Integration: `src/main.rs`, storage-root discovery, `photo --harness` and `harnessctl`, end-to-end run, performance check.
+- [x] Develop module: canvas, every panel, crop, healing and masking tools, before and after, export dialog. Version 0.3.2 (2026-11-26).
+- [ ] Integration: `src/main.rs`, storage-root discovery, `photo --harness` and `harnessctl`, end-to-end run, performance check. All but the performance check are done; the end-to-end run used synthetic photos only (devlog, 2026-11-25).
 - [ ] Independent review of the whole, repairs, and a documentation pass.
 
 ## Outcome
