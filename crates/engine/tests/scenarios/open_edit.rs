@@ -4,9 +4,10 @@
 //! as it is, in progress.
 
 use photo_core::develop::Adj;
-use photo_core::meta::{PhotoId, Rating};
+use photo_core::meta::{FileKind, PhotoId, Rating};
 use photo_engine::Target;
 use photo_testkit::TempLibrary;
+use photo_xmp::ImageInfo;
 
 use crate::common::{Studio, open_rendered};
 
@@ -230,4 +231,93 @@ fn redoing_the_removal_of_the_photo_being_edited_keeps_the_photo_and_the_edit() 
     );
     assert!(!redone);
     assert_eq!(saved_exposure(&studio, dawn), 0.8, "and the edit is kept");
+}
+
+/// Give dawn a sidecar that says its contrast is 30 and nothing else of
+/// its develop settings differs from what the catalog holds.
+fn sidecar_with_contrast(studio: &mut Studio, dawn: PhotoId) {
+    let info = ImageInfo::new(FileKind::Raster).with_size(96, 64);
+    studio
+        .engine
+        .save_metadata_to_files(Target::Photos(vec![dawn]))
+        .unwrap();
+    studio.settle();
+    let path = studio.engine.photo(dawn).unwrap().path;
+    let sidecar = photo_xmp::sidecar_path(&path, FileKind::Raster);
+    let mut data = photo_xmp::read_sidecar(&sidecar, info).unwrap().unwrap();
+    let mut settings = data.develop.clone().unwrap();
+    settings.tone.contrast = 30.0;
+    data.develop = Some(settings);
+    photo_xmp::write_sidecar(&sidecar, &data, info).unwrap();
+}
+
+#[test]
+fn reading_metadata_from_its_file_keeps_the_edit_still_open_on_the_photo() {
+    let (_library, mut studio) = studio();
+    let dawn = studio.id("dawn.jpg");
+    sidecar_with_contrast(&mut studio, dawn);
+    edit_in_progress(&mut studio, dawn);
+
+    studio
+        .engine
+        .read_metadata_from_files(Target::Photos(vec![dawn]))
+        .unwrap();
+    studio.settle();
+    assert_eq!(shown(&studio), (30.0, 0.0), "the photo is as its file says");
+
+    assert!(studio.engine.undo().unwrap());
+    assert_eq!(
+        shown(&studio),
+        (0.0, 0.8),
+        "and the edit that was open is there to go back to"
+    );
+}
+
+#[test]
+fn reading_metadata_from_other_files_leaves_an_edit_in_progress_alone() {
+    let (_library, mut studio) = studio();
+    let (dawn, lake) = (studio.id("dawn.jpg"), studio.id("lake.png"));
+    sidecar_with_contrast(&mut studio, dawn);
+    edit_in_progress(&mut studio, lake);
+    let before = steps(&studio, lake);
+
+    studio
+        .engine
+        .read_metadata_from_files(Target::Photos(vec![dawn]))
+        .unwrap();
+    studio.settle();
+    assert_eq!(
+        studio.engine.develop_settings(dawn).unwrap().tone.contrast,
+        30.0
+    );
+    let session = studio.engine.develop().unwrap();
+    assert!(session.is_editing(), "the edit is still in progress");
+    assert_eq!(session.settings().tone.exposure, 0.8);
+    assert_eq!(saved_exposure(&studio, lake), 0.0, "and not committed");
+    assert_eq!(steps(&studio, lake), before);
+}
+
+#[test]
+fn reading_a_file_that_replaces_no_settings_leaves_the_edit_on_its_photo_in_progress() {
+    let (_library, mut studio) = studio();
+    let dawn = studio.id("dawn.jpg");
+    // The sidecar holds the settings the catalog holds.
+    studio
+        .engine
+        .save_metadata_to_files(Target::Photos(vec![dawn]))
+        .unwrap();
+    studio.settle();
+    edit_in_progress(&mut studio, dawn);
+    let before = steps(&studio, dawn);
+
+    studio
+        .engine
+        .read_metadata_from_files(Target::Photos(vec![dawn]))
+        .unwrap();
+    studio.settle();
+    let session = studio.engine.develop().unwrap();
+    assert!(session.is_editing(), "the edit is still in progress");
+    assert_eq!(session.settings().tone.exposure, 0.8);
+    assert_eq!(saved_exposure(&studio, dawn), 0.0, "and not committed");
+    assert_eq!(steps(&studio, dawn), before);
 }

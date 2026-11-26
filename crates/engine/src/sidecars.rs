@@ -322,9 +322,27 @@ impl Engine {
     }
 
     /// Lay what the sidecars said over the photos, as one undoable step.
+    ///
+    /// A sidecar whose develop settings differ from the photo's replaces
+    /// them. When that photo is open in Develop with an edit not yet
+    /// committed, the edit is committed first, so that it is a step to go
+    /// back to and not gone under the sidecar's settings. An edit of a
+    /// photo whose settings no sidecar replaces is left open.
     fn apply_sidecars(&mut self, found: Vec<(PhotoId, XmpData)>) -> Result<(), EngineError> {
         if found.is_empty() {
             return Ok(());
+        }
+        let editing = self
+            .develop
+            .as_ref()
+            .filter(|session| session.is_editing())
+            .map(|session| session.photo);
+        if let Some(open) = editing
+            && let Some((_, data)) = found.iter().find(|(photo, _)| *photo == open)
+            && let Some(read) = &data.develop
+            && *read != self.catalog.develop_settings(open)?
+        {
+            self.commit_edit()?;
         }
         let photos: Vec<PhotoId> = found.iter().map(|(photo, _)| *photo).collect();
         let records: HashMap<PhotoId, PhotoRecord> = self
