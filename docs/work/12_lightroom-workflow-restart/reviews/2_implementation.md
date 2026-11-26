@@ -88,8 +88,14 @@ Ids continue the work unit's sequence. The builders were sent these as E1 to E4 
 
 ## Verification
 
-Repairs were in progress when this record was written: the builders' partial work is in the snapshot commit `a214e70` on `restart`, which ran no gate. To be completed when the repairs land: each crate's four gates, the coordinator's reading of the data-safety repairs (F29, F30, F33, F39), and a check of the repairs by the Codex lane.
+The repairs landed on `restart` at `2ad1f00` on 2026-11-25: the fixes are in the snapshot commit `a214e70`, and `caf11b4`, `c52186d`, `8b9ef09`, `e304e5a` and `2ad1f00` add or sharpen tests.
+
+What the builders ran at that revision, as they reported it: `cargo test -p photo-export` (42 unit and 32 integration tests pass, 1 ignored), `cargo test -p photo-engine` (52 unit and 88 scenario tests pass, 3 ignored), `cargo test -p photo-catalog` (all pass), and clippy with `-D warnings` and the format check on those three crates, all clean. The workspace-wide format check failed then, only in `crates/ui`, which another builder was editing. The coordinator has not re-run these; the four gates run on the merged tree before it reaches `main`.
+
+The coordinator read the export placement code (`crates/export/src/place.rs`, `lib.rs`) and the engine's export guard (`crates/engine/src/export/guard.rs`, `job.rs`) at `2ad1f00`, and did not read F39's drop path.
+
+The Codex lane's check of the repairs is [review 3](3_implementation.md).
 
 ## Round outcome
 
-Open. Seventeen findings from one lane, all accepted, three of them rated high and all three about an export replacing a file it must not. The Claude lane abstained for lack of quota.
+Closed on 2026-11-25. Seventeen findings from one lane, all accepted, three of them rated high and all three about an export replacing a file it must not. The Claude lane abstained for lack of quota. All seventeen were repaired; review 3 found nine of the repairs complete and eight partial, and six new defects in the repairs, which continue there under the same ids.

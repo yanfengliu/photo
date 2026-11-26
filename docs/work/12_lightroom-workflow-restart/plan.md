@@ -3,7 +3,7 @@
 Status: active
 Owner: Coordinating Claude session of 2026-11-19
 Created: 2026-11-19
-Updated: 2026-11-20
+Updated: 2026-11-25
 
 ## Problem and outcome
 
@@ -16,6 +16,8 @@ The outcome is Photo: an original app that follows the Lightroom Classic workflo
 Included: the catalog (import, folders, collections, smart collections, keywords, ratings, flags, colour labels, virtual copies, filtering, sorting); Library views (grid, loupe, compare, survey); the Develop module (basic tone and presence, tone curve, colour mixer, colour grading, detail, lens, transform, effects, calibration, crop and straighten, healing spots, linear, radial and brush masks, before and after, history, snapshots, presets, copy, paste and sync); export to JPEG, PNG and TIFF with resizing, colour space, naming, sharpening and watermark; XMP sidecars; RAW decoding; the agent harness that `AGENTS.md` describes.
 
 Excluded, as [design.md](design.md) §1 lists: the Map, Book, Slideshow, Print and Web modules, tethering, cloud sync, AI masks, lens-profile databases, camera-matching profiles, HDR and panorama merge, content-aware remove, soft proofing, stacks, a second window and video.
+
+Deferred, each with the review finding that records it: carrying an unreadable-settings state in the catalog for a photo whose sidecar holds settings in a newer format (F40, to be designed with a second settings format; today the import names each such file and the sidecar keeps its own settings); and building the export guard off the engine's thread, so that starting an export cannot wait on storage that hangs (F47).
 
 Ownership: the coordinator owns `photo-core`, the root package, the docs, integration and acceptance. Each other crate has one builder at a time, working only inside that crate.
 
@@ -49,7 +51,7 @@ Releases follow what a user can see: 0.3.0 was the foundation, the next bump is 
 - [x] `photo-develop`: the pipeline over `photo-color` and `photo-imaging`, with its contracts and a rendered tuning grid (2026-11-20; the recovery recipe's top-stop re-clipping is an open tuning item).
 - [x] `photo-engine`, Library side: catalog session, import, previews, selection, undoable attributes, collections, keywords, sidecars (2026-11-20).
 - [x] Independent review of the catalog and sidecars, rounds 0 and 1, and their repairs ([reviews](reviews/)).
-- [ ] `photo-export`, and the engine's Develop side: edit session, render worker, history, snapshots, presets, copy and paste, export jobs.
+- [ ] `photo-export`, and the engine's Develop side: edit session, render worker, history, snapshots, presets, copy and paste, export jobs. Built; reviewed in rounds 2 and 3; round 3's repairs are with the two builders (2026-11-25).
 - [x] Library module: shell, grid, loupe, compare, survey, panels, filter bar, filmstrip, import dialog. Version 0.3.1 (2026-11-20).
 - [ ] Develop module: canvas, every panel, crop, healing and masking tools, before and after, export dialog. Version 0.3.2.
 - [ ] Integration: `src/main.rs`, storage-root discovery, `photo --harness` and `harnessctl`, end-to-end run, performance check.
