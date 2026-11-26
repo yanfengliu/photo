@@ -24,7 +24,7 @@ use photo_core::develop::DevelopSettings;
 use photo_core::meta::{FileKind, KeywordId, PhotoId};
 use photo_xmp::{ImageInfo, XmpData};
 
-use files::{Outcome, SaveOrder, issue, read_one, write_one};
+use files::{Outcome, SaveOrder, issue, read_one, save_one};
 
 use crate::commands::{Applied, Target};
 use crate::engine::{Engine, JobFailure};
@@ -92,11 +92,7 @@ impl Engine {
                 None,
                 Some(token.clone()),
                 move |_| {
-                    // A save a newer one of the same sidecar has overtaken
-                    // writes nothing: the newer one holds the newer values.
-                    let outcome = ticket
-                        .write(|| write_one(&sidecar, &data, info, note))
-                        .unwrap_or_else(Outcome::nothing);
+                    let outcome = save_one(&ticket, &sidecar, &data, info, note);
                     Box::new(move |engine: &mut Engine| engine.sidecar_done(task, outcome))
                 },
                 move |engine, failure| engine.sidecar_failed(task, failure),

@@ -57,6 +57,21 @@ impl Ticket {
     }
 }
 
+/// What a save job does with its place in the order: write the sidecar,
+/// unless a newer save of the same sidecar has overtaken this one, which
+/// then writes nothing (the newer one holds the newer values).
+pub(super) fn save_one(
+    ticket: &Ticket,
+    path: &Path,
+    data: &XmpData,
+    info: ImageInfo,
+    note: Option<FileIssue>,
+) -> Outcome {
+    ticket
+        .write(|| write_one(path, data, info, note))
+        .unwrap_or_else(Outcome::nothing)
+}
+
 /// What a worker did with one sidecar.
 pub(super) struct Outcome {
     pub(super) found: Option<(PhotoId, XmpData)>,
@@ -165,7 +180,34 @@ fn describe(error: &XmpError) -> String {
 
 #[cfg(test)]
 mod tests {
+    use photo_core::meta::{FileKind, Rating};
+
     use super::*;
+
+    #[test]
+    fn a_newer_save_that_finishes_first_is_not_overwritten_by_the_older_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("a.xmp");
+        let info = ImageInfo::new(FileKind::Raster).with_size(96, 64);
+        let rated = |stars| XmpData {
+            rating: Rating::new(stars),
+            ..XmpData::default()
+        };
+        let order = SaveOrder::default();
+        // Two saves of one photo, asked for in this order on the engine's
+        // thread...
+        let (older, newer) = (order.claim(&sidecar), order.claim(&sidecar));
+        // ...run as independent jobs, and the newer one's worker is first.
+        let first = save_one(&newer, &sidecar, &rated(5), info, None);
+        assert!(!first.failed && first.issue.is_none());
+        let late = save_one(&older, &sidecar, &rated(1), info, None);
+        assert!(
+            !late.failed && late.issue.is_none(),
+            "overtaken, not failed"
+        );
+        let kept = photo_xmp::read_sidecar(&sidecar, info).unwrap().unwrap();
+        assert_eq!(kept.rating, Rating::new(5), "the last save asked for");
+    }
 
     #[test]
     fn an_older_save_of_a_sidecar_never_lands_after_a_newer_one() {
