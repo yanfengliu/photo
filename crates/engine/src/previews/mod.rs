@@ -27,7 +27,8 @@
 //! photos; a photo whose file is missing still shows the last preview
 //! written for its current version. A preview served from memory has its
 //! source file looked at again now and then, on a worker (see `recheck`):
-//! a file replaced since gets a new preview.
+//! a file replaced since gets a new preview, and so does one that was away
+//! when the preview was loaded and has come back changed.
 
 mod disk;
 mod job;
@@ -49,8 +50,8 @@ pub use types::{LoadState, Preview, PreviewOrigin, PreviewSize, PreviewState};
 use crate::engine::{Engine, JobFailure};
 use crate::jobs::{JobKey, Lane};
 use crate::lru::Lru;
-use crate::stamp::Stamp;
 use job::{JobResult, PreviewJob, SourceSeen};
+use recheck::{Look, Watch};
 
 /// Bytes of thumbnail pixels kept in memory.
 const THUMBNAIL_MEMORY: usize = 192 << 20;
@@ -77,7 +78,11 @@ pub(crate) struct Previews {
     failed: HashMap<(PhotoId, PreviewSize), (u64, String, Instant)>,
     /// What the source file of each preview in memory looked like when the
     /// preview was made, and when it was last looked at.
-    stamps: HashMap<(PhotoId, PreviewSize), (Stamp, Instant)>,
+    stamps: HashMap<(PhotoId, PreviewSize), Watch>,
+    /// The source files to look at next: at most one entry per preview.
+    due: Vec<Look>,
+    /// A worker is out looking, or about to: one at a time.
+    looking: bool,
     /// How long a failure is believed.
     pub(crate) retry_after: Duration,
     /// How long a preview in memory is trusted.
@@ -95,6 +100,8 @@ impl Default for Previews {
             in_flight: HashMap::new(),
             failed: HashMap::new(),
             stamps: HashMap::new(),
+            due: Vec::new(),
+            looking: false,
             retry_after: RETRY_FAILED_AFTER,
             recheck_after: RECHECK_AFTER,
             candidates: Lru::new(CANDIDATE_MEMORY),
@@ -123,6 +130,12 @@ impl Previews {
     /// made.
     pub(crate) fn in_flight(&self) -> usize {
         self.in_flight.len() + self.candidates_in_flight.len()
+    }
+
+    /// How many source files are waiting for the next look.
+    #[cfg(test)]
+    pub(crate) fn looks_waiting(&self) -> usize {
+        self.due.len()
     }
 }
 

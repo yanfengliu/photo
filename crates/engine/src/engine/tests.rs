@@ -3,11 +3,12 @@
 
 mod imports;
 mod loading;
+mod rechecks;
 mod saves;
 
 use std::cell::RefCell;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
@@ -26,18 +27,23 @@ use crate::stamp::Stamp;
 
 const PATIENCE: Duration = Duration::from_secs(60);
 
-/// An engine on a new catalog with `files` imported in place.
-fn engine_with(files: &[PathBuf], workers: usize) -> (TempDir, Engine, Vec<PhotoId>) {
-    let dir = tempfile::tempdir().unwrap();
-    let catalog = dir.path().join("catalog");
+/// The engine of the catalog kept under `dir`, made if it is not there.
+fn open_in(dir: &Path, workers: usize) -> Engine {
+    let catalog = dir.join("catalog");
     fs::create_dir_all(&catalog).unwrap();
-    let mut engine = Engine::open(EngineConfig {
+    Engine::open(EngineConfig {
         catalog_path: catalog.join("library.photocat"),
         previews_dir: catalog.join("library.previews"),
         worker_threads: workers,
-        export_dir: dir.path().join("exports"),
+        export_dir: dir.join("exports"),
     })
-    .unwrap();
+    .unwrap()
+}
+
+/// An engine on a new catalog with `files` imported in place.
+fn engine_with(files: &[PathBuf], workers: usize) -> (TempDir, Engine, Vec<PhotoId>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = open_in(dir.path(), workers);
     let task = engine
         .start_import(ImportRequest {
             files: files.to_vec(),

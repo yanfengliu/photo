@@ -42,8 +42,9 @@ pub(crate) enum SourceSeen {
 pub(crate) struct JobResult {
     pub(crate) preview: Result<Preview, String>,
     pub(crate) source: SourceSeen,
-    /// The stamp of the source file the pixels answer to; `None` when the
-    /// file was not there to be read.
+    /// The stamp of the source file the pixels were made from: read by
+    /// this job, or, when the file was away, taken from the cache file the
+    /// pixels came from. Always there when there are pixels.
     pub(crate) stamp: Option<Stamp>,
 }
 
@@ -168,24 +169,30 @@ impl PreviewJob {
     }
 
     /// The source is gone: show the last preview written for this version,
-    /// if there is one. There is no file left to check it against.
+    /// if there is one. There is no file to check it against now; what the
+    /// cache file says it was made from is handed on, so that the source
+    /// can be checked against it when it is back.
     fn offline(&self, file: &Path) -> JobResult {
-        let preview = match disk::read(file) {
+        let (preview, stamp) = match disk::read(file) {
             Some((header, image)) if header.version == self.version && header.size == self.size => {
-                Ok(Preview::new(
+                let preview = Preview::new(
                     image,
                     self.version,
                     self.size,
                     header.origin,
                     header.histogram,
-                ))
+                );
+                (Ok(preview), Some(header.source))
             }
-            _ => Err(format!("the file is missing: {}", self.path.display())),
+            _ => (
+                Err(format!("the file is missing: {}", self.path.display())),
+                None,
+            ),
         };
         JobResult {
             preview,
             source: SourceSeen::Missing,
-            stamp: None,
+            stamp,
         }
     }
 }
