@@ -4,7 +4,7 @@
 //! as it is, in progress.
 
 use photo_core::develop::Adj;
-use photo_core::meta::PhotoId;
+use photo_core::meta::{PhotoId, Rating};
 use photo_engine::Target;
 use photo_testkit::TempLibrary;
 
@@ -109,4 +109,125 @@ fn removing_other_photos_leaves_an_edit_in_progress_alone() {
     assert!(studio.engine.commit_edit().unwrap());
     assert_eq!(saved_exposure(&studio, dawn), 0.8);
     assert_eq!(steps(&studio, dawn), before + 1);
+}
+
+/// The contrast and the exposure the photo open in Develop shows.
+fn shown(studio: &Studio) -> (f32, f32) {
+    let tone = studio.engine.develop().unwrap().settings().tone;
+    (tone.contrast, tone.exposure)
+}
+
+/// Dawn open in Develop with a contrast of 20 committed.
+fn dawn_with_a_committed_edit() -> (TempLibrary, Studio, PhotoId) {
+    let (library, mut studio) = studio();
+    let dawn = studio.id("dawn.jpg");
+    open_rendered(&mut studio, dawn, FIT);
+    studio.engine.adjust(Adj::Contrast, 20.0).unwrap();
+    assert!(studio.engine.commit_edit().unwrap());
+    (library, studio, dawn)
+}
+
+#[test]
+fn undo_takes_back_the_edit_that_is_still_open_and_redo_brings_it_back() {
+    let (_library, mut studio, dawn) = dawn_with_a_committed_edit();
+    studio.engine.adjust(Adj::Exposure, 0.8).unwrap();
+    assert!(studio.engine.develop().unwrap().is_editing());
+
+    assert!(studio.engine.undo().unwrap());
+    assert_eq!(
+        shown(&studio),
+        (20.0, 0.0),
+        "the most recent change is the open edit: that is what is taken back"
+    );
+    assert!(studio.engine.redo().unwrap());
+    assert_eq!(shown(&studio), (20.0, 0.8), "and it can be had back");
+    assert_eq!(saved_exposure(&studio, dawn), 0.8);
+}
+
+#[test]
+fn undoing_and_redoing_a_change_elsewhere_leaves_an_edit_in_progress_alone() {
+    let (_library, mut studio) = studio();
+    let (dawn, lake) = (studio.id("dawn.jpg"), studio.id("lake.png"));
+    let (unrated, rated) = (Rating::new(0), Rating::new(3));
+    studio
+        .engine
+        .set_rating(Target::Photos(vec![lake]), rated)
+        .unwrap();
+    edit_in_progress(&mut studio, dawn);
+    let before = steps(&studio, dawn);
+
+    assert!(studio.engine.undo().unwrap());
+    assert_eq!(studio.engine.summary(lake).unwrap().rating, unrated);
+    assert!(studio.engine.redo().unwrap());
+    assert_eq!(studio.engine.summary(lake).unwrap().rating, rated);
+    let session = studio.engine.develop().unwrap();
+    assert!(session.is_editing(), "the edit is still in progress");
+    assert_eq!(session.settings().tone.exposure, 0.8);
+    assert_eq!(saved_exposure(&studio, dawn), 0.0, "and not committed");
+    assert_eq!(steps(&studio, dawn), before);
+}
+
+#[test]
+fn undoing_the_making_of_a_virtual_copy_keeps_the_edit_still_open_on_the_copy() {
+    let (_library, mut studio) = studio();
+    let dawn = studio.id("dawn.jpg");
+    let copy = studio
+        .engine
+        .create_virtual_copies(Target::Photos(vec![dawn]))
+        .unwrap()[0];
+    edit_in_progress(&mut studio, copy);
+
+    // The undo would take the copy out of the catalog, and the edit with
+    // it. Committed first, the edit is what the undo takes back.
+    assert!(studio.engine.undo().unwrap());
+    assert!(studio.engine.summary(copy).is_some(), "the copy is there");
+    assert_eq!(shown(&studio).1, 0.0);
+    // The next undo takes the copy; two redos bring back both.
+    assert!(studio.engine.undo().unwrap());
+    assert!(studio.engine.summary(copy).is_none());
+    assert!(studio.engine.redo().unwrap());
+    assert!(studio.engine.redo().unwrap());
+    assert_eq!(saved_exposure(&studio, copy), 0.8, "nothing was lost");
+}
+
+#[test]
+fn redo_does_not_put_an_edit_that_is_still_open_under_what_it_redoes() {
+    let (_library, mut studio, dawn) = dawn_with_a_committed_edit();
+    assert!(studio.engine.undo().unwrap());
+    assert_eq!(shown(&studio), (0.0, 0.0));
+    // A new edit since the undo, still open.
+    studio.engine.adjust(Adj::Exposure, 0.8).unwrap();
+
+    let redone = studio.engine.redo().unwrap();
+    assert_eq!(
+        shown(&studio),
+        (0.0, 0.8),
+        "the edit is not lost under the contrast that could be redone"
+    );
+    assert!(
+        !redone,
+        "a change made since the undo ends what could be redone"
+    );
+    assert_eq!(saved_exposure(&studio, dawn), 0.8);
+}
+
+#[test]
+fn redoing_the_removal_of_the_photo_being_edited_keeps_the_photo_and_the_edit() {
+    let (_library, mut studio) = studio();
+    let dawn = studio.id("dawn.jpg");
+    studio
+        .engine
+        .remove_from_catalog(Target::Photos(vec![dawn]))
+        .unwrap();
+    assert!(studio.engine.undo().unwrap());
+    // The photo is back; it is opened and an edit begun.
+    edit_in_progress(&mut studio, dawn);
+
+    let redone = studio.engine.redo().unwrap();
+    assert!(
+        studio.engine.summary(dawn).is_some(),
+        "the photo is not removed again with an edit of it open"
+    );
+    assert!(!redone);
+    assert_eq!(saved_exposure(&studio, dawn), 0.8, "and the edit is kept");
 }

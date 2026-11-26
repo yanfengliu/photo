@@ -152,6 +152,32 @@ impl Command {
         }
     }
 
+    /// Whether undoing or redoing this command changes the develop settings
+    /// of `photo` or takes the photo out of the catalog: what puts other
+    /// settings in a develop session of the photo, or ends it.
+    pub(crate) fn reaches(&self, photo: PhotoId) -> bool {
+        match self {
+            Self::Develop(changes) => changes.iter().any(|change| change.photo() == photo),
+            // Photos that are there are what undoing or redoing takes away.
+            Self::Copies(Presence::Present(photos)) | Self::Removal(Presence::Present(photos)) => {
+                photos.contains(&photo)
+            }
+            Self::Batch(commands) => commands.iter().any(|command| command.reaches(photo)),
+            Self::Copies(Presence::Removed(_))
+            | Self::Removal(Presence::Removed(_))
+            | Self::Ratings(_)
+            | Self::Flags(_)
+            | Self::Labels(_)
+            | Self::Text(..)
+            | Self::Keyword(_)
+            | Self::KeywordLists(_)
+            | Self::Membership(_)
+            | Self::Collections(_)
+            | Self::Keywords(_)
+            | Self::SmartRules(_) => false,
+        }
+    }
+
     /// What applying, undoing or redoing this command changes.
     pub(crate) fn changes(&self, out: &mut Vec<Change>) {
         let attribute = |attribute, photos| Change::Attribute(attribute, photos);
@@ -271,6 +297,16 @@ impl History {
     /// stack.
     pub(crate) fn redone(&mut self, entry: Entry) {
         self.push_undo(entry);
+    }
+
+    /// The command an undo would take back.
+    pub(crate) fn next_undo(&self) -> Option<&Command> {
+        self.undo.last().map(|entry| &entry.command)
+    }
+
+    /// The command a redo would make again.
+    pub(crate) fn next_redo(&self) -> Option<&Command> {
+        self.redo.last().map(|entry| &entry.command)
     }
 
     pub(crate) fn undo_label(&self) -> Option<&str> {

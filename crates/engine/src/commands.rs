@@ -11,7 +11,7 @@ use photo_core::meta::PhotoId;
 use crate::browse::Refresh;
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::undo::Command;
+use crate::undo::{Command, History};
 
 /// Which photos an action applies to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -129,7 +129,13 @@ impl Engine {
     /// nothing to undo. A change that can no longer be undone (what it
     /// touched was changed outside the undo stack, or deleted) is dropped
     /// with an error.
+    ///
+    /// An edit still open in Develop is kept: when the change to take back
+    /// reaches the open photo, the edit is committed first. It is then the
+    /// most recent change, so it is the one taken back, and a redo brings
+    /// it back.
     pub fn undo(&mut self) -> Result<bool, EngineError> {
+        self.commit_edit_reached_by(History::next_undo)?;
         let Some(mut entry) = self.history.pop_undo() else {
             return Ok(false);
         };
@@ -148,7 +154,13 @@ impl Engine {
 
     /// Make the most recently undone change again. Returns false when there
     /// is nothing to redo.
+    ///
+    /// An edit still open in Develop is kept: when the change to make again
+    /// reaches the open photo, the edit is committed first. Like any change
+    /// made since the undo, it ends what could be redone, so nothing is
+    /// redone over it.
     pub fn redo(&mut self) -> Result<bool, EngineError> {
+        self.commit_edit_reached_by(History::next_redo)?;
         let Some(mut entry) = self.history.pop_redo() else {
             return Ok(false);
         };
@@ -163,6 +175,29 @@ impl Engine {
             }
             Err(error) => Err(self.lost(&entry.label, "redo", error)),
         }
+    }
+
+    /// Commit the edit still open in Develop when the command `next` picks
+    /// from the history would change the open photo's settings or take the
+    /// photo out of the catalog. Undoing or redoing it puts the catalog's
+    /// settings back in the session, or ends the session; an edit not yet
+    /// committed would be gone for good. A command that does not reach the
+    /// open photo leaves its edit as it is, in progress.
+    fn commit_edit_reached_by(
+        &mut self,
+        next: fn(&History) -> Option<&Command>,
+    ) -> Result<(), EngineError> {
+        let editing = self
+            .develop
+            .as_ref()
+            .filter(|session| session.is_editing())
+            .map(|session| session.photo);
+        let reached = editing
+            .is_some_and(|photo| next(&self.history).is_some_and(|command| command.reaches(photo)));
+        if reached {
+            self.commit_edit()?;
+        }
+        Ok(())
     }
 
     /// The label of the change [`Engine::undo`] would take back.
