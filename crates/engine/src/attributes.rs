@@ -4,7 +4,7 @@
 //! with a toast.
 
 use photo_catalog::{PhotoRecord, TextField};
-use photo_core::develop::Orientation;
+use photo_core::develop::Turn;
 use photo_core::meta::{ColorLabel, Flag, PhotoId, Rating};
 
 use crate::commands::Target;
@@ -153,33 +153,36 @@ impl Engine {
 
     /// Turn every target photo a quarter turn counter-clockwise.
     pub fn rotate_left(&mut self, target: Target) -> Result<(), EngineError> {
-        self.reorient(&target, "Rotate Left", Orientation::rotated_ccw)
+        self.turn(&target, "Rotate Left", Turn::Left)
     }
 
     /// Turn every target photo a quarter turn clockwise.
     pub fn rotate_right(&mut self, target: Target) -> Result<(), EngineError> {
-        self.reorient(&target, "Rotate Right", Orientation::rotated_cw)
+        self.turn(&target, "Rotate Right", Turn::Right)
     }
 
     /// Mirror every target photo left to right, as it is seen now.
     pub fn flip_horizontal(&mut self, target: Target) -> Result<(), EngineError> {
-        self.reorient(&target, "Flip Horizontal", Orientation::flipped_horizontal)
+        self.turn(&target, "Flip Horizontal", Turn::FlipHorizontal)
     }
 
     /// Mirror every target photo top to bottom, as it is seen now.
     pub fn flip_vertical(&mut self, target: Target) -> Result<(), EngineError> {
-        self.reorient(&target, "Flip Vertical", Orientation::flipped_vertical)
+        self.turn(&target, "Flip Vertical", Turn::FlipVertical)
     }
 
-    /// Change the orientation in each photo's develop settings, as one
-    /// develop edit per photo with a history step, in one catalog write.
-    /// Photos whose settings were saved by a newer version are left alone.
-    fn reorient(
-        &mut self,
-        target: &Target,
-        label: &str,
-        turn: fn(Orientation) -> Orientation,
-    ) -> Result<(), EngineError> {
+    /// Turn each photo as it is seen: the picture afterwards is the picture
+    /// before, turned, whatever crop the photo has. One develop edit per
+    /// photo with a history step, in one catalog write. Photos whose
+    /// settings were saved by a newer version are left alone.
+    ///
+    /// The turning itself is [`DevelopSettings::turn`], which takes the
+    /// crop along with the orientation. Nothing here sets an orientation
+    /// by itself: the crop is stored in the frame as it is seen, so it
+    /// would stay behind on other content.
+    ///
+    /// [`DevelopSettings::turn`]: photo_core::develop::DevelopSettings::turn
+    fn turn(&mut self, target: &Target, label: &str, turn: Turn) -> Result<(), EngineError> {
         let photos = self.resolve(target);
         if photos.is_empty() {
             return Ok(());
@@ -187,7 +190,7 @@ impl Engine {
         let editable = self.editable_settings(&photos)?;
         self.write_develop(label, editable, |_, current, _| {
             let mut turned = current.clone();
-            turned.orientation = turn(current.orientation);
+            turned.turn(turn);
             turned
         })
     }
