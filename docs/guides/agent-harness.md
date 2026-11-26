@@ -164,7 +164,9 @@ Time in the app passes only as frames run, a sixtieth of a second each. The harn
 
 `observe` runs one frame to read the accessibility tree, so what it reports is that frame.
 
-A control that is disabled, or whose middle lies outside the window (scrolled out of view), is `unavailable` to `click`; scroll or change the view first, as a user would.
+A control that is disabled, or whose middle lies outside the window (scrolled out of view), is `unavailable` to `click`. There is no scroll command: bring a lower Develop panel into view by collapsing the panels above it (click their headers, which are `DisclosureTriangle` controls named "Basic", "Tone Curve" and so on), as a user short of screen would.
+
+No local photos? `cargo run -p photo-testkit --example write_fixtures -- 1500` writes three JPEGs, a Bayer DNG, a PNG and a 16-bit TIFF into a new folder under the system temporary directory and prints the folder; copy it into `test_photos/` to import it by a relative path. The synthetic DNG is exposed like a finished picture, not like a camera exposes, so it opens about a stop bright at the default settings.
 
 `open` does not start the app again: the panels, the view's settings and the undo stack are as they were. A photo that was new to the catalog leaves the Previous Import showing, as every import does; one the catalog held but the list did not show is found in All Photographs with the filter cleared. (Until protocol version 2, `open` restarted the app and answered `relaunched`.)
 

@@ -4,17 +4,17 @@ A catalog-based, non-destructive photo organiser and raw developer for macOS and
 
 Photo is an independent project. It is not affiliated with Adobe, uses none of Adobe's code, artwork or names, and does not aim for pixel-identical output: slider names, ranges and `crs:` XMP values follow shared conventions, while the rendering math is its own and is documented with its real sources.
 
-> Status: under construction. Version 0.3.1 has a working Library module: import, browse, rate, flag, label, keyword, collect and filter your photos. The Develop module and export come next. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the plan](docs/work/12_lightroom-workflow-restart/plan.md) and [the design](docs/work/12_lightroom-workflow-restart/design.md) for what is being built and in what order.
+> Status: under construction. Version 0.3.2 has both modules working end to end: import, organise and cull in the Library, edit in Develop, and export. It has been run on synthetic test photos only, a RAW DNG among them; no real camera's RAW files have been through this version yet. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the plan](docs/work/12_lightroom-workflow-restart/plan.md) and [the design](docs/work/12_lightroom-workflow-restart/design.md) for what is being built and in what order.
 
 ## Feature overview
 
-| Area | State at 0.3.1 |
+| Area | State at 0.3.2 |
 | --- | --- |
-| Library module: import, grid, loupe, compare, survey, filter bar, catalog, folders, collections and smart collections, keywords, metadata, undo | Working |
+| Library module: import, grid, loupe, compare, survey, filter bar, catalog, folders, collections and smart collections, keywords, metadata, Quick Develop, undo | Working |
+| Develop module: Basic, Tone Curve, Color Mixer, Color Grading, Detail, Lens Corrections, Transform, Effects and Calibration panels; crop and straighten, healing, linear, radial and brush masks; before and after, clipping, history, snapshots, presets, copy and paste | Working |
+| Export: JPEG, PNG and TIFF, resizing, colour space, name templates, output sharpening, metadata choices, a text watermark, export presets | Working, reviewed by one model |
 | Catalog (SQLite) and XMP sidecars | Working, reviewed by two models |
-| RAW and raster decoding, colour science, imaging primitives, the develop pipeline | Built and tested; the pipeline is not yet wired into the app |
-| Develop module, export | In progress |
-| Agent harness (`photo --harness`, `harnessctl`) | Planned |
+| Agent harness (`photo --harness`, `harnessctl`): drives the real app headlessly and measures what it shows | Working; see [the guide](docs/guides/agent-harness.md) |
 
 ## Where your data lives
 
@@ -28,10 +28,13 @@ Run from a checkout of this repository, Photo keeps its catalog and previews in 
 ## Build, run, test
 
 ```sh
-cargo run --release    # launch the app (recommended: fast previews)
-cargo build            # debug build; dependencies and the pixel-math crates are optimized even in debug
-cargo build --release  # optimized build with thin LTO
+cargo run --release                      # launch the app (recommended: fast previews)
+cargo run --release -- path/to/photo.dng # launch with that photo imported and open
+cargo build                              # debug build; dependencies and the pixel-math crates are optimized even in debug
+cargo build --release                    # optimized build with thin LTO
 ```
+
+No photos at hand? `cargo run -p photo-testkit --example write_fixtures` writes a small folder of synthetic ones (JPEG, a RAW DNG, PNG, 16-bit TIFF) under the system temporary directory and prints where.
 
 The four gates every change must pass:
 
@@ -47,8 +50,11 @@ They cover the whole workspace: the root manifest lists every crate in `default-
 ## Project structure
 
 ```
-src/main.rs          Entry point: finds the stores and launches the UI
+src/main.rs          Entry point: finds the stores and launches the UI or the harness
 src/repo.rs          Where Photo keeps its data (the only code that decides a location)
+src/launch.rs        Opening a photo named on the command line
+src/harness/         The agent harness: the real app without a window, driven over JSON lines
+src/bin/harnessctl.rs  The harness's command-line client
 crates/
   core/              photo-core: shared data types and colour-space constants
   color/             photo-color: per-pixel colour science
@@ -64,6 +70,7 @@ crates/
 docs/
   architecture/      ARCHITECTURE.md, decisions.md, drift-log.md
   devlog/            summary.md and dated detailed logs
+  guides/            agent-harness.md: driving the app from a script and reading what it measures
   work/              one numbered folder per piece of work: plan, design, review rounds
   policies/          local-rules.md: the owner's rules specific to this repository
   learning/          lessons.md, lessons-evidence.md, gate-proofs.md
@@ -75,7 +82,8 @@ Which crate may depend on which is the architecture; the table is in [docs/archi
 
 ## Public surface
 
-- `photo` — the application binary.
+- `photo` — the application binary. `photo PATH` opens that photo; `photo --harness[=PORT]` runs it without a window for an agent to drive.
+- `harnessctl` — the harness's client: one command per call, or a script of them.
 - The crates under `crates/` are internal to this workspace. Their Rust types and doc comments are the API reference; `cargo doc --no-deps --open` renders them.
 
 ## Third-party licences
