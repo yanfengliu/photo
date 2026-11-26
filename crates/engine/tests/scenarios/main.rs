@@ -10,6 +10,7 @@ mod export;
 mod import;
 mod lifecycle;
 mod looks;
+mod open_edit;
 mod organise;
 mod performance;
 mod previews;

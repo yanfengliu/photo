@@ -242,10 +242,18 @@ impl Engine {
     /// Remove every target photo (and the virtual copies of any master
     /// among them) from the catalog. The files are not touched; undo brings
     /// everything back under the same ids.
+    ///
+    /// Undo brings a photo back as it was saved. So when the photo open in
+    /// Develop is among those removed, an edit of it that is still open is
+    /// committed first: what comes back is what the user was looking at.
+    /// An edit of a photo that stays is left open.
     pub fn remove_from_catalog(&mut self, target: Target) -> Result<(), EngineError> {
         let photos = self.resolve(&target);
         if photos.is_empty() {
             return Ok(());
+        }
+        if self.open_photo_goes_with(&photos) {
+            self.commit_edit()?;
         }
         let removed = self.catalog.remove_photos(&photos)?;
         let label = match removed.photo_ids().len() {
@@ -257,5 +265,20 @@ impl Engine {
             Command::Removal(Presence::Removed(Box::new(removed))),
         );
         Ok(())
+    }
+
+    /// Whether the photo open in Develop leaves the catalog when `photos`
+    /// do: it is one of them, or a virtual copy of one, which goes where
+    /// its master goes.
+    fn open_photo_goes_with(&self, photos: &[PhotoId]) -> bool {
+        let Some(open) = self.develop.as_ref().map(|session| session.photo) else {
+            return false;
+        };
+        photos.contains(&open)
+            || self.catalog.photo(open).is_ok_and(|record| {
+                record
+                    .master_id
+                    .is_some_and(|master| photos.contains(&master))
+            })
     }
 }
