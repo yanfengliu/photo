@@ -1,10 +1,12 @@
-//! File names and folders: the naming template, the characters a file name
-//! may not hold, and the numbered names of the unique-name policy.
+//! File names and folders: the name a template gives (the `template` module
+//! replaces its tokens), the characters a file name may not hold, and the
+//! numbered names of the unique-name policy.
 
 use std::path::{Path, PathBuf};
 
 use crate::item::ExportItem;
-use crate::settings::{ExportSettings, ExtensionCase, Folder, Naming};
+use crate::settings::{ExportSettings, ExtensionCase, Folder};
+use crate::template::{Values, expand};
 
 /// Longest stem kept, in bytes: room is left for a `-NNN` suffix and the
 /// extension inside the 255-byte limit of common file systems.
@@ -47,17 +49,16 @@ impl NamePlan {
             },
         };
         let original = original_stem(item.source_path);
-        let mut stem = sanitize(&expand(&settings.naming, item, &original));
-        if stem.is_empty() {
-            stem = sanitize(&original);
-        }
-        if stem.is_empty() {
-            stem = LAST_RESORT.to_string();
-        }
+        let values = Values {
+            name: &original,
+            text: &settings.naming.custom_text,
+            sequence: item.sequence,
+            date: item.metadata.capture_time.map(|time| time.date_string()),
+        };
         let extension = settings.format.extension();
         Self {
             folder: base.join(subfolder(&location.subfolder)),
-            stem,
+            stem: stem(&settings.naming.template, &values),
             extension: match settings.naming.extension_case {
                 ExtensionCase::Lower => extension.to_string(),
                 ExtensionCase::Upper => extension.to_ascii_uppercase(),
@@ -95,52 +96,19 @@ fn original_stem(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The template with its tokens replaced.
-fn expand(naming: &Naming, item: &ExportItem, original: &str) -> String {
-    let mut out = String::new();
-    let mut rest = naming.template.as_str();
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('}') else {
-            out.push_str(&rest[open..]);
-            return out;
-        };
-        let token = &after[..close];
-        match token_value(token, naming, item, original) {
-            Some(value) => out.push_str(&value),
-            None => {
-                out.push('{');
-                out.push_str(token);
-                out.push('}');
-            }
-        }
-        rest = &after[close + 1..];
+/// The file name without extension that `template` gives: its tokens
+/// replaced, made safe to use, and never empty. When nothing usable is
+/// left (no token has a value and only separators were typed, say) it is
+/// the original file's name.
+fn stem(template: &str, values: &Values) -> String {
+    let mut stem = sanitize(&expand(template, values));
+    if stem.is_empty() {
+        stem = sanitize(values.name);
     }
-    out.push_str(rest);
-    out
-}
-
-/// What a token stands for, or `None` when it is not a token.
-fn token_value(token: &str, naming: &Naming, item: &ExportItem, original: &str) -> Option<String> {
-    let token = token.trim().to_ascii_lowercase();
-    match token.as_str() {
-        "name" => Some(original.to_string()),
-        "text" => Some(naming.custom_text.clone()),
-        "seq" => Some(item.sequence.to_string()),
-        "date" => Some(
-            item.metadata
-                .capture_time
-                .map(|time| time.date_string())
-                .unwrap_or_default(),
-        ),
-        _ => {
-            let digits: usize = token.strip_prefix("seq:")?.trim().parse().ok()?;
-            (1..=9)
-                .contains(&digits)
-                .then(|| format!("{:0digits$}", item.sequence))
-        }
+    if stem.is_empty() {
+        stem = LAST_RESORT.to_string();
     }
+    stem
 }
 
 /// `text` made safe as a file name: forbidden characters replaced by `_`,
@@ -177,7 +145,9 @@ pub(crate) fn sanitize(text: &str) -> String {
     name
 }
 
-fn forbidden(c: char) -> bool {
+/// True for the characters no file name may hold; [`sanitize`] turns each
+/// into `_`.
+pub(crate) fn forbidden(c: char) -> bool {
     matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
 }
 
@@ -231,6 +201,41 @@ mod tests {
         for kept in ["COM10", "COM", "LPT⁴", "CONSOLE", "AUXILIARY", "nul-x"] {
             assert_eq!(sanitize(kept), kept);
         }
+    }
+
+    /// When no token has a value, the name is the original file's rather
+    /// than an empty one or a lone separator; a template that gives a name
+    /// is made safe like any other.
+    #[test]
+    fn a_template_that_leaves_nothing_falls_back_to_the_original_name() {
+        let values = |name, text| Values {
+            name,
+            text,
+            sequence: 7,
+            date: None,
+        };
+        for template in [
+            "{text}",
+            "{date}-{text}",
+            "{date} _-. {text}",
+            "-{text}-",
+            "...",
+        ] {
+            assert_eq!(
+                stem(template, &values("beach", "")),
+                "beach",
+                "{template:?}"
+            );
+        }
+        assert_eq!(
+            stem("{date}-{text}-{seq:3}", &values("beach", "coast")),
+            "coast-007"
+        );
+        assert_eq!(stem("{date}/{text}:{name}", &values("beach", "")), "beach");
+        assert_eq!(stem("{name}_{text}", &values("b/each", "")), "b_each");
+        // Not even the original has a usable name.
+        assert_eq!(stem("{text}", &values("", "")), LAST_RESORT);
+        assert_eq!(stem("{name}-{text}", &values("...", "")), LAST_RESORT);
     }
 
     #[test]

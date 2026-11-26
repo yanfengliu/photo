@@ -145,6 +145,7 @@ mod settings;
 mod sharpen;
 mod sizing;
 mod strips;
+mod template;
 mod watermark;
 mod xmp;
 

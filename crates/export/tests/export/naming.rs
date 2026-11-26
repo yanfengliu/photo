@@ -73,6 +73,46 @@ fn unknown_tokens_stay_and_missing_values_fall_back_to_the_original_name() {
     }
 }
 
+/// A token without a value takes a neighbouring separator with it: the name
+/// neither starts nor ends with a separator nor has two in a row because of
+/// it. The export dialog shows `planned_path` as its example, and the file
+/// written has the name it showed.
+#[test]
+fn an_empty_token_leaves_no_stray_separator_in_the_planned_or_the_written_name() {
+    let mut fixture = Fixture::named("IMG 0042.png", 40, 30);
+    let mut settings = fixture.settings_out();
+    settings.format = Format::Tiff {
+        depth: Default::default(),
+    };
+    let date = DateTime::new(2024, 3, 15, 7, 42, 10);
+    for (template, custom, dated, expected) in [
+        // The dialog's example: no capture date.
+        ("{date}-{text}-{seq:3}", "coast", false, "coast-001.tif"),
+        // With every value it is as typed.
+        (
+            "{date}-{text}-{seq:3}",
+            "coast",
+            true,
+            "2024-03-15-coast-001.tif",
+        ),
+        ("{date}-{text}-{seq:3}", "", true, "2024-03-15-001.tif"),
+        ("{date}-{text}-{seq:3}", "", false, "001.tif"),
+        ("{name}_{text}", "", false, "IMG 0042.tif"),
+        ("{name}__{text}__{seq}", "x", false, "IMG 0042__x__1.tif"),
+        // No token has a value: the original's name, not an empty one.
+        ("{date}-{text}", "", false, "IMG 0042.tif"),
+    ] {
+        settings.naming.template = template.into();
+        settings.naming.custom_text = custom.into();
+        fixture.metadata.capture_time = if dated { date } else { None };
+        let planned = planned_path(&fixture.item(), &settings);
+        assert_eq!(file_name(&planned), expected, "{template:?}");
+        let (path, _, _) = written(&export_as_planned(&fixture, &settings));
+        assert_eq!(path, planned, "{template:?}");
+        fs::remove_file(path).unwrap();
+    }
+}
+
 #[test]
 fn characters_no_file_name_may_hold_are_replaced() {
     let fixture = Fixture::named("shot.png", 40, 30);

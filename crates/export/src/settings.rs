@@ -96,6 +96,27 @@ pub struct Naming {
     /// and spaces removed and Windows device names (`CON`, `NUL`, ...)
     /// suffixed with `_`; when nothing is left it falls back to the original
     /// file name.
+    ///
+    /// A token that has no value (no capture date, no custom text, or one
+    /// of nothing but spaces) leaves no stray separator behind. The
+    /// separators are `-`, `_`, space and `.`, and the characters that are
+    /// replaced by `_`; several typed together count as one. An empty token
+    /// with a separator on both sides takes the one before it, so two never
+    /// meet. With a separator on one side only, it takes that one when the
+    /// name would otherwise begin or end with it:
+    ///
+    /// | Template | Without | Gives |
+    /// | --- | --- | --- |
+    /// | `{date}-{text}-{seq:3}` | a capture date | `coast-001` |
+    /// | `{date}-{text}-{seq:3}` | custom text | `2024-03-15-001` |
+    /// | `{name}_{text}` | custom text | the name alone |
+    /// | `{name}-{text}{seq}` | custom text | `beach-7`: the `-` still separates two things |
+    ///
+    /// Everything else stays exactly as typed: the separators between two
+    /// tokens that have values, doubled ones included, and the separators
+    /// a template itself begins or ends with. When no token has a value
+    /// and nothing but separators is left, the name is the original
+    /// file's.
     pub template: String,
     /// The text the `{text}` token stands for.
     pub custom_text: String,
