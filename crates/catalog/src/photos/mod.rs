@@ -4,6 +4,7 @@ mod attributes;
 mod copies;
 mod insert;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use photo_core::develop::DevelopSettings;
@@ -24,6 +25,7 @@ use crate::codec::{
 use crate::error::{CatalogError, Entity, Result};
 use crate::paths;
 use crate::sql::id_list;
+use crate::text;
 
 /// A photo about to be added to the catalog.
 ///
@@ -273,6 +275,41 @@ impl Catalog {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(ids)
+    }
+
+    /// For each of `names`, in order, the paths of the catalogued files
+    /// that have that name, whatever the letter case: `IMG_1.JPG` and
+    /// `img_1.jpg` are one name on the file systems photos usually live
+    /// on. Virtual copies have no file of their own and are not listed.
+    /// The files of one name are in the order they were added. One query
+    /// however many names; it reads the name of every photo.
+    pub fn files_named(&self, names: &[&str]) -> Result<Vec<Vec<PathBuf>>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let folded: Vec<String> = names.iter().map(|name| text::fold(name)).collect();
+        let wanted = serde_json::Value::from(folded.clone()).to_string();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT file_name, path FROM photos
+             WHERE master_id IS NULL
+               AND photo_fold(file_name) IN (SELECT value FROM json_each(?1))
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map([wanted], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut found: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for row in rows {
+            let (name, path) = row?;
+            found
+                .entry(text::fold(&name))
+                .or_default()
+                .push(PathBuf::from(path));
+        }
+        Ok(folded
+            .iter()
+            .map(|name| found.get(name).cloned().unwrap_or_default())
+            .collect())
     }
 }
 

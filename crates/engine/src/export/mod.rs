@@ -11,7 +11,10 @@
 //! behind, and starts no more. Before and after each photo (see `job`) the
 //! [`Guard`] checks what the export crate cannot know: whether the file
 //! would be the original of another photo in the catalog, or inside the
-//! catalog's own folders. Presets are in `presets`.
+//! catalog's own folders. The guard goes by what it can see as the export
+//! starts; each photo is also given the originals that have its file's
+//! name, which the export crate replaces under no path (see `guard`).
+//! Presets are in `presets`.
 
 mod guard;
 mod job;
@@ -131,6 +134,7 @@ impl Engine {
             settings: DevelopSettings::default_for(record.kind),
             metadata: record.metadata,
             attributes: ExportAttributes::default(),
+            protected: Vec::new(),
         };
         Ok(Some(photo_export::planned_path(
             &pending.item(None),
@@ -148,7 +152,11 @@ impl Engine {
     /// when its file would be the original of a photo in the catalog
     /// (whatever the existing-file policy, and ignoring letter case, as the
     /// file systems photos live on do) or would go inside the catalog's or
-    /// the previews' folder.
+    /// the previews' folder. An original that cannot be seen from here as
+    /// the export starts (its drive is away, and the catalog knows it by
+    /// another path than the export uses) is refused when the file is
+    /// written: the export replaces no catalogued original that has its
+    /// file's name, whatever path leads to it.
     pub fn start_export(
         &mut self,
         target: Target,
@@ -186,12 +194,22 @@ impl Engine {
                 Err(error) => return Err(error.into()),
             }
         }
-        let destinations: HashSet<PathBuf> = waiting
+        let planned: Vec<PathBuf> = waiting
             .iter()
-            .filter_map(|pending| {
-                let planned = photo_export::planned_path(&pending.item(None), &settings);
-                planned.parent().map(Path::to_path_buf)
-            })
+            .map(|pending| photo_export::planned_path(&pending.item(None), &settings))
+            .collect();
+        let exports: Vec<(&Path, &Path)> = planned
+            .iter()
+            .zip(&waiting)
+            .map(|(planned, pending)| (planned.as_path(), pending.path.as_path()))
+            .collect();
+        let in_the_way = guard::originals_in_the_way(&self.catalog, &exports)?;
+        for (pending, originals) in waiting.iter_mut().zip(in_the_way) {
+            pending.protected = originals;
+        }
+        let destinations: HashSet<PathBuf> = planned
+            .iter()
+            .filter_map(|planned| planned.parent().map(Path::to_path_buf))
             .collect();
         let own = [self.catalog_dir.as_path(), self.previews_dir.as_path()];
         let guard = Guard::new(&self.catalog, &own, destinations)?;
@@ -264,6 +282,8 @@ impl Engine {
                 keywords,
                 rating: record.rating,
             },
+            // Filled in once the name of the photo's file is planned.
+            protected: Vec::new(),
         })
     }
 

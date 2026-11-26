@@ -1,6 +1,7 @@
 //! Tests that need to see inside the engine: what was decoded, when a
 //! preview is looked at again, and what happens while its workers are held.
 
+mod exports;
 mod imports;
 mod loading;
 mod rechecks;

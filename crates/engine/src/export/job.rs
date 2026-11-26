@@ -9,7 +9,7 @@ use photo_core::meta::{PhotoId, PhotoMetadata};
 use photo_develop::{CancelToken, Source};
 use photo_export::{ExportAttributes, ExportError, ExportItem, ExportOutcome, ExportSettings};
 
-use super::guard::Guard;
+use super::guard::{self, Guard};
 use crate::sources::Sources;
 use crate::stamp::Stamp;
 
@@ -21,6 +21,11 @@ pub(super) struct Pending {
     pub(super) settings: DevelopSettings,
     pub(super) metadata: PhotoMetadata,
     pub(super) attributes: ExportAttributes,
+    /// The originals of the catalog that have the name this photo's file
+    /// is planned to have, wherever the catalog knows them, other than the
+    /// photo's own. The export replaces none of them, by whatever path it
+    /// meets them.
+    pub(super) protected: Vec<PathBuf>,
 }
 
 impl Pending {
@@ -34,7 +39,7 @@ impl Pending {
             metadata: &self.metadata,
             attributes: self.attributes.clone(),
             sequence: self.sequence,
-            protected: &[],
+            protected: &self.protected,
         }
     }
 }
@@ -48,7 +53,9 @@ pub(super) enum Failure {
 }
 
 /// Export one photo on a worker, from its decoded source when one is in
-/// memory, checking the guard before and after.
+/// memory, checking the guard before and after. What the guard could not
+/// see when the export started, the export itself refuses to replace: the
+/// photo's protected originals.
 pub(super) fn export_one(
     pending: &Pending,
     settings: &ExportSettings,
@@ -66,6 +73,11 @@ pub(super) fn export_one(
     }
     let outcome = photo_export::export(&item, settings, renders).map_err(|error| match error {
         ExportError::Cancelled => Failure::Cancelled,
+        // What the guard would have said, had it been able to see the
+        // original when the export started.
+        ExportError::WouldOverwriteProtected(original) => {
+            Failure::Reason(guard::is_an_original(&original))
+        }
         other => Failure::Reason(other.to_string()),
     })?;
     // Another export may have taken the planned name while this one

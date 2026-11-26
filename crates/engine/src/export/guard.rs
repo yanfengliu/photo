@@ -17,6 +17,15 @@
 //! resolved as far as they exist and ignoring letter case. File names are
 //! compared ignoring letter case, as on the file systems photos usually
 //! live on.
+//!
+//! The guard looks when the export starts, and a path says nothing about a
+//! folder that is away then: one the catalog reached through a link is not
+//! recognised when its drive comes back before the file is written. So the
+//! guard is not the last word. Each photo's export is also told which
+//! originals of the catalog have the name its file is to have (see
+//! `Engine::start_export`), and the export crate compares the file it is
+//! about to replace with them by identity, at that moment. It refuses with
+//! the sentence the guard uses.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -122,13 +131,46 @@ impl Guard {
                 && (destination.key == key
                     || same_file::is_same_file(folder, &destination.folder).unwrap_or(false))
         });
-        taken.then(|| {
-            format!(
-                "{} is the original of a photo in the catalog, which an export never writes over",
-                target.display()
-            )
-        })
+        taken.then(|| is_an_original(target))
     }
+}
+
+/// Why nothing is written over `original`, the original of a photo.
+pub(super) fn is_an_original(original: &Path) -> String {
+    format!(
+        "{} is the original of a photo in the catalog, which an export never writes over",
+        original.display()
+    )
+}
+
+/// For each export, given as the file it is planned to write and the
+/// photo's own file: the originals of the catalog it must not replace.
+/// Those are the files the catalog knows under the planned file's name,
+/// whatever the letter case and in whatever folder, other than the photo's
+/// own. Read from the catalog in one query; no file is touched.
+pub(super) fn originals_in_the_way(
+    catalog: &Catalog,
+    exports: &[(&Path, &Path)],
+) -> Result<Vec<Vec<PathBuf>>, CatalogError> {
+    let names: Vec<String> = exports
+        .iter()
+        .map(|(planned, _)| {
+            let name = planned.file_name().unwrap_or_default();
+            name.to_string_lossy().into_owned()
+        })
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let named = catalog.files_named(&names)?;
+    Ok(named
+        .into_iter()
+        .zip(exports)
+        .map(|(originals, (_, own))| {
+            originals
+                .into_iter()
+                .filter(|original| original != own)
+                .collect()
+        })
+        .collect())
 }
 
 /// `path` with symbolic links resolved as far as it exists (the nearest
@@ -170,6 +212,41 @@ mod tests {
             .insert_photos(run, &[NewPhoto::new(path, FileKind::Raster)])
             .unwrap();
         catalog
+    }
+
+    #[test]
+    fn an_export_is_told_of_every_original_that_has_its_files_name_but_the_photos_own() {
+        let mut catalog = Catalog::open_in_memory().unwrap();
+        let run = catalog.begin_import().unwrap();
+        let photos: Vec<NewPhoto> = [
+            "/card/IMG_1.JPG",
+            "/shots/img_1.jpg",
+            "/shots/IMG_2.jpg",
+            "/raw/IMG_1.CR2",
+        ]
+        .iter()
+        .map(|path| NewPhoto::new(path, FileKind::Raster))
+        .collect();
+        catalog.insert_photos(run, &photos).unwrap();
+        let exports = [
+            // A RAW photo exported as a JPEG into another folder.
+            (Path::new("/out/IMG_1.jpg"), Path::new("/raw/IMG_1.CR2")),
+            // A JPEG exported under its own name.
+            (Path::new("/out/img_1.jpg"), Path::new("/shots/img_1.jpg")),
+            // A name the catalog does not hold.
+            (Path::new("/out/IMG_3.jpg"), Path::new("/shots/IMG_2.jpg")),
+        ];
+        let told = originals_in_the_way(&catalog, &exports).unwrap();
+        let paths = |paths: &[&str]| -> Vec<PathBuf> { paths.iter().map(PathBuf::from).collect() };
+        assert_eq!(
+            told,
+            [
+                paths(&["/card/IMG_1.JPG", "/shots/img_1.jpg"]),
+                paths(&["/card/IMG_1.JPG"]),
+                paths(&[]),
+            ],
+            "whatever the folder and the letter case, and never the photo's own file"
+        );
     }
 
     #[test]
