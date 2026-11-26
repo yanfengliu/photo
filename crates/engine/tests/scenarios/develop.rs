@@ -366,9 +366,13 @@ fn an_edit_not_yet_committed_survives_an_import_and_a_virtual_copy() {
     studio.engine.adjust(Adj::Exposure, 0.8).unwrap();
     let (_more, files) = crate::common::many_jpegs(2, 64, 48);
     studio.import(files);
-    studio
+    let copies = studio
         .engine
         .create_virtual_copies(photo_engine::Target::Photos(vec![lake]))
+        .unwrap();
+    studio
+        .engine
+        .remove_from_catalog(photo_engine::Target::Photos(copies))
         .unwrap();
     studio.settle();
     let session = studio.engine.develop().unwrap();
