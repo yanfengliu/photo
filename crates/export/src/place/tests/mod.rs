@@ -18,6 +18,10 @@
 //! the kinds the volume can stage are run ([`kinds`]).
 
 mod failing;
+mod hidden;
+// Its tests need a file that is there but cannot be opened, which only
+// Unix permissions make; elsewhere its helpers would be unused.
+#[cfg(unix)]
 mod identity;
 mod kept;
 mod no_replace;
@@ -30,6 +34,7 @@ use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
+use super::aside;
 use super::disk::{self, Disk, Step};
 use super::guard::{Guard, Guarded};
 use super::held::Held;
@@ -109,6 +114,14 @@ struct Staged<'a> {
     full: bool,
     /// A replaced file cannot be removed (read-only on Windows, say).
     removal_fails: bool,
+    /// Another exporter, on another machine with this process's id, that
+    /// has made this many hidden names. The next time this export makes a
+    /// hidden name, the other makes its own from the same process id and
+    /// count and at once puts a file of its own under it, before this
+    /// export can use the name it made.
+    rival: Option<u64>,
+    /// Where the other exporter's file is, once it has put it there.
+    rival_file: Option<PathBuf>,
 }
 
 impl<'a> Staged<'a> {
@@ -122,14 +135,24 @@ impl<'a> Staged<'a> {
             identity_reads: 0,
             full: false,
             removal_fails: false,
+            rival: None,
+            rival_file: None,
         }
     }
 }
 
 impl Disk for Staged<'_> {
     fn hidden_name(&mut self, folder: &Path, role: &str) -> PathBuf {
+        if let Some(count) = self.rival.take() {
+            let process = std::process::id();
+            let ours = folder.join(aside::hidden_file_name(process, count, role));
+            let theirs = folder.join(aside::hidden_file_name(process, count, role));
+            fs::write(&theirs, b"theirs").unwrap();
+            self.rival_file = Some(theirs);
+            return ours;
+        }
         if self.hidden.is_empty() {
-            super::aside::hidden_name(folder, role)
+            aside::hidden_name(folder, role)
         } else {
             self.hidden.remove(0)
         }

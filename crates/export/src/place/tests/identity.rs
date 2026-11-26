@@ -2,8 +2,6 @@
 //! for somebody else's: the export refuses or fails rather than replace
 //! it, report it skipped or go on to another name (review F52, F59).
 
-#![cfg(unix)]
-
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;

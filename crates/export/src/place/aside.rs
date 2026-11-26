@@ -44,33 +44,36 @@ const KEPT_NAMES: u32 = 99;
 pub(crate) const EXCLUSIVE_ASIDE: bool = cfg!(target_vendor = "apple");
 
 /// A hidden name in `folder` that nothing has:
-/// `.photo-export-<process>-<random>.<role>`. The process id is for a
-/// person reading the folder; the sixty-four random bits are what keeps two
-/// exporters, on two machines writing into one shared folder, from ever
-/// using the same name. The roles are `part` (an export being written),
-/// `previous` (a file moved aside by the overwrite policy) and `discard`
-/// (a failed copy on its way out).
+/// `.photo-export-<process>-<random>.<role>`. The roles are `part` (an
+/// export being written), `previous` (a file moved aside by the overwrite
+/// policy) and `discard` (a failed copy on its way out). Every hidden name
+/// placement makes is made here.
 pub(crate) fn hidden_name(folder: &Path, role: &str) -> PathBuf {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
     loop {
-        let name = format!(
-            ".photo-export-{}-{:016x}.{role}",
-            std::process::id(),
-            random()
-        );
-        let path = folder.join(name);
+        let count = COUNT.fetch_add(1, Ordering::Relaxed);
+        let path = folder.join(hidden_file_name(std::process::id(), count, role));
         if !occupied(&path) {
             return path;
         }
     }
 }
 
+/// The hidden name that process `process` makes as its `count`th, for a
+/// file in `role`. The process id is there for a person reading the folder.
+/// It and the count are all that an exporter on another machine, writing
+/// into the same shared folder, can have in common with this one; the
+/// sixty-four random bits that follow are what keeps their names apart.
+pub(crate) fn hidden_file_name(process: u32, count: u64, role: &str) -> String {
+    format!(".photo-export-{process}-{:016x}.{role}", random(count))
+}
+
 /// Sixty-four bits that cannot be guessed and that no other process shares:
 /// the standard library's randomly keyed hasher, which the operating system
-/// seeds, over a count and the time.
-fn random() -> u64 {
-    static COUNT: AtomicU64 = AtomicU64::new(0);
+/// seeds, over `count` and the time.
+fn random(count: u64) -> u64 {
     let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(COUNT.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u64(count);
     if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
         hasher.write_u128(now.as_nanos());
     }

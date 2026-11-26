@@ -96,9 +96,14 @@
 //! Not guaranteed:
 //!
 //! - Another program writing to this export's own hidden names
-//!   (`.photo-export-<process>-<number>.<role>` in the destination folder)
+//!   (`.photo-export-<process>-<random>.<role>` in the destination folder)
 //!   is out of scope: a file put under such a name can be replaced or
-//!   removed.
+//!   removed. Another exporter, even on another machine with the same
+//!   process id, does not come to use them: each carries sixty-four random
+//!   bits, and on Apple's systems the move aside also refuses a hidden name
+//!   that is taken. Elsewhere, and on a volume without an exclusive rename,
+//!   the move aside is a plain rename and the random bits alone keep the
+//!   names apart.
 //! - Under the overwrite policy every other file with the export's name is
 //!   replaced, one that another program put there a moment before
 //!   included: only the original and the protected files are guarded.
