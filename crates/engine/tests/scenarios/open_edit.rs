@@ -321,3 +321,24 @@ fn reading_a_file_that_replaces_no_settings_leaves_the_edit_on_its_photo_in_prog
     assert_eq!(saved_exposure(&studio, dawn), 0.0, "and not committed");
     assert_eq!(steps(&studio, dawn), before);
 }
+
+#[test]
+fn closing_the_application_keeps_the_edit_that_is_still_open() {
+    let (_library, mut studio) = studio();
+    let dawn = studio.id("dawn.jpg");
+    edit_in_progress(&mut studio, dawn);
+    let before = steps(&studio, dawn);
+
+    // The engine is dropped and another opened on the same catalog.
+    let studio = studio.reopen();
+    assert_eq!(
+        saved_exposure(&studio, dawn),
+        0.8,
+        "nothing here has a save step: quitting keeps the work, as closing the photo does"
+    );
+    assert_eq!(
+        steps(&studio, dawn),
+        before + 1,
+        "as one step of the photo's history"
+    );
+}
