@@ -197,8 +197,20 @@ impl Engine {
 
     /// Make a virtual copy of every target photo and select the copies.
     /// Returns the new photos' ids.
+    ///
+    /// A copy is made of what is seen. An edit still open in Develop on a
+    /// photo being copied is committed first, so the copy has it and the
+    /// original's history has the step; an edit of a photo that is not
+    /// being copied is left open.
     pub fn create_virtual_copies(&mut self, target: Target) -> Result<Vec<PhotoId>, EngineError> {
         let sources = self.resolve(&target);
+        if self
+            .develop
+            .as_ref()
+            .is_some_and(|session| sources.contains(&session.photo))
+        {
+            self.commit_edit()?;
+        }
         let mut created = Vec::with_capacity(sources.len());
         // The catalog makes one copy per call.
         for source in &sources {

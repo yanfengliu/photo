@@ -384,3 +384,47 @@ fn an_edit_not_yet_committed_survives_an_import_and_a_virtual_copy() {
         0.8
     );
 }
+
+#[test]
+fn a_virtual_copy_of_the_photo_being_edited_has_the_edit_that_is_still_open() {
+    let (_library, mut studio) = studio();
+    let dawn = studio.id("dawn.jpg");
+    open_rendered(&mut studio, dawn, FIT);
+    let steps = studio.engine.history(dawn).unwrap().len();
+    studio.engine.adjust(Adj::Exposure, 0.8).unwrap();
+    let seen = studio.engine.develop().unwrap().settings().clone();
+    assert_eq!(seen.tone.exposure, 0.8);
+    let saved = |studio: &Studio, photo| studio.engine.develop_settings(photo).unwrap();
+    assert_eq!(saved(&studio, dawn).tone.exposure, 0.0, "not committed yet");
+
+    let copies = studio
+        .engine
+        .create_virtual_copies(photo_engine::Target::Photos(vec![dawn]))
+        .unwrap();
+    let [copy] = copies[..] else {
+        panic!("{} copies were made", copies.len());
+    };
+    assert_eq!(
+        saved(&studio, copy).tone.exposure,
+        0.8,
+        "the copy has what was on screen when it was made"
+    );
+    assert!(saved(&studio, copy) == seen, "in every setting");
+    assert_eq!(
+        studio.engine.history(dawn).unwrap().len(),
+        steps + 1,
+        "and the original has the edit as one step of its history"
+    );
+    assert!(!studio.engine.develop().unwrap().is_editing());
+    assert!(saved(&studio, dawn) == seen);
+
+    // The copy and the edit are two things to undo, the copy first.
+    studio.engine.undo().unwrap();
+    assert!(studio.engine.summary(copy).is_none());
+    assert_eq!(saved(&studio, dawn).tone.exposure, 0.8);
+    studio.engine.undo().unwrap();
+    assert_eq!(
+        studio.engine.develop_settings(dawn).unwrap().tone.exposure,
+        0.0
+    );
+}
