@@ -9,8 +9,10 @@ use photo_core::meta::PhotoId;
 use tempfile::TempDir;
 
 use super::{Engine, EngineConfig};
-use crate::develop::DevelopLoad;
+use crate::develop::worker::{Delivery, Frame, Outcome, Purpose, Work};
+use crate::develop::{CanvasView, DevelopLoad};
 use crate::import::{ImportMode, ImportRequest};
+use crate::looks::{BuiltInPreset, PresetKey};
 use crate::previews::PreviewState;
 use crate::stamp::Stamp;
 
@@ -127,4 +129,64 @@ fn a_preview_in_memory_is_made_again_when_its_file_was_replaced() {
     assert!(engine.wait_idle(PATIENCE));
     let second = engine.thumbnail(ids[0]).ready().cloned().unwrap();
     assert_eq!((second.image().width, second.image().height), (64, 96));
+}
+
+#[test]
+fn a_late_preset_preview_is_not_kept_under_the_preset_chosen_since() {
+    let (_files_dir, files) = jpegs(1, 96, 64);
+    let (_dir, mut engine, ids) = engine_with(&files, 1);
+    engine.open_develop(ids[0]).unwrap();
+    engine.set_canvas_view(CanvasView::Fit {
+        width: 96,
+        height: 64,
+    });
+    assert!(engine.wait_idle(PATIENCE));
+    let (mono, vivid) = (
+        PresetKey::BuiltIn(BuiltInPreset::MonoContrast),
+        PresetKey::BuiltIn(BuiltInPreset::Vivid),
+    );
+    engine.preview_preset(Some(mono), 48, 48).unwrap();
+    let asked_for_mono = engine.next_render;
+    engine.preview_preset(Some(vivid), 48, 48).unwrap();
+    let asked_for_vivid = engine.next_render;
+    assert!(asked_for_vivid > asked_for_mono);
+
+    // What the render worker hands back for a request: here by hand, so
+    // that the first preset's frame is the one that comes in late.
+    let session = engine.develop().unwrap();
+    let (generation, version, view) = (
+        session.generation,
+        session.version(),
+        session.view().unwrap(),
+    );
+    let delivery = |id| {
+        let image = photo_core::image::Rgba8Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 255],
+            space: photo_core::colorimetry::RgbSpace::Srgb,
+        };
+        Delivery {
+            id,
+            purpose: Purpose::Look,
+            generation,
+            version,
+            view,
+            work: Work::Render(photo_develop::Quality::Full),
+            outcome: Outcome::Rendered(Box::new(Frame {
+                histogram: photo_develop::histogram(&image),
+                image,
+                stage_times: Vec::new(),
+                render_time: Duration::ZERO,
+            })),
+        }
+    };
+    engine.render_delivered(delivery(asked_for_mono));
+    assert!(
+        engine.develop().unwrap().preset_preview().is_none(),
+        "the first preset's frame is not shown as the second's"
+    );
+    engine.render_delivered(delivery(asked_for_vivid));
+    let session = engine.develop().unwrap();
+    assert_eq!(session.preset_preview().map(|(key, _)| *key), Some(vivid));
 }
