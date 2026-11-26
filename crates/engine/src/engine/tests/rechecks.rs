@@ -11,7 +11,7 @@ use std::time::Duration;
 use photo_core::meta::PhotoId;
 use tempfile::TempDir;
 
-use super::{Engine, PATIENCE, engine_with, hold_worker, jpegs, open_in};
+use super::{Engine, PATIENCE, engine_with, hold_worker, jpegs, next_event, open_in};
 use crate::previews::{Preview, PreviewState};
 
 /// Long enough that nothing in a test is looked at again unasked.
@@ -68,6 +68,71 @@ fn while_a_look_is_out_asking_again_sends_no_other() {
         matches!(engine.thumbnail(ids[2]), PreviewState::Pending),
         "what was due meanwhile was looked at in its turn"
     );
+}
+
+#[test]
+fn a_preview_whose_stamp_is_dropped_leaves_the_looks_waiting_and_none_waits_twice() {
+    let (_files_dir, files) = jpegs(4, 96, 64);
+    let (_dir, mut engine, ids) = engine_with(&files, 1);
+    let &[a, b, c, d] = ids.as_slice() else {
+        panic!("four photos");
+    };
+    // Memory for two thumbnails, and stamps kept for two: browsing past two
+    // photos here is what browsing past thousands is with the real limits.
+    engine.thumbnail(a);
+    assert!(engine.wait_idle(PATIENCE));
+    let bytes = engine.thumbnail(a).ready().unwrap().bytes();
+    engine.previews.limit_memory(2 * bytes);
+    engine.previews.stamps_kept = 2;
+    for photo in [a, b] {
+        engine.thumbnail(photo);
+        assert!(engine.wait_idle(PATIENCE));
+    }
+
+    // A look at a's file is out, held up as on a drive that has stalled,
+    // and b waits for the next one.
+    let release = hold_worker(&mut engine);
+    engine.previews.recheck_after = Duration::ZERO;
+    for photo in [a, b] {
+        assert!(engine.thumbnail(photo).ready().is_some());
+    }
+    assert_eq!(engine.previews.looks_waiting(), 1);
+
+    // Browsing on makes c and d, which push a and b out of memory, and
+    // their stamps go the next time stamps are dropped.
+    for photo in [c, d] {
+        assert!(matches!(engine.thumbnail(photo), PreviewState::Pending));
+    }
+    release.send(()).unwrap();
+    for _ in 0..3 {
+        // The held job, then c's and d's previews; the look stays out.
+        let event = next_event(&engine);
+        engine.handle(event);
+    }
+    assert_eq!(
+        engine.previews.looks_waiting(),
+        0,
+        "b's preview has left memory and its stamp is gone: it waits for no look"
+    );
+    let look = next_event(&engine);
+
+    // b is browsed to again, made again, and asked for while the look is
+    // still out.
+    assert!(matches!(engine.thumbnail(b), PreviewState::Pending));
+    let made = next_event(&engine);
+    engine.handle(made);
+    for _ in 0..10 {
+        assert!(engine.thumbnail(b).ready().is_some());
+    }
+    assert_eq!(
+        engine.previews.looks_waiting(),
+        1,
+        "b waits for the next look once"
+    );
+
+    engine.handle(look);
+    assert!(engine.wait_idle(PATIENCE));
+    assert_eq!(engine.previews.looks_waiting(), 0);
 }
 
 /// An engine whose memory holds a thumbnail that was loaded from its cache

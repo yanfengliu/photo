@@ -79,14 +79,18 @@ pub(crate) struct Previews {
     /// What the source file of each preview in memory looked like when the
     /// preview was made, and when it was last looked at.
     stamps: HashMap<(PhotoId, PreviewSize), Watch>,
-    /// The source files to look at next: at most one entry per preview.
-    due: Vec<Look>,
+    /// The source files to look at next, by preview: each preview waits at
+    /// most once, and only while its stamp is kept.
+    due: HashMap<(PhotoId, PreviewSize), Look>,
     /// A worker is out looking, or about to: one at a time.
     looking: bool,
     /// How long a failure is believed.
     pub(crate) retry_after: Duration,
     /// How long a preview in memory is trusted.
     pub(crate) recheck_after: Duration,
+    /// How many source stamps are kept before those of previews no longer
+    /// in memory are dropped.
+    pub(crate) stamps_kept: usize,
     candidates: Lru<PathBuf, Preview>,
     candidates_in_flight: HashSet<PathBuf>,
     candidates_failed: HashMap<PathBuf, String>,
@@ -100,10 +104,11 @@ impl Default for Previews {
             in_flight: HashMap::new(),
             failed: HashMap::new(),
             stamps: HashMap::new(),
-            due: Vec::new(),
+            due: HashMap::new(),
             looking: false,
             retry_after: RETRY_FAILED_AFTER,
             recheck_after: RECHECK_AFTER,
+            stamps_kept: STAMPS_KEPT,
             candidates: Lru::new(CANDIDATE_MEMORY),
             candidates_in_flight: HashSet::new(),
             candidates_failed: HashMap::new(),
@@ -136,6 +141,14 @@ impl Previews {
     #[cfg(test)]
     pub(crate) fn looks_waiting(&self) -> usize {
         self.due.len()
+    }
+
+    /// Keep no more than `bytes` of thumbnails, and as many of standard
+    /// previews, in memory from now on; what is in memory now is dropped.
+    #[cfg(test)]
+    pub(crate) fn limit_memory(&mut self, bytes: usize) {
+        self.thumbnails = Lru::new(bytes);
+        self.standard = Lru::new(bytes);
     }
 }
 

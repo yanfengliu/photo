@@ -18,14 +18,17 @@
 //! At most one worker is looking at any time, at everything that is due,
 //! one file after the other; what becomes due meanwhile waits for the next
 //! look. A drive that stalls therefore holds one worker and one job, however
-//! many previews are asked for and however long it stalls.
+//! many previews are asked for and however long it stalls. A preview waits
+//! for the next look at most once, and only while its stamp is kept: one
+//! whose stamp is dropped (its pixels have left memory) waits for none, and
+//! made again it is watched afresh.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use photo_core::meta::PhotoId;
 
-use super::{PreviewSize, STAMPS_KEPT};
+use super::{PreviewSize, Previews};
 use crate::engine::{Context, Engine};
 use crate::jobs::Lane;
 use crate::stamp::Stamp;
@@ -97,13 +100,15 @@ impl Engine {
     ) {
         let key = (photo, size);
         let Some(stamp) = stamp else {
-            self.previews.stamps.remove(&key);
+            self.previews.forget_watch(&key);
             return;
         };
-        if self.previews.stamps.len() >= STAMPS_KEPT {
+        if self.previews.stamps.len() >= self.previews.stamps_kept {
             let mut stamps = std::mem::take(&mut self.previews.stamps);
             stamps.retain(|(photo, size), _| self.previews.peek(*photo, *size).is_some());
             self.previews.stamps = stamps;
+            let Previews { stamps, due, .. } = &mut self.previews;
+            due.retain(|key, _| stamps.contains_key(key));
         }
         // A look that is out for the preview this one replaces is still
         // out, and will find that its preview has gone.
@@ -131,12 +136,13 @@ impl Engine {
             return;
         }
         watch.looking = true;
-        self.previews.due.push(Look {
+        let look = Look {
             photo,
             size,
             stamp: watch.stamp,
             path: path.to_path_buf(),
-        });
+        };
+        self.previews.due.insert((photo, size), look);
         self.send_look();
     }
 
@@ -145,7 +151,9 @@ impl Engine {
         if self.previews.looking || self.previews.due.is_empty() {
             return;
         }
-        let looks = std::mem::take(&mut self.previews.due);
+        let looks: Vec<Look> = std::mem::take(&mut self.previews.due)
+            .into_values()
+            .collect();
         let keys: Vec<(PhotoId, PreviewSize)> =
             looks.iter().map(|look| (look.photo, look.size)).collect();
         self.previews.looking = true;
@@ -192,7 +200,7 @@ impl Engine {
                     }
                 }
                 Seen::Changed => {
-                    self.previews.stamps.remove(&key);
+                    self.previews.forget_watch(&key);
                     self.previews.memory(look.size).remove(&look.photo);
                     changed = true;
                 }
@@ -211,5 +219,14 @@ impl Engine {
             }
         }
         false
+    }
+}
+
+impl Previews {
+    /// Stop watching the source file of a preview: its stamp goes, and so
+    /// does its place among the looks to come.
+    fn forget_watch(&mut self, key: &(PhotoId, PreviewSize)) {
+        self.stamps.remove(key);
+        self.due.remove(key);
     }
 }
