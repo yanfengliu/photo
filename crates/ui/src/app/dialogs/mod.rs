@@ -1,12 +1,14 @@
 //! The dialogs (design §8.4): Import; new collection, collection set and
 //! smart collection; editing a smart collection's rules; rename; the
 //! confirmations before deleting a collection or removing photos from the
-//! catalog; and Develop's Copy Settings, Synchronize Settings, New Preset
-//! and snapshot dialogs. At most one is open at a time, and while one is
-//! open the keyboard shortcuts are off.
+//! catalog; Develop's Copy Settings, Synchronize Settings, New Preset and
+//! snapshot dialogs; and Export. At most one is open at a time, and while
+//! one is open the keyboard shortcuts are off.
 
 mod collections;
 mod develop;
+mod export;
+mod export_fields;
 mod import;
 mod import_grid;
 mod smart;
@@ -19,6 +21,7 @@ use self::develop::{
     DeleteDialog as DeleteLookDialog, DevelopDialog, Doomed, GroupsDialog, GroupsPurpose,
     PresetDialog, SnapshotDialog, USER_GROUP,
 };
+use self::export::ExportDialog;
 use self::import::ImportDialog;
 pub(crate) use self::import::ImportSettings;
 use self::smart::SmartDialog;
@@ -39,6 +42,7 @@ pub(crate) enum Dialog {
     Delete(DeleteDialog),
     Remove(RemoveDialog),
     Develop(Box<DevelopDialog>),
+    Export(Box<ExportDialog>),
 }
 
 /// Show the open dialog, if any, and act on its answer.
@@ -53,6 +57,7 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Cx<'_>) {
         Dialog::Delete(dialog) => dialog.show(ctx, cx),
         Dialog::Remove(dialog) => dialog.show(ctx, cx),
         Dialog::Develop(dialog) => dialog.show(ctx, cx),
+        Dialog::Export(dialog) => dialog.show(ctx, cx),
     };
     if open && cx.ui.dialog.is_none() {
         cx.ui.dialog = Some(dialog);
@@ -63,6 +68,23 @@ pub(crate) fn show(ctx: &egui::Context, cx: &mut Cx<'_>) {
 pub(crate) fn open_import(cx: &mut Cx<'_>) {
     let dialog = ImportDialog::open(cx);
     cx.ui.dialog = Some(Dialog::Import(Box::new(dialog)));
+}
+
+/// Shift+Command+E, or an Export… button: export the selected photos (the
+/// active one when none is selected).
+pub(crate) fn open_export(cx: &mut Cx<'_>) {
+    let count = cx
+        .engine
+        .selection()
+        .selected()
+        .len()
+        .max(usize::from(cx.engine.active_photo().is_some()));
+    if count == 0 {
+        cx.say("Select the photos to export.");
+        return;
+    }
+    let dialog = ExportDialog::open(cx, Target::Selected, count);
+    cx.ui.dialog = Some(Dialog::Export(Box::new(dialog)));
 }
 
 /// Open the New Collection dialog, inside the set `parent`.

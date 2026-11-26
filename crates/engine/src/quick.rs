@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use photo_core::develop::{Adj, DevelopSettings, WbPreset, WhiteBalance};
+use photo_core::develop::{Adj, DevelopSettings, Tone, WbPreset, WhiteBalance};
 use photo_core::meta::{FileKind, PhotoId};
 use photo_develop::Source;
 
@@ -208,7 +208,15 @@ impl Engine {
                 let mut next = current.clone();
                 if let Some(found) = computed.get(&photo) {
                     match auto {
-                        Auto::Tone => next.tone = found.tone,
+                        // Contrast is not auto tone's to set: the photo
+                        // keeps the one it has now, whatever it had when
+                        // the run began.
+                        Auto::Tone => {
+                            next.tone = Tone {
+                                contrast: current.tone.contrast,
+                                ..found.tone
+                            };
+                        }
                         Auto::WhiteBalance => next.white_balance = found.white_balance,
                     }
                 }

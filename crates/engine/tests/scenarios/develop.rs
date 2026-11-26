@@ -357,3 +357,26 @@ fn dropping_the_engine_with_renders_in_flight_returns_promptly() {
         start.elapsed()
     );
 }
+
+#[test]
+fn an_edit_not_yet_committed_survives_an_import_and_a_virtual_copy() {
+    let (_library, mut studio) = studio();
+    let (dawn, lake) = (studio.id("dawn.jpg"), studio.id("lake.png"));
+    open_rendered(&mut studio, dawn, FIT);
+    studio.engine.adjust(Adj::Exposure, 0.8).unwrap();
+    let (_more, files) = crate::common::many_jpegs(2, 64, 48);
+    studio.import(files);
+    studio
+        .engine
+        .create_virtual_copies(photo_engine::Target::Photos(vec![lake]))
+        .unwrap();
+    studio.settle();
+    let session = studio.engine.develop().unwrap();
+    assert!(session.is_editing(), "the drag is still in progress");
+    assert_eq!(session.settings().tone.exposure, 0.8);
+    assert!(studio.engine.commit_edit().unwrap());
+    assert_eq!(
+        studio.engine.develop_settings(dawn).unwrap().tone.exposure,
+        0.8
+    );
+}

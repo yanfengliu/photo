@@ -1,12 +1,16 @@
 //! The Tone Curve panel: the parametric curve (its four regions and three
 //! split points) and the point curves of RGB, red, green and blue, each
 //! drawn over the histogram of the frame on screen.
+//!
+//! What is plotted is the pipeline's own shape of each curve, which the
+//! engine hands out ([`plotted`]): the editor never works a curve out for
+//! itself, so it shows exactly what is rendered.
 
 use egui::epaint::Shape;
 use egui::{Button, Color32, CornerRadius, Pos2, Rect, RichText, Stroke, Ui, lerp, pos2, vec2};
-use photo_core::develop::{Adj, CurvePoint, PointCurve};
+use photo_core::develop::{Adj, PointCurve, ToneCurve};
+use photo_engine::{MonotoneCubic, ParametricShape};
 
-use super::curve_math::{Parametric, point_curve};
 use super::{Editing, WIDE_LABEL, edited, heading, sliders_in};
 use crate::app::Cx;
 use crate::app::develop::drafts::Pending;
@@ -62,20 +66,51 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
     }
 }
 
+/// The curve the panel plots for `channel` of `curves`: the pipeline's
+/// compiled shape of it, as a function of a perceptual value.
+pub(crate) fn plotted(curves: &ToneCurve, channel: CurveChannel) -> Box<dyn Fn(f32) -> f32> {
+    let point = |curve: &PointCurve| -> Box<dyn Fn(f32) -> f32> {
+        let cubic = MonotoneCubic::new(curve);
+        Box::new(move |x| cubic.eval(x))
+    };
+    match channel {
+        CurveChannel::Parametric => {
+            let shape = ParametricShape::new(&curves.parametric);
+            Box::new(move |v| shape.eval(v))
+        }
+        CurveChannel::Rgb => point(&curves.rgb),
+        CurveChannel::Red => point(&curves.red),
+        CurveChannel::Green => point(&curves.green),
+        CurveChannel::Blue => point(&curves.blue),
+    }
+}
+
+/// The three splits as the pipeline's parametric curve uses them (kept in
+/// order and apart, whatever the sliders say), read from where its regions
+/// peak: the shadows halfway to the first split, the darks halfway between
+/// the first two, the highlights halfway from the last to white.
+pub(crate) fn splits(shape: &ParametricShape) -> [f32; 3] {
+    let [shadows, darks, _, highlights] = shape.region_centres();
+    let first = 2.0 * shadows;
+    [first, 2.0 * darks - first, 2.0 * highlights - 1.0]
+}
+
 /// The height of a plot `width` wide.
 fn plot_height(width: f32) -> f32 {
     (width * 0.8).round()
 }
 
 fn parametric(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing, backdrop: Option<&HistogramData>) {
-    let shape = Parametric::new(&editing.settings.tone_curve.parametric);
+    let curves = &editing.settings.tone_curve;
+    let shape = ParametricShape::new(&curves.parametric);
+    let curve = plotted(curves, CurveChannel::Parametric);
     let width = ui.available_width();
     let (_, plot) = ui.allocate_space(vec2(width, plot_height(width)));
     if ui.is_rect_visible(plot) {
         let painter = ui.painter_at(plot);
         well(&painter, plot, backdrop.map(|data| &data.luma));
         // The splits, and the shading of the regions between them.
-        for (index, split) in shape.splits.iter().enumerate() {
+        for (index, split) in splits(&shape).iter().enumerate() {
             let x = lerp(plot.x_range(), *split);
             let stroke = Stroke::new(1.0, theme::mix(palette::WELL, palette::OUTLINE, 0.7));
             painter.vline(x, plot.y_range(), stroke);
@@ -91,7 +126,7 @@ fn parametric(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing, backdrop: Option<
             };
             painter.add(Shape::convex_polygon(mark.to_vec(), color, Stroke::NONE));
         }
-        curve_line(&painter, plot, |v| shape.eval(v), palette::TEXT_STRONG);
+        curve_line(&painter, plot, curve, palette::TEXT_STRONG);
     }
     ui.add_space(space::SM);
     heading(ui, "Regions");
@@ -108,6 +143,8 @@ fn point(
     backdrop: Option<&HistogramData>,
 ) {
     let mut settings = editing.settings.clone();
+    // The curve as it is before this frame's edit, as the pipeline shapes it.
+    let sample = plotted(&settings.tone_curve, channel);
     let curves = &mut settings.tone_curve;
     let (curve, name, color, counts): (&mut PointCurve, &str, Color32, Option<&[u32; BINS]>) =
         match channel {
@@ -136,8 +173,6 @@ fn point(
                 backdrop.map(|data| &data.luma),
             ),
         };
-    let drawn: Vec<CurvePoint> = curve.points().to_vec();
-    let sample = move |x: f32| point_curve(&drawn, x);
     let width = ui.available_width();
     let mut editor = CurveEditor::new(name, curve, &sample)
         .color(color)

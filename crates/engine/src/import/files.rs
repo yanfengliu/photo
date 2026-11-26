@@ -25,6 +25,9 @@ pub(crate) struct ReadFile {
     pub(crate) photo: NewPhoto,
     /// Why the sidecar could not be read, if it could not.
     pub(crate) sidecar_problem: Option<String>,
+    /// The format of the develop settings in the sidecar, when this build
+    /// cannot read them: the photo then has the starting settings.
+    pub(crate) unreadable_settings: Option<u32>,
 }
 
 /// Read a file's metadata and, if asked, its XMP sidecar.
@@ -38,12 +41,15 @@ pub(crate) fn read(path: &Path, read_sidecar: bool) -> Result<ReadFile, String> 
     photo.creator = metadata.artist.clone().unwrap_or_default();
     photo.copyright = metadata.copyright.clone().unwrap_or_default();
     photo.metadata = metadata;
-    let mut sidecar_problem = None;
+    let (mut sidecar_problem, mut unreadable_settings) = (None, None);
     if read_sidecar {
         let info = image_info(kind, photo.metadata.width, photo.metadata.height);
         let sidecar = photo_xmp::sidecar_path(path, kind);
         match photo_xmp::read_sidecar(&sidecar, info) {
-            Ok(Some(data)) => apply_sidecar(&mut photo, data),
+            Ok(Some(data)) => {
+                unreadable_settings = data.unreadable_settings_format;
+                apply_sidecar(&mut photo, data);
+            }
             Ok(None) => {}
             Err(error) => sidecar_problem = Some(error.to_string()),
         }
@@ -51,6 +57,7 @@ pub(crate) fn read(path: &Path, read_sidecar: bool) -> Result<ReadFile, String> 
     Ok(ReadFile {
         photo,
         sidecar_problem,
+        unreadable_settings,
     })
 }
 

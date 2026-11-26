@@ -10,8 +10,10 @@ use photo_engine::{
     BeforeSettings, CanvasView, Engine, HistoryStep, PresetInfo, PresetKey, Snapshot,
 };
 
+use super::canvas::map::CanvasMap;
 use super::canvas::{CanvasState, Placement};
 use super::drafts::Pending;
+use super::tools::Tools;
 use crate::widgets::{ClippingToggles, PanelGroup};
 
 /// How the before view is shown with the edit.
@@ -208,6 +210,11 @@ pub(crate) struct DevelopState {
     /// A draft edit waiting for the frame of the one before (see
     /// `drafts`).
     pub(crate) pending: Option<Pending>,
+    /// The crop, healing and masking tools.
+    pub(crate) tools: Tools,
+    /// How the canvas mapped the photo to the screen in the last frame,
+    /// once the photo is decoded.
+    pub(crate) map: Option<CanvasMap>,
 }
 
 impl Default for DevelopState {
@@ -235,6 +242,8 @@ impl Default for DevelopState {
             lights: Lights::On,
             navigator_box: (480, 320),
             pending: None,
+            tools: Tools::default(),
+            map: None,
         }
     }
 }

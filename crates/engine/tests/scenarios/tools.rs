@@ -405,3 +405,20 @@ fn a_healing_spot_takes_its_patch_from_nearby_inside_the_photo_and_off_an_edge()
     assert!(y + 1.25 * r < horizon, "off the horizon: {source:?}");
     assert!(took < Duration::from_millis(100), "cheap: {took:?}");
 }
+
+#[test]
+fn a_late_before_frame_does_not_bring_back_a_before_view_turned_off() {
+    let (_dir, mut studio, _photo) = studio_with_png();
+    studio
+        .engine
+        .set_before(Some(BeforeSettings::Default))
+        .unwrap();
+    studio.engine.set_before(None).unwrap();
+    studio.settle();
+    let session = studio.engine.develop().unwrap();
+    assert_eq!(session.before_settings(), None);
+    assert!(
+        session.before_frame().is_none(),
+        "the late frame was dropped"
+    );
+}

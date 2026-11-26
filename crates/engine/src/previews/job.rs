@@ -42,6 +42,9 @@ pub(crate) enum SourceSeen {
 pub(crate) struct JobResult {
     pub(crate) preview: Result<Preview, String>,
     pub(crate) source: SourceSeen,
+    /// The stamp of the source file the pixels answer to; `None` when the
+    /// file was not there to be read.
+    pub(crate) stamp: Option<Stamp>,
 }
 
 /// Everything a worker needs to make one preview, captured on the engine's
@@ -69,6 +72,7 @@ impl PreviewJob {
                 return JobResult {
                     preview: Err(format!("cannot read {}: {error}", self.path.display())),
                     source: SourceSeen::Unknown,
+                    stamp: None,
                 };
             }
         };
@@ -92,6 +96,7 @@ impl PreviewJob {
                     header.histogram,
                 )),
                 source: SourceSeen::Present,
+                stamp: Some(stamp),
             };
         }
         if let (FileKind::Raw, Some(settings)) = (self.kind, &self.settings)
@@ -150,12 +155,14 @@ impl PreviewJob {
                         header.histogram,
                     )),
                     source: SourceSeen::Present,
+                    stamp: Some(stamp),
                 }
             }
             Err(RenderError::Missing) => self.offline(&file),
             Err(RenderError::Failed(reason)) => JobResult {
                 preview: Err(reason),
                 source: SourceSeen::Present,
+                stamp: Some(stamp),
             },
         }
     }
@@ -178,6 +185,7 @@ impl PreviewJob {
         JobResult {
             preview,
             source: SourceSeen::Missing,
+            stamp: None,
         }
     }
 }

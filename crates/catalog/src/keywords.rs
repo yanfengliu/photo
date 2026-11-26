@@ -312,6 +312,47 @@ impl Catalog {
             })
         })
     }
+
+    /// Make the keywords of any number of photos exactly the given ones, by
+    /// id, in one transaction: [`Catalog::set_photo_keyword_ids`] for each
+    /// entry in order, so a photo listed twice ends with its last list.
+    /// Returns one change per entry, in the same order. All or nothing: an
+    /// unknown keyword or photo fails the whole call and changes nothing.
+    ///
+    /// Handing each photo's former ids back to this call undoes it exactly,
+    /// again in one transaction.
+    pub fn set_keyword_ids_of_photos(
+        &mut self,
+        lists: &[(PhotoId, Vec<KeywordId>)],
+    ) -> Result<Vec<KeywordsChange>> {
+        self.write(|tx, _| {
+            let mut known = std::collections::HashSet::new();
+            let mut changes = Vec::with_capacity(lists.len());
+            for (photo, keywords) in lists {
+                require_photo(tx, *photo)?;
+                let mut wanted = Vec::new();
+                for keyword in keywords {
+                    if known.insert(keyword.0) {
+                        KEYWORDS.require(tx, keyword.0)?;
+                    }
+                    if !wanted.contains(&keyword.0) {
+                        wanted.push(keyword.0);
+                    }
+                }
+                let current: Vec<i64> = keywords_of(tx, *photo)?
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
+                let (removed, added) = replace_keywords(tx, *photo, &current, &wanted)?;
+                changes.push(KeywordsChange {
+                    removed,
+                    added,
+                    created: Vec::new(),
+                });
+            }
+            Ok(changes)
+        })
+    }
 }
 
 /// What setting a photo's keywords changed, which is exactly what undoing it

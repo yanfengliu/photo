@@ -276,3 +276,46 @@ fn quick_develop_moves_each_selected_photo_from_where_it_is_in_one_step() {
         Some("Quick Develop: White Balance Auto")
     );
 }
+
+#[test]
+fn a_pending_auto_tone_keeps_a_contrast_set_while_it_ran() {
+    let (_library, mut studio) = studio();
+    let lake = studio.id("lake.png");
+    let target = || Target::Photos(vec![lake]);
+    studio.engine.quick_auto_tone(target()).unwrap();
+    studio
+        .engine
+        .quick_adjust(target(), Adj::Contrast, 25.0)
+        .unwrap();
+    studio.settle();
+    let tone = studio.engine.develop_settings(lake).unwrap().tone;
+    assert_eq!(tone.contrast, 25.0, "the newer adjustment stays");
+    assert_ne!(tone.exposure, 0.0, "auto tone set the exposure");
+}
+
+#[test]
+fn an_automatic_result_for_one_photo_leaves_the_drag_on_another_alone() {
+    let (_library, mut studio) = studio();
+    let (dawn, lake) = (studio.id("dawn.jpg"), studio.id("lake.png"));
+    studio.engine.open_develop(dawn).unwrap();
+    studio.settle();
+    let steps = studio.engine.history(dawn).unwrap().len();
+    studio.engine.adjust(Adj::Exposure, 0.4).unwrap();
+    studio
+        .engine
+        .quick_auto_tone(Target::Photos(vec![lake]))
+        .unwrap();
+    studio.settle();
+    assert!(
+        studio.engine.develop().unwrap().is_editing(),
+        "still dragging"
+    );
+    assert_eq!(studio.engine.history(dawn).unwrap().len(), steps);
+    studio.engine.adjust(Adj::Exposure, 0.6).unwrap();
+    studio.engine.commit_edit().unwrap();
+    assert_eq!(
+        studio.engine.history(dawn).unwrap().len(),
+        steps + 1,
+        "one drag, one step"
+    );
+}

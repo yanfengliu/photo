@@ -121,6 +121,8 @@ pub struct Engine {
     pub(crate) shutdown: photo_develop::CancelToken,
     pub(crate) develop: Option<DevelopSession>,
     pub(crate) develop_generation: u64,
+    /// Cancels the load of the photo open in Develop.
+    pub(crate) develop_loading: Option<CancelToken>,
     /// Render requests of the develop session not yet delivered.
     pub(crate) renders: HashSet<u64>,
     pub(crate) next_render: u64,
@@ -176,6 +178,7 @@ impl Engine {
             shutdown: photo_develop::CancelToken::new(),
             develop: None,
             develop_generation: 0,
+            develop_loading: None,
             renders: HashSet::new(),
             next_render: 0,
             renderer,
@@ -437,11 +440,22 @@ impl Engine {
 }
 
 impl Drop for Engine {
-    /// Stop every render first (exports leave no file behind); the workers
-    /// are then joined as the engine's fields are dropped.
+    /// Stop every render first (exports leave no file behind), then the
+    /// workers. What they had finished is brought in as a last poll would,
+    /// and every file an import has read and copied gets its record, so
+    /// that closing during an import leaves no copy the catalog does not
+    /// know.
     fn drop(&mut self) {
         self.shutdown.cancel();
         self.exports.cancel_all();
+        self.pool.shut_down();
+        if std::thread::panicking() {
+            return;
+        }
+        while let Ok(event) = self.events.try_recv() {
+            self.handle(event);
+        }
+        self.record_ready_imports();
     }
 }
 
@@ -468,3 +482,6 @@ fn start_renderer(
 fn ui_key(key: &str) -> String {
     format!("ui.{key}")
 }
+
+#[cfg(test)]
+mod tests;

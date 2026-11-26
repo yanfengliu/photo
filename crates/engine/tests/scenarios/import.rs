@@ -418,3 +418,62 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
     files.sort();
     files
 }
+
+#[test]
+fn closing_the_app_during_a_copy_import_leaves_no_file_without_a_record() {
+    let (_files_dir, files) = many_jpegs(300, 24, 16);
+    let destination = tempfile::tempdir().unwrap();
+    let mut studio = Studio::with_workers(1);
+    let request = ImportRequest {
+        mode: ImportMode::Copy {
+            destination: destination.path().to_path_buf(),
+            layout: CopyLayout::OneFolder,
+        },
+        ..add(files)
+    };
+    let task = studio.engine.start_import(request).unwrap();
+    wait_for_first_batch(&mut studio, task);
+    let Studio { dir, engine } = studio;
+    drop(engine);
+
+    let catalog = Catalog::open(config(dir.path(), 1).catalog_path).unwrap();
+    let copies = files_under(destination.path());
+    assert!(!copies.is_empty(), "the first batch is kept");
+    for copy in copies {
+        assert!(
+            catalog.find_by_path(&copy).unwrap().is_some(),
+            "{} has no record",
+            copy.display()
+        );
+    }
+}
+
+#[test]
+fn cancelling_the_scan_of_one_large_folder_stops_it_part_way() {
+    const FILES: usize = 5000;
+    let (_files_dir, files) = many_jpegs(FILES, 24, 16);
+    let folder = files[0].parent().unwrap().to_path_buf();
+    let mut studio = Studio::with_workers(1);
+    let task = studio.engine.scan_folder(&folder, false);
+    let deadline = Instant::now() + PATIENCE;
+    while studio.engine.import_scan().unwrap().candidates.is_empty() {
+        assert!(Instant::now() < deadline, "the scan never found anything");
+        let idle = studio.engine.wait_idle(Duration::from_millis(1));
+        assert!(!idle, "the scan ended before it could be cancelled");
+    }
+    assert!(studio.engine.cancel_task(task));
+    studio.settle();
+    let scan = studio.engine.import_scan().unwrap();
+    assert!(scan.finished);
+    // Before every entry was checked, only the last few files of a
+    // cancelled scan were left out.
+    assert!(
+        scan.candidates.len() < FILES / 2,
+        "the scan ran on to file {} of {FILES}",
+        scan.candidates.len()
+    );
+    assert_eq!(
+        studio.engine.task(task).unwrap().state,
+        TaskState::Cancelled
+    );
+}

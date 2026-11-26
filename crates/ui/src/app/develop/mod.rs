@@ -27,6 +27,7 @@ mod left;
 pub(crate) mod right;
 pub(crate) mod state;
 mod toolbar;
+pub(crate) mod tools;
 
 use egui::{Color32, Id, Key, Order, Rect, Sense, Ui, pos2};
 
@@ -36,6 +37,7 @@ pub(crate) use self::frames::Frames;
 pub use self::frames::{CanvasImage, CanvasShows};
 pub(crate) use self::state::DevelopState;
 pub use self::state::{BeforeAfter, Lights};
+pub use self::tools::{MaskKind, Tool};
 use self::state::{LEFT_KEY, RIGHT_KEY, Told, encode_panels};
 use super::Cx;
 use super::actions::Action;
@@ -50,6 +52,7 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) -> Rect {
         cx.ui.develop.picker = false;
     }
     follow_active(cx);
+    tools::sync(cx);
     cx.frames.sync(ui.ctx(), cx.engine.develop());
     let open = cx.engine.develop().map(|session| session.photo());
     let generation = cx.generation;
@@ -166,6 +169,7 @@ pub(crate) fn follow_active(cx: &mut Cx<'_>) {
 
 /// Close the session, for leaving the module.
 pub(crate) fn close(cx: &mut Cx<'_>) {
+    tools::put_away(cx);
     drafts::flush(cx);
     cx.frames.forget();
     cx.ui.develop.lights = Lights::On;

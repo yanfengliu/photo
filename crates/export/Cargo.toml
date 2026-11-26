@@ -16,6 +16,7 @@ photo-imaging = { workspace = true }
 image = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
+same-file = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

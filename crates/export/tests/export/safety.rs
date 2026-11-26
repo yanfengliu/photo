@@ -12,6 +12,65 @@ use photo_export::{
 
 use crate::common::{Fixture, linear_source, names, written};
 
+/// Runs `action` from another thread as soon as an export's temporary file
+/// appears in `folder`; true when it ran.
+fn when_writing_starts(
+    folder: std::path::PathBuf,
+    action: impl FnOnce() + Send + 'static,
+) -> thread::JoinHandle<bool> {
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            let partial = fs::read_dir(&folder)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .any(|entry| entry.file_name().to_string_lossy().ends_with(".part"))
+                })
+                .unwrap_or(false);
+            if partial {
+                action();
+                return true;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        false
+    })
+}
+
+/// Review finding E1: an original moved onto the destination while the
+/// export renders is still the original, and is not replaced.
+#[test]
+fn an_original_moved_onto_the_destination_during_the_export_survives() {
+    let mut fixture = Fixture::named("a.tif", 64, 48);
+    let before = fs::read(&fixture.original).unwrap();
+    fixture.source = linear_source(3000, 2000, |x, y| {
+        [(x % 97) as f32 / 97.0, (y % 89) as f32 / 89.0, 0.5]
+    });
+    let mut settings = fixture.settings_out();
+    settings.location.folder = Folder::SameAsOriginal;
+    settings.location.existing = ExistingFile::Overwrite;
+    settings.naming.template = "b".into();
+    settings.format = Format::Tiff {
+        depth: BitDepth::Sixteen,
+    };
+    let destination = fixture.original.with_file_name("b.tif");
+    let mover = {
+        let (from, to) = (fixture.original.clone(), destination.clone());
+        when_writing_starts(fixture.dir.path().to_path_buf(), move || {
+            fs::rename(from, to).unwrap()
+        })
+    };
+    let result = export(&fixture.item(), &settings, &CancelToken::new());
+    assert!(mover.join().unwrap(), "the temporary file was never seen");
+    assert!(
+        matches!(&result, Err(ExportError::WouldOverwriteSource(path)) if *path == destination),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(&destination).unwrap(), before, "the original survives");
+    assert_eq!(names(fixture.dir.path()), ["b.tif"]);
+}
+
 #[test]
 fn the_original_is_never_the_file_written_under_any_policy() {
     let fixture = Fixture::named("photo.tif", 64, 48);
@@ -140,25 +199,8 @@ fn a_cancelled_export_leaves_no_file_and_no_temporary_file() {
     let out = fixture.out_dir();
     let cancel = CancelToken::new();
     let watcher = {
-        let (cancel, out) = (cancel.clone(), out.clone());
-        thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(120);
-            while Instant::now() < deadline {
-                let partial = fs::read_dir(&out)
-                    .map(|entries| {
-                        entries
-                            .flatten()
-                            .any(|e| e.file_name().to_string_lossy().ends_with(".part"))
-                    })
-                    .unwrap_or(false);
-                if partial {
-                    cancel.cancel();
-                    return true;
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-            false
-        })
+        let cancel = cancel.clone();
+        when_writing_starts(out.clone(), move || cancel.cancel())
     };
     let result = export(&fixture.item(), &settings, &cancel);
     assert!(watcher.join().unwrap(), "the temporary file was never seen");

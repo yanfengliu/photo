@@ -2,8 +2,10 @@
 //! module picker) and the thin strips at the window's edges that hide and
 //! show each edge (design §8.1).
 
+use std::path::Path;
+
 use egui::{Align, Button, Layout, Margin, ProgressBar, Rect, RichText, Ui, Vec2, vec2};
-use photo_engine::{TaskKind, TaskState};
+use photo_engine::{ExportOutcome, TaskKind, TaskState};
 
 use super::Cx;
 use super::actions::Action;
@@ -165,5 +167,52 @@ fn activity(ui: &mut Ui, cx: &mut Cx<'_>) {
             cx.act(Action::CancelTask(task.id));
         }
         ui.add_space(space::LG);
+    }
+    export_notice(ui, cx);
+}
+
+/// The export that ended last, until its notice is dismissed: how many
+/// files it wrote, and a way to the folder they are in.
+fn export_notice(ui: &mut Ui, cx: &mut Cx<'_>) {
+    let ended = cx
+        .engine
+        .tasks()
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Export && task.state.is_over())
+        .map(|task| (task.id, task.total));
+    let Some((task, total)) = ended else {
+        return;
+    };
+    if cx.ui.dismissed_export == Some(task) {
+        return;
+    }
+    let results = cx.engine.export_results(task).unwrap_or_default();
+    let written: Vec<&Path> = results
+        .iter()
+        .filter_map(|exported| match &exported.result {
+            Ok(ExportOutcome::Written { path, .. }) => Some(path.as_path()),
+            _ => None,
+        })
+        .collect();
+    let folder = written
+        .first()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
+    let text = format!("Exported {} of {total}", written.len());
+    ui.label(RichText::new(text).color(palette::TEXT_DIM).small());
+    if let Some(folder) = folder
+        && ui
+            .add(Button::new(RichText::new("Show Exported Files").small()))
+            .on_hover_text(format!("Open {}", folder.display()))
+            .clicked()
+    {
+        (cx.reveal)(&folder);
+    }
+    if ui
+        .add(IconButton::new(Icon::Close, "Dismiss the export notice").side(18.0))
+        .clicked()
+    {
+        cx.ui.dismissed_export = Some(task);
     }
 }

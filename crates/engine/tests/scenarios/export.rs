@@ -195,9 +195,8 @@ fn the_camera_jpeg_of_a_raw_pair_is_never_written_over() {
         reason.contains("original of a photo in the catalog"),
         "{reason}"
     );
-    assert_eq!(
-        fs::read(&jpeg).unwrap(),
-        camera,
+    assert!(
+        fs::read(&jpeg).unwrap() == camera,
         "the camera's JPEG is untouched"
     );
     assert_eq!(
@@ -227,7 +226,7 @@ fn the_camera_jpeg_of_a_raw_pair_is_never_written_over() {
         "IMG_1-2.jpg",
         "a name of its own"
     );
-    assert_eq!(fs::read(&jpeg).unwrap(), camera);
+    assert!(fs::read(&jpeg).unwrap() == camera);
 
     let previews = studio.previews_dir();
     let catalog_path = config(studio.dir.path(), 2).catalog_path;
@@ -289,4 +288,45 @@ fn export_presets_are_saved_listed_and_deleted_and_the_default_folder_is_the_exp
             .start_export(Target::Selected, ExportSettings::default()),
         Err(EngineError::NothingToExport)
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_original_catalogued_through_a_linked_folder_is_never_written_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let actual = dir.path().join("actual");
+    fs::create_dir(&actual).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&actual, &link).unwrap();
+    let original = photo_testkit::write_jpeg(&actual, "IMG_7.jpg", 96, 64);
+    let bytes = fs::read(&original).unwrap();
+    let other = photo_testkit::write_png8(dir.path(), "IMG_7.png", 72, 48);
+    let mut studio = Studio::new();
+    studio.import(vec![link.join("IMG_7.jpg"), other]);
+    let png = studio.id("IMG_7.png");
+    let settings = ExportSettings {
+        location: Location {
+            folder: Folder::Specific(actual.clone()),
+            existing: ExistingFile::Overwrite,
+            ..Location::default()
+        },
+        ..ExportSettings::default()
+    };
+    let task = studio
+        .engine
+        .start_export(Target::Photos(vec![png]), settings)
+        .unwrap();
+    studio.settle();
+    let result = studio.engine.export_results(task).unwrap()[0]
+        .result
+        .clone();
+    assert!(
+        fs::read(&original).unwrap() == bytes,
+        "the original is untouched"
+    );
+    let reason = result.unwrap_err();
+    assert!(
+        reason.contains("original of a photo in the catalog"),
+        "{reason}"
+    );
 }

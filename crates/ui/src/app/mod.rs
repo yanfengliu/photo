@@ -13,19 +13,27 @@ mod dialogs;
 mod dispatch;
 mod input;
 mod library;
+mod open;
+mod reveal;
 mod shell;
 mod state;
 mod text;
 mod textures;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use photo_core::geom::Point;
 use photo_engine::Engine;
 
 use self::actions::Action;
-pub use self::develop::{BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Lights};
+use self::develop::drafts::Pending;
+pub use self::develop::{
+    BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Lights, MaskKind, Tool,
+};
 use self::develop::{DevelopState, Frames};
+pub use self::open::{OpenError, Opened};
 use self::state::UiState;
 pub use self::state::{Layout, Module, View, Zoom};
 use self::textures::Textures;
@@ -52,6 +60,8 @@ pub struct PhotoApp {
     /// Whether the engine's background results are held back (see
     /// [`PhotoApp::hold_results`]).
     holding: bool,
+    /// How a folder is shown to the user (see [`PhotoApp::set_reveal`]).
+    reveal: Box<dyn Fn(&Path)>,
 }
 
 /// What a part of the window draws with: the engine, the presentation
@@ -64,6 +74,8 @@ pub(crate) struct Cx<'a> {
     actions: &'a mut Vec<Action>,
     toasts: &'a mut Toasts,
     pub(crate) generation: u64,
+    /// Shows a folder to the user, in the system's file manager.
+    pub(crate) reveal: &'a dyn Fn(&Path),
 }
 
 impl Cx<'_> {
@@ -101,7 +113,24 @@ impl PhotoApp {
             actions: Vec::new(),
             generation: 0,
             holding: false,
+            reveal: Box::new(reveal::in_file_manager),
         }
+    }
+
+    /// Start in `module` showing `view`, for an app opened on a photo:
+    /// call before the first frame. Develop opens the active photo, or the
+    /// first one.
+    pub fn starting_in(mut self, module: Module, view: View) -> Self {
+        self.ui.view = view;
+        self.ui.module = module;
+        self
+    }
+
+    /// Replace how a folder is shown to the user (by default, in the
+    /// system's file manager): the automation harness and tests record the
+    /// folder instead of opening a window.
+    pub fn set_reveal(&mut self, reveal: impl Fn(&Path) + 'static) {
+        self.reveal = Box::new(reveal);
     }
 
     /// The engine, to read what it holds: the photo list, the selection,
@@ -165,6 +194,49 @@ impl PhotoApp {
     /// What the Develop canvas showed in the last frame drawn.
     pub fn canvas_shows(&self) -> CanvasShows {
         self.frames.shows
+    }
+
+    /// The Develop tool that is open.
+    pub fn tool(&self) -> Option<Tool> {
+        self.ui.develop.tools.open
+    }
+
+    /// Where the crop rectangle is on the Develop canvas, in points, while
+    /// the crop tool is open, as of the last frame drawn.
+    pub fn crop_rect(&self) -> Option<egui::Rect> {
+        self.ui.develop.tools.crop_rect
+    }
+
+    /// The healing spot selected in the healing tool: its place in the
+    /// settings' list.
+    pub fn selected_spot(&self) -> Option<usize> {
+        self.ui.develop.tools.heal.selected
+    }
+
+    /// The mask selected in the masking tool: its place in the settings'
+    /// list.
+    pub fn selected_mask(&self) -> Option<usize> {
+        self.ui.develop.tools.mask.selected
+    }
+
+    /// Whether the masking tool's red overlay is switched on.
+    pub fn mask_overlay(&self) -> bool {
+        self.ui.develop.tools.mask.overlay
+    }
+
+    /// Where a point of the open photo's source (fractions of its width
+    /// and height, as spots and masks are stored) is on the Develop canvas,
+    /// in points, as of the last frame drawn. `None` until the photo is
+    /// decoded.
+    pub fn canvas_position(&self, source: Point) -> Option<egui::Pos2> {
+        self.ui.develop.map.as_ref()?.to_screen(source)
+    }
+
+    /// The point of the open photo's source (fractions of its width and
+    /// height) under a position of the Develop canvas, in points, as of the
+    /// last frame drawn.
+    pub fn canvas_source(&self, position: egui::Pos2) -> Option<Point> {
+        Some(self.ui.develop.map.as_ref()?.to_normalized(position))
     }
 
     /// Where the whole photo is on the Develop canvas (in points, part of
@@ -246,6 +318,7 @@ impl PhotoApp {
             actions: &mut self.actions,
             toasts: &mut self.toasts,
             generation: self.generation,
+            reveal: &*self.reveal,
         }
     }
 
@@ -256,13 +329,42 @@ impl PhotoApp {
             return;
         }
         for action in std::mem::take(&mut self.actions) {
+            if action.edits_outside_tools() {
+                self.record_tool_step();
+            }
             let failure = action.failure();
             if let Err(error) = action.apply(&mut self.engine) {
                 self.toasts.push(format!("{failure}: {error}"));
             }
+            // The layout of every version an action makes is kept, so a
+            // frame rendered for it can be placed.
+            if let Some(session) = self.engine.develop() {
+                self.frames.layouts.note(session);
+            }
         }
         self.generation += 1;
         ctx.request_repaint();
+    }
+
+    /// Before a change from outside the tools: record what the open tool
+    /// has changed as a step of its own, a draft of it that still waits for
+    /// its turn included.
+    fn record_tool_step(&mut self) {
+        let develop = &mut self.ui.develop;
+        let waiting = develop.pending.as_ref().is_some_and(Pending::is_tool);
+        if !waiting && !develop.tools.dirty {
+            return;
+        }
+        develop.tools.dirty = false;
+        let draft = develop.pending.take_if(|pending| pending.is_tool());
+        let sent = match draft {
+            Some(draft) => Action::Develop(draft.into_action()).apply(&mut self.engine),
+            None => Ok(()),
+        };
+        if let Err(error) = sent.and_then(|()| self.engine.commit_edit().map(drop)) {
+            self.toasts
+                .push(format!("Could not change the photo: {error}"));
+        }
     }
 
     /// Notice when the active photo changes, so the grid and filmstrip
@@ -290,7 +392,11 @@ impl eframe::App for PhotoApp {
         // pressed in already shows what they did.
         if self.ui.dialog.is_none() && !ctx.text_edit_focused() {
             let mut cx = self.cx();
-            for shortcut in input::take_shortcuts(&ctx, cx.ui.module) {
+            let scope = input::Scope {
+                module: cx.ui.module,
+                tool: cx.ui.develop.tools.open,
+            };
+            for shortcut in input::take_shortcuts(&ctx, scope) {
                 dispatch::shortcut(&mut cx, &ctx, shortcut);
             }
         }

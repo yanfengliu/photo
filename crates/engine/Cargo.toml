@@ -23,6 +23,8 @@ photo-xmp = { workspace = true }
 image = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
+# Tells whether two paths are the same folder, however they are spelled.
+same-file = { workspace = true }
 # Export presets are stored in the catalog as JSON.
 serde_json = { workspace = true }
 thiserror = { workspace = true }

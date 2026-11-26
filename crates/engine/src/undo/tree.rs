@@ -27,6 +27,12 @@ pub(crate) trait Tree {
         id: Self::Id,
         parent: Option<Self::Id>,
     ) -> Result<(), CatalogError>;
+    /// Whether something has come to depend on the node by a way the undo
+    /// stack did not see, so that deleting it would take away more than
+    /// its creation gave.
+    fn in_use(_catalog: &Catalog, _id: Self::Id) -> Result<bool, CatalogError> {
+        Ok(false)
+    }
 }
 
 /// Collection sets, collections and smart collections.
@@ -93,6 +99,14 @@ impl Tree for Keywords {
     ) -> Result<(), CatalogError> {
         catalog.move_keyword(id, parent)
     }
+
+    /// A keyword photos carry, or other keywords sit under: an import can
+    /// assign a keyword by name without the undo stack knowing.
+    fn in_use(catalog: &Catalog, id: KeywordId) -> Result<bool, CatalogError> {
+        Ok(catalog.keywords()?.iter().any(|keyword| {
+            (keyword.id == id && keyword.photo_count > 0) || keyword.parent == Some(id)
+        }))
+    }
 }
 
 /// A branch that is in the catalog, or deleted with its restore data.
@@ -108,6 +122,17 @@ impl<T: Tree> Branch<T> {
             *self = Self::Deleted(Box::new(T::delete(catalog, *id)?));
         }
         Ok(())
+    }
+
+    /// Take back a creation: delete the branch, unless something else has
+    /// come to use it since. Then it stays, and redoing finds it there.
+    fn delete_unused(&mut self, catalog: &mut Catalog) -> Result<(), CatalogError> {
+        if let Self::Present(id) = self
+            && T::in_use(catalog, *id)?
+        {
+            return Ok(());
+        }
+        self.delete(catalog)
     }
 
     fn restore(&mut self, catalog: &mut Catalog) -> Result<(), CatalogError> {
@@ -143,7 +168,7 @@ pub(crate) enum TreeEdit<T: Tree> {
 impl<T: Tree> TreeEdit<T> {
     pub(crate) fn undo(&mut self, catalog: &mut Catalog) -> Result<(), CatalogError> {
         match self {
-            Self::Created(branch) => branch.delete(catalog),
+            Self::Created(branch) => branch.delete_unused(catalog),
             Self::Deleted(branch) => branch.restore(catalog),
             Self::Renamed { id, before, .. } => T::rename(catalog, *id, before),
             Self::Moved { id, before, .. } => T::reparent(catalog, *id, *before),

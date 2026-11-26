@@ -175,8 +175,13 @@ pub struct DevelopSession {
     pub(crate) frame: Option<DevelopFrame>,
     pub(crate) before: Option<(BeforeSettings, DevelopSettings)>,
     pub(crate) before_frame: Option<DevelopFrame>,
+    /// Renders asked for up to this request were for an earlier choice of
+    /// before view.
+    pub(crate) before_since: u64,
     pub(crate) look: Option<(PresetKey, DevelopSettings, (u32, u32))>,
     pub(crate) look_frame: Option<(PresetKey, DevelopFrame)>,
+    /// Renders asked for up to this request were for an earlier preset.
+    pub(crate) look_since: u64,
     /// The mask whose overlay is shown, and its newest coverage.
     pub(crate) overlay_mask: Option<usize>,
     pub(crate) overlay: Option<MaskOverlay>,

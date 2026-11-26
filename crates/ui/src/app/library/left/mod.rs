@@ -48,16 +48,29 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
                 .show_separator_line(false)
                 .frame(frame)
                 .show(ui, |ui| {
-                    // Centred: a wide button lays its label out by the
-                    // layout's cross alignment.
-                    ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                        let label = RichText::new("Import…").color(palette::TEXT_STRONG);
-                        let button = Button::new(label)
-                            .fill(palette::ACCENT_DIM)
-                            .min_size(vec2(ui.available_width(), 26.0));
-                        if ui.add(button).clicked() {
-                            dialogs::open_import(cx);
-                        }
+                    ui.columns(2, |columns| {
+                        // Centred: a wide button lays its label out by the
+                        // layout's cross alignment.
+                        let width = columns[0].available_width();
+                        columns[0].with_layout(Layout::top_down(Align::Center), |ui| {
+                            let label = RichText::new("Import…").color(palette::TEXT_STRONG);
+                            let button = Button::new(label)
+                                .fill(palette::ACCENT_DIM)
+                                .min_size(vec2(width, 26.0));
+                            if ui.add(button).clicked() {
+                                dialogs::open_import(cx);
+                            }
+                        });
+                        columns[1].with_layout(Layout::top_down(Align::Center), |ui| {
+                            let button = Button::new("Export…").min_size(vec2(width, 26.0));
+                            if ui
+                                .add(button)
+                                .on_hover_text("Export the selected photos as image files")
+                                .clicked()
+                            {
+                                dialogs::open_export(cx);
+                            }
+                        });
                     });
                 });
             let mut panels = std::mem::take(&mut cx.ui.left_panels);

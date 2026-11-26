@@ -64,9 +64,15 @@ impl Engine {
             )),
             None => None,
         };
+        let issued = self.next_render;
         if let Some(session) = self.develop.as_mut() {
+            if session.before == base {
+                return Ok(());
+            }
             session.before = base;
             session.before_frame = None;
+            // A frame asked for the choice before this one is not kept.
+            session.before_since = issued;
         }
         self.render_session(Purpose::Before, Quality::Full);
         Ok(())
@@ -142,8 +148,13 @@ impl Engine {
             None => None,
         };
         let shown = look.is_some();
+        let issued = self.next_render;
         if let Some(session) = self.develop.as_mut() {
+            if session.look == look {
+                return Ok(());
+            }
             session.look = look;
+            session.look_since = issued;
             if !shown {
                 session.look_frame = None;
             }

@@ -93,8 +93,10 @@ pub struct ImportSummary {
     pub already_in_catalog: Vec<PathBuf>,
     /// Files left out as suspected duplicates.
     pub suspected_duplicates: Vec<PathBuf>,
-    /// Files that failed (not imported) or whose sidecar could not be read
-    /// (imported without it).
+    /// Files that failed (not imported), whose sidecar could not be read
+    /// (imported without it), or whose sidecar holds develop settings this
+    /// version cannot read (imported with the starting settings; the
+    /// sidecar keeps its own).
     pub errors: Vec<FileIssue>,
     /// True once every file has been dealt with.
     pub finished: bool,
@@ -150,6 +152,7 @@ impl Engine {
             next_insert: 0,
             working: paths.len(),
             accepted: HashSet::new(),
+            unreadable_settings: 0,
         });
         let read_sidecars = request.read_sidecars;
         for (index, path) in paths.into_iter().enumerate() {

@@ -2,6 +2,9 @@
 //! embedded preview first, then the decode through the shared cache of
 //! decoded sources. Each stage is a job on the urgent lane and lands in
 //! [`Engine::poll`] only while the session it was started for is open.
+//! Opening another photo, or closing, cancels the load of the one before:
+//! a stage still queued never runs, and one that was running hands nothing
+//! back, so stepping quickly through photos decodes only where it stops.
 
 use std::sync::Arc;
 
@@ -18,7 +21,7 @@ use super::{
 };
 use crate::engine::{Engine, JobFailure};
 use crate::error::EngineError;
-use crate::jobs::Lane;
+use crate::jobs::{CancelToken, Lane};
 use crate::previews::render;
 use crate::stamp::Stamp;
 
@@ -27,6 +30,9 @@ const EMBEDDED_EDGE: u32 = 2048;
 
 /// The start of the reason a load fails with when the file has gone.
 const MISSING: &str = "the file is missing";
+
+/// What a load cancelled by a newer one reports.
+const STOPPED: &str = "loading was stopped";
 
 impl Engine {
     /// Open `photo` in Develop. Its settings are read at once; a RAW
@@ -61,6 +67,7 @@ impl Engine {
         }
         self.close_develop();
         self.develop_generation += 1;
+        self.develop_loading = Some(CancelToken::default());
         let read_only = if newer {
             Some(NEWER_SETTINGS.to_string())
         } else if self.catalog.is_read_only() {
@@ -83,8 +90,10 @@ impl Engine {
             frame: None,
             before: None,
             before_frame: None,
+            before_since: 0,
             look: None,
             look_frame: None,
+            look_since: 0,
             overlay_mask: None,
             overlay: None,
             read_only,
@@ -128,6 +137,9 @@ impl Engine {
 
     /// Bring the open photo's settings back in line with the catalog after
     /// a command changed them (undo, redo, paste, a preset), and render.
+    /// Does nothing while the catalog still holds what was last committed,
+    /// so an edit in progress survives a refresh that is not about it (an
+    /// import, a virtual copy, a removal).
     pub(crate) fn reload_develop(&mut self) {
         let Some(session) = self.develop.as_mut() else {
             return;
@@ -135,7 +147,7 @@ impl Engine {
         let Ok(settings) = self.catalog.develop_settings(session.photo) else {
             return;
         };
-        if settings == session.committed && settings == session.settings {
+        if settings == session.committed {
             return;
         }
         let overlay_moves = session
@@ -162,8 +174,12 @@ impl Engine {
         }
     }
 
-    /// Forget the session and the renders asked for it.
+    /// Forget the session and the renders asked for it, and stop loading
+    /// its photo.
     fn end_session(&mut self) {
+        if let Some(loading) = self.develop_loading.take() {
+            loading.cancel();
+        }
         for dropped in self.renderer.clear() {
             self.renders.remove(&dropped);
         }
@@ -178,13 +194,15 @@ impl Engine {
         };
         let (generation, path) = (session.generation, session.path.clone());
         let orientation = session.settings.orientation;
+        let loading = self.develop_loading.clone();
         self.submit(
             Lane::Urgent,
             None,
-            None,
-            move |_| {
+            loading,
+            move |context| {
                 let preview = render::embedded(&path, FileKind::Raw, orientation, EMBEDDED_EDGE)
                     .ok()
+                    .filter(|_| !context.should_stop())
                     .map(|rendered| rendered.image);
                 Box::new(move |engine: &mut Engine| engine.embedded_loaded(generation, preview))
             },
@@ -213,11 +231,12 @@ impl Engine {
         };
         let (generation, path) = (session.generation, session.path.clone());
         let sources = self.sources.clone();
+        let loading = self.develop_loading.clone();
         self.submit(
             Lane::Urgent,
             None,
-            None,
-            move |_| {
+            loading,
+            move |context| {
                 let decoded = match Stamp::read(&path) {
                     Ok(stamp) => sources
                         .decode(&path, stamp)
@@ -227,11 +246,19 @@ impl Engine {
                     }
                     Err(error) => Err(error.to_string()),
                 };
+                // A photo closed meanwhile hands nothing back: its pixels
+                // stay in the bounded cache only, not in a result waiting
+                // to be polled in.
+                let decoded = if context.should_stop() {
+                    Err(STOPPED.to_string())
+                } else {
+                    decoded
+                };
                 Box::new(move |engine: &mut Engine| engine.source_loaded(generation, decoded))
             },
             move |engine, failure| {
                 let reason = match failure {
-                    JobFailure::Skipped => "loading was stopped".to_string(),
+                    JobFailure::Skipped => STOPPED.to_string(),
                     JobFailure::Panicked(message) => message,
                 };
                 engine.source_loaded(generation, Err(reason))

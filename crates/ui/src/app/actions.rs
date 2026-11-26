@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use photo_core::meta::{CollectionId, ColorLabel, Flag, KeywordId, PhotoId, Rating};
 use photo_engine::{
-    Engine, EngineError, Filter, ImportRequest, Movement, SmartRules, Sort, Source, Target, TaskId,
-    TextField,
+    Engine, EngineError, ExportSettings, Filter, ImportRequest, Movement, SmartRules, Sort, Source,
+    Target, TaskId, TextField,
 };
 
 use super::develop::actions::DevelopAction;
@@ -74,6 +74,10 @@ pub(crate) enum Action {
         recursive: bool,
     },
     StartImport(ImportRequest),
+    /// Export the target's photos as the settings say.
+    StartExport(Target, Box<ExportSettings>),
+    SaveExportPreset(String, Box<ExportSettings>),
+    DeleteExportPreset(String),
     CancelTask(TaskId),
 }
 
@@ -151,11 +155,31 @@ impl Action {
             Self::StartImport(request) => {
                 engine.start_import(request)?;
             }
+            Self::StartExport(target, settings) => {
+                engine.start_export(target, *settings)?;
+            }
+            Self::SaveExportPreset(name, settings) => {
+                engine.save_export_preset(&name, &settings)?;
+            }
+            Self::DeleteExportPreset(name) => {
+                engine.delete_export_preset(&name)?;
+            }
             Self::CancelTask(task) => {
                 engine.cancel_task(task);
             }
         }
         Ok(())
+    }
+
+    /// Whether the action changes the open photo's settings from outside
+    /// the Develop tools (see `DevelopAction::edits_outside_tools`). Undo
+    /// and redo do: they put the catalog's settings back in the session.
+    pub(crate) fn edits_outside_tools(&self) -> bool {
+        match self {
+            Self::Develop(action) => action.edits_outside_tools(),
+            Self::Undo | Self::Redo => true,
+            _ => false,
+        }
     }
 
     /// What to tell the user when the engine refuses the action, before the
@@ -190,6 +214,9 @@ impl Action {
             Self::Undo => "Could not undo",
             Self::Redo => "Could not redo",
             Self::StartImport(_) => "Could not start the import",
+            Self::StartExport(..) => "Could not start the export",
+            Self::SaveExportPreset(..) => "Could not save the export preset",
+            Self::DeleteExportPreset(_) => "Could not delete the export preset",
             Self::SelectOnly(_)
             | Self::ToggleSelected(_)
             | Self::ExtendSelection(_)

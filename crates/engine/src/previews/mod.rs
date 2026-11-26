@@ -22,18 +22,23 @@
 //! Requests are served newest first, and asking again for a preview that is
 //! still queued moves it to the front, so scrolling stays responsive. A
 //! source file that has gone is recorded as missing in the catalog, and the
-//! failure is remembered for that develop version instead of being retried
-//! on every request; a photo whose file is missing still shows the last
-//! preview written for its current version.
+//! failure is remembered for a few seconds instead of being retried on
+//! every request, then tried again, so a drive plugged back in shows its
+//! photos; a photo whose file is missing still shows the last preview
+//! written for its current version. A preview served from memory has its
+//! source file looked at again now and then, on a worker (see `recheck`):
+//! a file replaced since gets a new preview.
 
 mod disk;
 mod job;
+mod recheck;
 pub(crate) mod render;
 mod types;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use photo_catalog::CatalogError;
 use photo_core::meta::{FileKind, PhotoId};
@@ -44,7 +49,8 @@ pub use types::{LoadState, Preview, PreviewOrigin, PreviewSize, PreviewState};
 use crate::engine::{Engine, JobFailure};
 use crate::jobs::{JobKey, Lane};
 use crate::lru::Lru;
-use job::{PreviewJob, SourceSeen};
+use crate::stamp::Stamp;
+use job::{JobResult, PreviewJob, SourceSeen};
 
 /// Bytes of thumbnail pixels kept in memory.
 const THUMBNAIL_MEMORY: usize = 192 << 20;
@@ -52,6 +58,14 @@ const THUMBNAIL_MEMORY: usize = 192 << 20;
 const STANDARD_MEMORY: usize = 256 << 20;
 /// Bytes of import-candidate thumbnails kept in memory.
 const CANDIDATE_MEMORY: usize = 64 << 20;
+/// How long a failure is believed before the preview is tried again.
+const RETRY_FAILED_AFTER: Duration = Duration::from_secs(5);
+/// How long a preview in memory is trusted before its source file is looked
+/// at again.
+const RECHECK_AFTER: Duration = Duration::from_secs(2);
+/// How many source stamps are kept before those of previews no longer in
+/// memory are dropped.
+const STAMPS_KEPT: usize = 1 << 16;
 
 /// The memory side of the preview service.
 pub(crate) struct Previews {
@@ -59,7 +73,15 @@ pub(crate) struct Previews {
     standard: Lru<PhotoId, Preview>,
     /// The develop version each preview being made is for.
     in_flight: HashMap<(PhotoId, PreviewSize), u64>,
-    failed: HashMap<(PhotoId, PreviewSize), (u64, String)>,
+    /// The develop version a preview failed for, why and when.
+    failed: HashMap<(PhotoId, PreviewSize), (u64, String, Instant)>,
+    /// What the source file of each preview in memory looked like when the
+    /// preview was made, and when it was last looked at.
+    stamps: HashMap<(PhotoId, PreviewSize), (Stamp, Instant)>,
+    /// How long a failure is believed.
+    pub(crate) retry_after: Duration,
+    /// How long a preview in memory is trusted.
+    pub(crate) recheck_after: Duration,
     candidates: Lru<PathBuf, Preview>,
     candidates_in_flight: HashSet<PathBuf>,
     candidates_failed: HashMap<PathBuf, String>,
@@ -72,6 +94,9 @@ impl Default for Previews {
             standard: Lru::new(STANDARD_MEMORY),
             in_flight: HashMap::new(),
             failed: HashMap::new(),
+            stamps: HashMap::new(),
+            retry_after: RETRY_FAILED_AFTER,
+            recheck_after: RECHECK_AFTER,
             candidates: Lru::new(CANDIDATE_MEMORY),
             candidates_in_flight: HashSet::new(),
             candidates_failed: HashMap::new(),
@@ -142,10 +167,15 @@ impl Engine {
         if let Some(preview) = self.previews.memory(size).get(&photo)
             && preview.version() == subject.version
         {
-            return PreviewState::Ready(preview.clone());
+            let ready = preview.clone();
+            self.recheck(photo, size, &subject.path);
+            return PreviewState::Ready(ready);
         }
-        if let Some((version, reason)) = self.previews.failed.get(&key)
+        // A failure is believed for a while, then the preview is tried
+        // again: the file may be back.
+        if let Some((version, reason, at)) = self.previews.failed.get(&key)
             && *version == subject.version
+            && at.elapsed() < self.previews.retry_after
         {
             return PreviewState::Failed(reason.clone());
         }
@@ -187,7 +217,7 @@ impl Engine {
                 };
                 let result = job.run(&interim);
                 Box::new(move |engine: &mut Engine| {
-                    engine.preview_done(photo, size, version, result.preview, result.source)
+                    engine.preview_done(photo, size, version, result)
                 })
             },
             move |engine, failure| engine.preview_failed(photo, size, version, failure),
@@ -229,7 +259,7 @@ impl Engine {
             return LoadState::Pending;
         }
         match self.previews.failed.get(&key) {
-            Some((failed, reason)) if *failed == version => LoadState::Failed(reason.clone()),
+            Some((failed, reason, _)) if *failed == version => LoadState::Failed(reason.clone()),
             _ => LoadState::Nothing,
         }
     }
@@ -327,11 +357,10 @@ impl Engine {
         photo: PhotoId,
         size: PreviewSize,
         version: u64,
-        preview: Result<Preview, String>,
-        source: SourceSeen,
+        result: JobResult,
     ) -> bool {
         self.finish_in_flight(photo, size, version);
-        match preview {
+        match result.preview {
             Ok(preview) => {
                 let newer_kept = self
                     .previews
@@ -340,17 +369,18 @@ impl Engine {
                 if !newer_kept {
                     let bytes = preview.bytes();
                     self.previews.memory(size).insert(photo, preview, bytes);
+                    self.remember_stamp(photo, size, result.stamp);
                 }
                 self.previews.failed.remove(&(photo, size));
             }
             Err(reason) => {
                 self.previews
                     .failed
-                    .insert((photo, size), (version, reason));
+                    .insert((photo, size), (version, reason, Instant::now()));
             }
         }
         let recorded = self.browser.summary(photo).map(|summary| summary.missing);
-        match source {
+        match result.source {
             SourceSeen::Missing if recorded != Some(true) => self.missing.push((photo, true)),
             SourceSeen::Present if recorded == Some(true) => self.missing.push((photo, false)),
             SourceSeen::Missing | SourceSeen::Present | SourceSeen::Unknown => {}
@@ -370,7 +400,7 @@ impl Engine {
             let reason = format!("the preview could not be made: {message}");
             self.previews
                 .failed
-                .insert((photo, size), (version, reason));
+                .insert((photo, size), (version, reason, Instant::now()));
         }
         true
     }

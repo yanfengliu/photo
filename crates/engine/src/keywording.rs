@@ -4,9 +4,13 @@
 //! deleted keyword comes back with its assignments.
 //!
 //! Adding and removing a keyword, by name or by id, is one catalog write per
-//! keyword, whatever the number of photos. Setting a photo's whole list
-//! goes through `Catalog::set_photo_keywords`, which resolves each name
-//! against the keywords the photo already carries, one write per photo.
+//! keyword, whatever the number of photos. Setting whole lists resolves each
+//! name against the keywords each photo already carries, then writes every
+//! photo's list in one catalog transaction, as do its undo and redo.
+//!
+//! A keyword that an action created and photos have since come to carry by
+//! a way the undo stack does not see (an import naming it) is not deleted
+//! by that action's undo: only its own assignments are taken back.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -16,7 +20,7 @@ use photo_core::meta::{KeywordId, PhotoId};
 use crate::commands::{Applied, Target};
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::undo::{Branch, Command, KeywordLink, KeywordList, TreeEdit};
+use crate::undo::{Branch, Command, KeywordLink, KeywordLists, TreeEdit};
 
 /// A keyword some of a set of photos carry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,42 +341,65 @@ fn assign_all(
     Ok(())
 }
 
-/// Give each photo exactly its list of keyword names, through
+/// Give each photo exactly its list of keyword names, by the rules of
 /// `Catalog::set_photo_keywords`: a name the photo already carries keeps
-/// that keyword, any other resolves to the only keyword of the name or a
-/// new top-level one. Each keyword created is recorded before the list
-/// that uses it, so undoing deletes it after the list is put back.
+/// the keyword (or keywords) it has, any other stands for the only keyword
+/// of that name or a top-level one, created if needed.
+///
+/// The names are resolved here, each once, from reads; every photo's list
+/// is then written in one catalog transaction, and one command puts all
+/// of them back, or makes them again, in one more. Each keyword created is
+/// recorded before the lists that use it, so undoing deletes it after the
+/// lists are put back.
 pub(crate) fn set_lists(
     catalog: &mut Catalog,
     applied: &mut Applied,
     lists: Vec<(PhotoId, Vec<String>)>,
 ) -> Result<(), CatalogError> {
+    let mut known: HashSet<KeywordId> = catalog.keywords()?.into_iter().map(|k| k.id).collect();
+    let mut resolved: HashMap<String, KeywordId> = HashMap::new();
+    let (mut before, mut after) = (Vec::new(), Vec::new());
     for (photo, names) in lists {
-        let before: Vec<KeywordId> = catalog
-            .photo_keywords(photo)?
-            .into_iter()
-            .map(|keyword| keyword.id)
-            .collect();
-        let change = catalog.set_photo_keywords(photo, &names)?;
-        for created in &change.created {
-            applied.push(Command::Keywords(TreeEdit::Created(Branch::Present(
-                *created,
-            ))));
+        let carried = catalog.photo_keywords(photo)?;
+        let mut wanted: Vec<KeywordId> = Vec::new();
+        for name in clean(&names) {
+            let kept: Vec<KeywordId> = carried
+                .iter()
+                .filter(|keyword| keyword.name.eq_ignore_ascii_case(&name))
+                .map(|keyword| keyword.id)
+                .collect();
+            if !kept.is_empty() {
+                wanted.extend(kept);
+                continue;
+            }
+            let folded = name.to_ascii_lowercase();
+            let keyword = match resolved.get(&folded) {
+                Some(keyword) => *keyword,
+                None => {
+                    let keyword = catalog.ensure_keyword(&name)?;
+                    if known.insert(keyword) {
+                        let created = TreeEdit::Created(Branch::Present(keyword));
+                        applied.push(Command::Keywords(created));
+                    }
+                    resolved.insert(folded, keyword);
+                    keyword
+                }
+            };
+            wanted.push(keyword);
         }
-        if change.added.is_empty() && change.removed.is_empty() {
-            continue;
+        let mut current: Vec<KeywordId> = carried.iter().map(|keyword| keyword.id).collect();
+        current.sort();
+        let mut sorted = wanted.clone();
+        sorted.sort();
+        if sorted != current {
+            before.push((photo, current));
+            after.push((photo, wanted));
         }
-        let after = before
-            .iter()
-            .filter(|keyword| !change.removed.contains(keyword))
-            .chain(&change.added)
-            .copied()
-            .collect();
-        applied.push(Command::KeywordList(KeywordList {
-            photo,
-            before,
-            after,
-        }));
     }
+    if after.is_empty() {
+        return Ok(());
+    }
+    catalog.set_keyword_ids_of_photos(&after)?;
+    applied.push(Command::KeywordLists(KeywordLists { before, after }));
     Ok(())
 }

@@ -36,6 +36,9 @@ pub(super) struct Run {
     pub(super) working: usize,
     /// File name, size and capture time of each file accepted so far.
     pub(super) accepted: HashSet<(String, u64, Option<DateTime>)>,
+    /// Photos accepted with the starting settings because this build
+    /// cannot read the develop settings in their sidecar.
+    pub(super) unreadable_settings: usize,
 }
 
 impl Engine {
@@ -142,9 +145,19 @@ impl Engine {
                 .errors
                 .push(issue(format!("the sidecar was not read: {problem}")));
         }
+        // The photo comes in with the starting settings, and says so: they
+        // are not the edit its sidecar holds.
+        if let Some(format) = read.unreadable_settings
+            && let Some(summary) = self.summary_mut(task)
+        {
+            summary.errors.push(issue(format!(
+                "the develop settings in its sidecar (format {format}) cannot be read by this version: it was imported with the starting settings, and the sidecar keeps its own"
+            )));
+        }
         let Some(run) = self.run_mut(task) else {
             return Ok(None);
         };
+        run.unreadable_settings += usize::from(read.unreadable_settings.is_some());
         run.accepted.insert(key);
         for keyword in &run.keywords {
             let known = photo
@@ -322,6 +335,28 @@ impl Engine {
         self.refresh_after(&[Change::Photos]);
     }
 
+    /// As the engine closes: insert every file that is read (and copied)
+    /// and still waiting for its turn, whatever is still being worked on
+    /// before it, so that every copy made has its record.
+    pub(crate) fn record_ready_imports(&mut self) {
+        let tasks: Vec<TaskId> = self.imports.runs.iter().map(|run| run.task).collect();
+        for task in tasks {
+            let Some(run) = self.run_mut(task) else {
+                continue;
+            };
+            let batch: Vec<NewPhoto> = run
+                .slots
+                .iter_mut()
+                .filter(|slot| matches!(slot, Slot::Ready(_)))
+                .filter_map(|slot| match std::mem::replace(slot, Slot::Done) {
+                    Slot::Ready(photo) => Some(*photo),
+                    Slot::Working(_) | Slot::Done => None,
+                })
+                .collect();
+            self.insert_batch(task, batch);
+        }
+    }
+
     /// A copy whose record could not be inserted is deleted again, so that
     /// every copy an import makes has its record.
     fn forget_copy(&self, task: TaskId, photo: &NewPhoto) {
@@ -350,6 +385,12 @@ impl Engine {
     }
 
     fn finish_import(&mut self, task: TaskId) {
+        let unreadable = self.run_mut(task).map_or(0, |run| run.unreadable_settings);
+        if unreadable > 0 {
+            self.toasts.error(format!(
+                "{unreadable} photos were imported with the starting settings: this version cannot read the develop settings in their sidecars"
+            ));
+        }
         self.imports.runs.retain(|run| run.task != task);
         let cancelled = self.tasks.is_cancelled(task);
         let state = if cancelled {

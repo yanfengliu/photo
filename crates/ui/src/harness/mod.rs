@@ -12,6 +12,7 @@
 //! simulated: it passes only as frames run, one step per frame.
 
 mod builder;
+mod controls;
 mod error;
 mod gpu;
 mod host;
@@ -23,6 +24,7 @@ use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Vec2};
 use egui_kittest::kittest::{NodeT as _, Queryable as _};
 
 pub use builder::HarnessBuilder;
+pub use controls::ListedControl;
 pub use error::{HarnessError, RenderError};
 pub use host::Host;
 

@@ -137,11 +137,22 @@ impl Engine {
                 session.frame = Some(shown);
                 session.reach(DevelopLoad::Rendered);
             }
-            Purpose::Before => session.before_frame = Some(shown),
-            Purpose::Look => {
-                if let Some((key, _, _)) = &session.look {
-                    session.look_frame = Some((*key, shown));
+            // A frame asked for before the choice changed, or was turned
+            // off, is not what is shown now.
+            Purpose::Before => {
+                if session.before.is_none() || delivery.id <= session.before_since {
+                    return false;
                 }
+                session.before_frame = Some(shown);
+            }
+            Purpose::Look => {
+                let Some((key, _, _)) = &session.look else {
+                    return false;
+                };
+                if delivery.id <= session.look_since {
+                    return false;
+                }
+                session.look_frame = Some((*key, shown));
             }
             Purpose::Overlay => return false,
         }

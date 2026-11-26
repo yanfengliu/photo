@@ -220,3 +220,78 @@ fn a_sidecar_with_settings_from_a_newer_version_keeps_them_and_says_why() {
         "the newer settings stay"
     );
 }
+
+#[test]
+fn importing_a_photo_whose_sidecar_settings_cannot_be_read_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = photo_testkit::write_jpeg(dir.path(), "IMG_9.jpg", 96, 64);
+    let sidecar = photo_xmp::sidecar_path(&file, FileKind::Raster);
+    let mut settings = photo_core::develop::DevelopSettings::default();
+    settings.tone.exposure = 1.0;
+    let data = photo_xmp::XmpData {
+        rating: Rating::new(3),
+        develop: Some(settings),
+        ..photo_xmp::XmpData::default()
+    };
+    photo_xmp::write_sidecar(&sidecar, &data, INFO).unwrap();
+    let written = std::fs::read_to_string(&sidecar).unwrap();
+    let ours = format!(
+        "photo:SettingsFormat=\"{}\"",
+        photo_core::develop::SETTINGS_FORMAT
+    );
+    let newer = written.replace(&ours, "photo:SettingsFormat=\"99\"");
+    assert_ne!(newer, written);
+    std::fs::write(&sidecar, newer).unwrap();
+
+    let mut studio = Studio::new();
+    let summary = studio.import(vec![file]);
+    let photo = summary.imported[0];
+    assert_eq!(
+        studio.engine.photo(photo).unwrap().rating,
+        Rating::new(3),
+        "the rest is read"
+    );
+    let applied = studio.engine.develop_settings(photo).unwrap();
+    assert!(
+        applied.is_default_for(FileKind::Raster),
+        "the starting settings"
+    );
+    assert!(
+        summary
+            .errors
+            .iter()
+            .any(|issue| issue.message.contains("format 99")),
+        "{:?}",
+        summary.errors
+    );
+    let toasts = studio.toasts();
+    assert!(
+        toasts
+            .iter()
+            .any(|toast| toast.contains("starting settings")),
+        "{toasts:?}"
+    );
+}
+
+#[test]
+fn overlapping_saves_of_one_sidecar_end_with_the_last_values() {
+    let (_library, mut studio, dawn, sidecar) = marked_dawn();
+    let target = || Target::Photos(vec![dawn]);
+    for stars in [1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 3] {
+        studio
+            .engine
+            .set_rating(target(), Rating::new(stars))
+            .unwrap();
+        studio.engine.save_metadata_to_files(target()).unwrap();
+    }
+    studio.settle();
+    let kept = photo_xmp::read_sidecar(&sidecar, INFO).unwrap().unwrap();
+    assert_eq!(kept.rating, Rating::new(3), "the last save asked for");
+    let issues: usize = studio
+        .engine
+        .tasks()
+        .iter()
+        .map(|task| task.errors as usize)
+        .sum();
+    assert_eq!(issues, 0, "an overtaken save is not a failure");
+}

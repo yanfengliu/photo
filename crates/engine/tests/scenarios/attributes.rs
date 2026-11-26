@@ -431,3 +431,38 @@ fn keywords_chosen_by_id_are_exact_where_names_are_shared() {
     assert!(engine.add_keyword_ids(both, &[city, unknown]).is_err());
     assert_eq!(ids(engine, p[0]), [person], "nothing changed");
 }
+
+#[test]
+fn undoing_a_keyword_a_change_created_keeps_it_on_photos_that_got_it_since() {
+    let (_library, mut studio, p) = studio();
+    studio
+        .engine
+        .add_keywords(Target::Photos(vec![p[0]]), &["Trip"])
+        .unwrap();
+    let (_more, files) = crate::common::many_jpegs(1, 64, 48);
+    let mut request = crate::common::add(files);
+    request.keywords = vec!["Trip".to_string()];
+    let task = studio.engine.start_import(request).unwrap();
+    studio.settle();
+    let later = studio.engine.import_summary(task).unwrap().imported[0];
+    assert_eq!(keyword_names(&studio, later), ["Trip"]);
+    let trip = studio.engine.photo_keywords(later).unwrap()[0].id;
+    assert_eq!(studio.engine.undo_label(), Some("Add Keyword \"Trip\""));
+
+    studio.engine.undo().unwrap();
+    assert!(keyword_names(&studio, p[0]).is_empty());
+    assert_eq!(
+        keyword_names(&studio, later),
+        ["Trip"],
+        "the later photo keeps it"
+    );
+    studio.engine.redo().unwrap();
+    let ids: Vec<_> = studio
+        .engine
+        .photo_keywords(p[0])
+        .unwrap()
+        .iter()
+        .map(|keyword| keyword.id)
+        .collect();
+    assert_eq!(ids, [trip], "the same keyword again");
+}

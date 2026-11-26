@@ -181,6 +181,10 @@ fn walk(root: &Path, recursive: bool, context: &Context<'_>, task: TaskId) -> Ve
         entries.sort_by_key(|entry| entry.file_name());
         let mut subfolders = Vec::new();
         for entry in entries {
+            // At every entry: one folder can hold a whole card.
+            if context.should_stop() {
+                return errors;
+            }
             let path = entry.path();
             let Ok(file_type) = entry.file_type() else {
                 continue;
@@ -210,8 +214,12 @@ fn walk(root: &Path, recursive: bool, context: &Context<'_>, task: TaskId) -> Ve
     errors
 }
 
-/// Read the capture times of a chunk of files (in parallel) and post them.
+/// Read the capture times of a chunk of files (in parallel) and post them;
+/// nothing is read once the scan has been cancelled.
 fn post(context: &Context<'_>, task: TaskId, files: Vec<(PathBuf, FileKind, fs::Metadata)>) {
+    if context.should_stop() {
+        return;
+    }
     let found: Vec<Found> = files
         .into_par_iter()
         .map(|(path, kind, stat)| Found {

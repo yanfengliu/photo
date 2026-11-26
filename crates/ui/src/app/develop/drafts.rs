@@ -25,14 +25,24 @@ pub(crate) enum Pending {
     Adjust(Adj, f32),
     /// Several values at once (a curve, a wheel).
     Settings(Box<DevelopSettings>),
+    /// What a tool made of the settings (a crop handle, a spot, a mask):
+    /// part of the tool's own step, committed when the tool is.
+    Tool(Box<DevelopSettings>),
 }
 
 impl Pending {
-    fn action(self) -> DevelopAction {
+    /// The request that hands the edit to the engine.
+    pub(crate) fn into_action(self) -> DevelopAction {
         match self {
             Self::Adjust(adj, value) => DevelopAction::Adjust(adj, value),
             Self::Settings(settings) => DevelopAction::Edit(settings),
+            Self::Tool(settings) => DevelopAction::ToolEdit(settings),
         }
+    }
+
+    /// Whether a tool made the edit.
+    pub(crate) fn is_tool(&self) -> bool {
+        matches!(self, Self::Tool(_))
     }
 
     /// Whether `self` replaces `other`: the same slider, or settings for
@@ -40,7 +50,7 @@ impl Pending {
     fn replaces(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Adjust(adj, _), Self::Adjust(other, _)) => adj == other,
-            (Self::Settings(_), Self::Settings(_)) => true,
+            (Self::Settings(_), Self::Settings(_)) | (Self::Tool(_), Self::Tool(_)) => true,
             _ => false,
         }
     }
@@ -50,7 +60,7 @@ impl Pending {
 pub(crate) fn overlay(settings: &mut DevelopSettings, kind: FileKind, pending: Option<&Pending>) {
     match pending {
         Some(Pending::Adjust(adj, value)) => adj.set(settings, adj.spec_for(kind).clamp(*value)),
-        Some(Pending::Settings(waiting)) => settings.clone_from(waiting),
+        Some(Pending::Settings(waiting) | Pending::Tool(waiting)) => settings.clone_from(waiting),
         None => {}
     }
 }
@@ -91,7 +101,7 @@ pub(crate) fn pace(cx: &mut Cx<'_>) {
 /// Send what waits now: the control was let go, or another moved.
 pub(crate) fn flush(cx: &mut Cx<'_>) {
     if let Some(edit) = cx.ui.develop.pending.take() {
-        cx.act(Action::Develop(edit.action()));
+        cx.act(Action::Develop(edit.into_action()));
     }
 }
 
@@ -107,6 +117,13 @@ mod tests {
         let curve = Pending::Settings(Box::default());
         assert!(Pending::Settings(Box::default()).replaces(&curve));
         assert!(!exposure.replaces(&curve));
+        let crop = Pending::Tool(Box::default());
+        assert!(Pending::Tool(Box::default()).replaces(&crop));
+        assert!(
+            !curve.replaces(&crop) && !crop.replaces(&curve),
+            "a panel's edit and a tool's are different steps"
+        );
+        assert!(crop.is_tool() && !curve.is_tool());
     }
 
     #[test]

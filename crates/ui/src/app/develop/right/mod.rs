@@ -10,7 +10,6 @@
 mod basic;
 mod color;
 mod curve;
-pub(crate) mod curve_math;
 mod detail;
 
 use egui::{Align, Button, Layout, Margin, RichText, Ui, vec2};
@@ -20,6 +19,7 @@ use photo_engine::{DevelopSession, Target};
 
 use super::actions::DevelopAction;
 use super::drafts::{self, Pending};
+use super::tools;
 use crate::app::actions::Action;
 use crate::app::{Cx, text};
 use crate::theme::{self, palette, space};
@@ -97,13 +97,13 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
             let mut panels = std::mem::take(&mut cx.ui.develop.right_panels);
             panel_column(ui, "develop-right-panels", |ui| {
                 Panel::new("Histogram").show(ui, &mut panels, |ui| histogram_panel(ui, cx));
-                // Part 2 puts the tool strip (crop, healing, masking) here,
-                // under the histogram.
+                tools::strip(ui, cx, editing.as_ref());
                 let Some(editing) = editing.as_ref() else {
                     ui.add_space(space::LG);
                     ui.label(RichText::new("Open a photo to edit it.").color(palette::TEXT_DIM));
                     return;
                 };
+                tools::panel(ui, cx, editing);
                 let panels = &mut panels;
                 let mut panel = |ui: &mut Ui, title: &str, body: EditingPanel| {
                     // A photo that cannot be edited can still be looked at:

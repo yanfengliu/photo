@@ -88,6 +88,14 @@ fn bottom(ui: &mut Ui, cx: &mut Cx<'_>, editing: Option<&Editing>) {
                     )));
                 }
             });
+            ui.add_space(space::MD);
+            let width = ui.available_width();
+            if wide_button(ui, true, "Export…", width)
+                .on_hover_text("Export the selected photos as image files")
+                .clicked()
+            {
+                dialogs::open_export(cx);
+            }
         });
 }
 

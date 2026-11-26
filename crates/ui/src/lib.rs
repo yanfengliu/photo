@@ -22,7 +22,8 @@ pub mod widgets;
 use std::path::PathBuf;
 
 pub use app::{
-    BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Layout, Lights, Module, PhotoApp, View, Zoom,
+    BeforeAfter, CanvasImage, CanvasShows, CanvasZoom, Layout, Lights, MaskKind, Module, OpenError,
+    Opened, PhotoApp, Tool, View, Zoom,
 };
 use photo_engine::{Engine, EngineConfig, EngineError};
 
@@ -60,6 +61,20 @@ impl AppOptions {
 /// opened or the window could not be made.
 pub fn run(options: AppOptions) -> Result<(), Box<dyn std::error::Error>> {
     let engine = options.open_engine()?;
+    run_with(engine, options, Module::Library, View::Grid)
+}
+
+/// Show the app in a window on an engine that is already open (a photo
+/// imported into it and made active, say), starting in `module` with the
+/// Library's `view`. `options` are the paths the engine was opened on.
+/// Returns when the window is closed, or with the reason it could not be
+/// made.
+pub fn run_with(
+    engine: Engine,
+    options: AppOptions,
+    module: Module,
+    view: View,
+) -> Result<(), Box<dyn std::error::Error>> {
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Photo")
@@ -70,7 +85,10 @@ pub fn run(options: AppOptions) -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "Photo",
         native,
-        Box::new(move |cc| Ok(Box::new(PhotoApp::new(cc, engine, options)))),
+        Box::new(move |cc| {
+            let app = PhotoApp::new(cc, engine, options).starting_in(module, view);
+            Ok(Box::new(app))
+        }),
     )?;
     Ok(())
 }

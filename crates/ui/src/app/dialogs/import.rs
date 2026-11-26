@@ -107,6 +107,15 @@ impl ImportDialog {
         cx.act(Action::ScanFolder { root, recursive });
     }
 
+    /// Whether the folder the settings name, with or without its
+    /// subfolders as they say, is the one already looked in.
+    fn looked_in(&self) -> bool {
+        self.scanned.as_ref().is_some_and(|(root, recursive)| {
+            root.as_path() == Path::new(self.settings.source.trim())
+                && *recursive == self.settings.recursive
+        })
+    }
+
     /// The scan of this dialog's folder, as far as it has got.
     fn scan_result<'a>(&self, cx: &'a Cx<'_>) -> Option<&'a ImportScan> {
         let (root, recursive) = self.scanned.as_ref()?;
@@ -233,7 +242,11 @@ impl ImportDialog {
                 // Enter here looks in the folder; it does not import.
                 ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
             }
-            let committed = field.lost_focus() || (field.changed() && !field.has_focus());
+            // egui reports a field as having lost focus for two frames
+            // when Enter is pressed: a folder is looked in once, when its
+            // path is first committed.
+            let committed = (field.lost_focus() || (field.changed() && !field.has_focus()))
+                && !self.looked_in();
             if ui.button("Choose…").clicked()
                 && let Some(folder) = rfd::FileDialog::new()
                     .set_title("Choose a folder to import from")

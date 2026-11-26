@@ -35,7 +35,8 @@ impl Engine {
     }
 
     /// The current settings of `photos`, for a change to all of them. An
-    /// edit of the open photo not yet committed is committed first. Photos
+    /// edit of the open photo not yet committed is committed first when the
+    /// change reaches that photo, and left alone when it does not. Photos
     /// whose settings come from a newer build are left out and counted;
     /// when that leaves none, or the catalog is write-protected, the change
     /// is refused.
@@ -46,7 +47,13 @@ impl Engine {
         if self.catalog.is_read_only() {
             return Err(EngineError::NotEditable(READ_ONLY_CATALOG.to_string()));
         }
-        self.commit_edit()?;
+        if self
+            .develop
+            .as_ref()
+            .is_some_and(|session| photos.contains(&session.photo))
+        {
+            self.commit_edit()?;
+        }
         let records = if photos.is_empty() {
             Vec::new()
         } else {

@@ -20,6 +20,15 @@ pub(crate) enum DevelopAction {
     Commit,
     /// A discrete change, committed at once.
     Apply(Box<DevelopSettings>),
+    /// What a tool made of the settings: a draft of the tool's own step.
+    ToolEdit(Box<DevelopSettings>),
+    /// Enter, or the tool put away: record what the tool changed as one
+    /// step.
+    ToolCommit,
+    /// Escape: drop what the tool changed.
+    ToolCancel,
+    /// Show the red overlay of one mask, or none.
+    ShowMaskOverlay(Option<usize>),
     AutoTone,
     AutoWhiteBalance,
     PickWhiteBalance(Point),
@@ -65,6 +74,14 @@ impl DevelopAction {
                 engine.commit_edit()?;
             }
             Self::Apply(settings) => engine.apply_settings(*settings)?,
+            Self::ToolEdit(settings) => engine.edit_settings(*settings)?,
+            Self::ToolCommit => {
+                engine.commit_edit()?;
+            }
+            Self::ToolCancel => {
+                engine.cancel_edit();
+            }
+            Self::ShowMaskOverlay(mask) => engine.show_mask_overlay(mask)?,
             Self::AutoTone => engine.auto_tone()?,
             Self::AutoWhiteBalance => engine.auto_white_balance()?,
             Self::PickWhiteBalance(at) => {
@@ -109,14 +126,45 @@ impl DevelopAction {
         Ok(())
     }
 
+    /// Whether the request changes the open photo's settings from outside
+    /// the tools. What a tool changed and has not committed is committed
+    /// before such a request, so the tool's step stays its own.
+    pub(crate) fn edits_outside_tools(&self) -> bool {
+        matches!(
+            self,
+            Self::Adjust(..)
+                | Self::Edit(_)
+                | Self::Commit
+                | Self::Apply(_)
+                | Self::AutoTone
+                | Self::AutoWhiteBalance
+                | Self::PickWhiteBalance(_)
+                | Self::ApplyPreset(..)
+                | Self::ApplySnapshot(..)
+                | Self::GoToHistoryStep(..)
+                | Self::PasteSettings(_)
+                | Self::SyncSettings(_)
+                | Self::PasteFromPrevious(_)
+                | Self::ResetSettings(_)
+                | Self::QuickAdjust(..)
+                | Self::QuickWhiteBalance(..)
+                | Self::QuickAutoTone(_)
+        )
+    }
+
     /// What to tell the user when the engine refuses, before its reason.
     pub(crate) fn failure(&self) -> &'static str {
         match self {
             Self::Open(_) => "Could not open the photo in Develop",
             Self::Close | Self::SetCanvasView(_) | Self::SetBefore(_) => "Could not do that",
-            Self::Adjust(..) | Self::Edit(_) | Self::Commit | Self::Apply(_) => {
-                "Could not change the photo"
-            }
+            Self::Adjust(..)
+            | Self::Edit(_)
+            | Self::Commit
+            | Self::Apply(_)
+            | Self::ToolEdit(_)
+            | Self::ToolCommit => "Could not change the photo",
+            Self::ToolCancel => "Could not do that",
+            Self::ShowMaskOverlay(_) => "Could not show the mask",
             Self::AutoTone | Self::QuickAutoTone(_) => "Could not set the tone automatically",
             Self::AutoWhiteBalance => "Could not set the white balance automatically",
             Self::PickWhiteBalance(_) => "Could not pick the white balance",

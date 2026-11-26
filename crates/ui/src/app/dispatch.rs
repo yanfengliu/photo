@@ -9,7 +9,9 @@ use photo_engine::{CollectionKind, Movement, Source, Target};
 use super::Cx;
 use super::actions::Action;
 use super::develop::actions::DevelopAction;
-use super::develop::{self, BeforeAfter, canvas};
+use super::develop::tools::crop::rect::Turn;
+use super::develop::tools::{self, crop};
+use super::develop::{self, BeforeAfter, Tool, canvas};
 use super::dialogs;
 use super::input::{Arrow, Shortcut};
 use super::library::{compare, filter_bar};
@@ -31,6 +33,10 @@ pub(crate) fn shortcut(cx: &mut Cx<'_>, ctx: &egui::Context, shortcut: Shortcut)
         Shortcut::Rating(stars) => cx.act(Action::SetRating(target, Rating::new(stars))),
         Shortcut::RatingDown => cx.act(Action::DecreaseRating(target)),
         Shortcut::RatingUp => cx.act(Action::IncreaseRating(target)),
+        // With the crop tool open, X lays the rectangle the other way.
+        Shortcut::Flag(_) if in_develop && cx.ui.develop.tools.open == Some(Tool::Crop) => {
+            crop::swap(cx);
+        }
         Shortcut::Flag(flag) => cx.act(Action::SetFlag(target, flag)),
         Shortcut::Label(label) => cx.act(Action::ToggleLabel(target, label)),
         Shortcut::QuickCollection => cx.act(Action::ToggleQuickCollection(target)),
@@ -43,13 +49,34 @@ pub(crate) fn shortcut(cx: &mut Cx<'_>, ctx: &egui::Context, shortcut: Shortcut)
             movement: Movement::Last,
             extend: false,
         }),
+        // What a tool changed and has not recorded is what there is to
+        // undo first.
+        Shortcut::Undo if in_develop && cx.ui.develop.tools.dirty => {
+            tools::revert(cx);
+        }
         Shortcut::Undo => cx.act(Action::Undo),
         Shortcut::Redo => cx.act(Action::Redo),
         Shortcut::SelectAll => cx.act(Action::SelectAll),
         Shortcut::SelectNone => cx.act(Action::SelectNone),
+        Shortcut::Delete if in_develop && tools::delete_selected(cx) => {}
         Shortcut::Delete => delete(cx),
+        // In Develop the crop turns with the photo.
+        Shortcut::RotateLeft if in_develop && crop::turn(cx, Turn::Left) => {}
+        Shortcut::RotateRight if in_develop && crop::turn(cx, Turn::Right) => {}
         Shortcut::RotateLeft => cx.act(Action::RotateLeft(target)),
         Shortcut::RotateRight => cx.act(Action::RotateRight(target)),
+        Shortcut::Tool(key) => {
+            if !in_develop {
+                open_develop(cx);
+            }
+            if cx.ui.module == Module::Develop {
+                tools::press(cx, key);
+            }
+        }
+        Shortcut::Commit => tools::put_away(cx),
+        Shortcut::Cancel => tools::discard(cx),
+        Shortcut::Overlay => tools::toggle_overlay(cx),
+        Shortcut::Export => dialogs::open_export(cx),
         Shortcut::VirtualCopy => cx.act(Action::CreateVirtualCopies(target)),
         Shortcut::Import => dialogs::open_import(cx),
         Shortcut::New if in_develop => dialogs::open_new_snapshot(cx),
@@ -143,8 +170,12 @@ fn toggle_picker(cx: &mut Cx<'_>) {
     let ready = cx.engine.develop().is_some_and(|session| {
         session.output_size().is_some() && session.read_only_reason().is_none()
     });
-    let develop = &mut cx.ui.develop;
-    develop.picker = ready && !develop.picker;
+    let picking = ready && !cx.ui.develop.picker;
+    if picking {
+        // The picker takes the canvas from a tool.
+        tools::put_away(cx);
+    }
+    cx.ui.develop.picker = picking;
 }
 
 fn arrow_key(cx: &mut Cx<'_>, arrow: Arrow, extend: bool) {

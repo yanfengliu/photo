@@ -2,7 +2,9 @@
 //! back, both in the background.
 //!
 //! A sidecar belongs to a file, so virtual copies are left out: a file's
-//! master speaks for it. Orientation travels only in the sidecar's private
+//! master speaks for it. Saves of one sidecar are put in order (see
+//! `files::SaveOrder`): the file ends with what the last save asked for
+//! held. Orientation travels only in the sidecar's private
 //! settings property, because the catalog does not know the file's own
 //! orientation (see `photo_xmp::ImageInfo::orientation`).
 //!
@@ -22,7 +24,7 @@ use photo_core::develop::DevelopSettings;
 use photo_core::meta::{FileKind, KeywordId, PhotoId};
 use photo_xmp::{ImageInfo, XmpData};
 
-use files::{Outcome, issue, read_one, write_one};
+use files::{Outcome, SaveOrder, issue, read_one, write_one};
 
 use crate::commands::{Applied, Target};
 use crate::engine::{Engine, JobFailure};
@@ -52,6 +54,8 @@ pub(crate) fn image_info(kind: FileKind, width: u32, height: u32) -> ImageInfo {
 pub(crate) struct Sidecars {
     runs: HashMap<TaskId, Run>,
     reports: VecDeque<(TaskId, Vec<FileIssue>)>,
+    /// The order of the saves of each sidecar.
+    order: SaveOrder,
 }
 
 #[derive(Default)]
@@ -82,12 +86,17 @@ impl Engine {
         );
         for (sidecar, data, note, record) in jobs {
             let info = image_info(record.kind, record.metadata.width, record.metadata.height);
+            let ticket = self.sidecars.order.claim(&sidecar);
             self.submit(
                 Lane::Background,
                 None,
                 Some(token.clone()),
                 move |_| {
-                    let outcome = write_one(&sidecar, &data, info, note);
+                    // A save a newer one of the same sidecar has overtaken
+                    // writes nothing: the newer one holds the newer values.
+                    let outcome = ticket
+                        .write(|| write_one(&sidecar, &data, info, note))
+                        .unwrap_or_else(Outcome::nothing);
                     Box::new(move |engine: &mut Engine| engine.sidecar_done(task, outcome))
                 },
                 move |engine, failure| engine.sidecar_failed(task, failure),
@@ -309,6 +318,7 @@ impl Engine {
             self.toasts.info("Saved Metadata to Files");
         }
         self.tasks.finish(task, state);
+        self.sidecars.order.forget_idle();
         self.sidecars.reports.push_back((task, run.issues));
         if self.sidecars.reports.len() > REPORTS_KEPT {
             self.sidecars.reports.pop_front();

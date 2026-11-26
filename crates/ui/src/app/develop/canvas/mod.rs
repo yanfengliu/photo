@@ -8,8 +8,13 @@
 //! canvas shows what it has: the camera's embedded preview, or the
 //! Library's preview of the photo; each is drawn where the rendered frame
 //! will be, so nothing moves when it arrives.
+//!
+//! With a tool open the canvas is the tool's: a press and a drag go to it,
+//! and it draws its marks over the photo. The crop tool has the whole frame
+//! shown, straightened, in place of the output (`crop_stage`).
 
 mod draw;
+pub(crate) mod map;
 pub(crate) mod mapping;
 
 use egui::{
@@ -18,11 +23,14 @@ use egui::{
 use photo_core::geom::Point;
 use photo_engine::{DevelopLoad, PhotoSummary};
 
+use self::map::{CanvasMap, Display, Straight};
 pub use self::mapping::CanvasZoom;
 use self::mapping::to_pixels;
 pub(crate) use self::mapping::{CanvasState, Placement};
 use super::actions::DevelopAction;
+use super::right::Editing;
 use super::state::BeforeAfter;
+use super::tools::{self, Tool, crop};
 use crate::app::actions::Action;
 use crate::app::{Cx, text};
 use crate::theme::{self, palette};
@@ -55,6 +63,7 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         cx.ui.develop.last_placement = None;
         cx.ui.develop.photo_rect = None;
         cx.ui.develop.stage = None;
+        cx.ui.develop.map = None;
         message(ui, area, "Select a photo in the filmstrip to develop it.");
         return;
     };
@@ -62,10 +71,26 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     cx.ui.develop.stage = Some(stage);
     let ppp = ui.ctx().pixels_per_point();
     let Some(output) = output_size(cx, &photo) else {
+        cx.ui.develop.map = None;
         message(ui, stage, "The photo's size is not known yet.");
         return;
     };
-    let boxes = boxes(stage, cx.ui.develop.before_after);
+    let band = Rect::from_min_max(area.min, pos2(area.right(), stage.top()));
+    let editing = tools::editing(cx).filter(|editing| editing.photo == photo.id);
+    let tool = tools::active(cx).filter(|_| editing.is_some());
+    if tool == Some(Tool::Crop)
+        && let Some(editing) = &editing
+        && crop_stage(ui, cx, &photo, stage, editing)
+    {
+        info_line(ui, cx, &photo, band);
+        return;
+    }
+    cx.ui.develop.tools.crop_rect = None;
+    // A tool works on the edit alone.
+    let boxes = match tool {
+        Some(_) => vec![(stage, Side::After)],
+        None => boxes(stage, cx.ui.develop.before_after),
+    };
     let state = cx.ui.develop.canvas;
     let place = |rect: Rect, state: &CanvasState| {
         Placement::new(state.zoom, state.center, output, to_pixels(rect, ppp))
@@ -87,33 +112,56 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
         .map_or(stage, |(rect, _)| *rect);
     let placement = place(under, &state);
     let pointer_px = pointer.map(|at| (at.to_vec2() * ppp).to_pos2());
-    let develop = &mut cx.ui.develop;
-    if develop.picker && pointer_px.is_some_and(|at| placement.photo().contains(at)) {
-        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
-    }
-    if response.dragged() && !placement.fitted {
-        let delta = ui.input(|input| input.pointer.delta()) * ppp;
-        develop.canvas.pan(&placement, delta);
-    }
-    if response.hovered() && !placement.fitted {
-        let scroll = ui.input(|input| input.smooth_scroll_delta) * ppp;
-        develop.canvas.pan(&placement, scroll);
-    }
-    let mut picked = None;
-    if response.clicked() {
-        if develop.picker {
-            picked = pointer_px
-                .filter(|at| placement.photo().contains(*at))
-                .map(|at| placement.to_output(at));
-        } else {
-            develop.canvas.toggle_at(&placement, pointer_px);
+    // The mapping through the photo's geometry, once it is decoded.
+    let geometry = cx
+        .engine
+        .develop()
+        .filter(|session| session.photo() == photo.id)
+        .and_then(|session| session.geometry());
+    let through = |placement: Placement| {
+        geometry.clone().map(|geometry| CanvasMap {
+            ppp,
+            geometry,
+            display: Display::Output(placement),
+        })
+    };
+    let tooled = tool.and(editing.as_ref()).zip(through(placement));
+    if let Some((editing, map)) = &tooled {
+        // The tool has the pointer; the wheel still moves a zoomed photo.
+        tools::interact(ui, cx, editing, map, &response);
+        if response.hovered() && !placement.fitted {
+            let scroll = ui.input(|input| input.smooth_scroll_delta) * ppp;
+            cx.ui.develop.canvas.pan(&placement, scroll);
         }
-    }
-    if let Some(at) = picked {
-        develop.picker = false;
-        cx.act(Action::Develop(DevelopAction::PickWhiteBalance(
-            Point::new(at.x, at.y),
-        )));
+    } else {
+        let develop = &mut cx.ui.develop;
+        if develop.picker && pointer_px.is_some_and(|at| placement.photo().contains(at)) {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+        if response.dragged() && !placement.fitted {
+            let delta = ui.input(|input| input.pointer.delta()) * ppp;
+            develop.canvas.pan(&placement, delta);
+        }
+        if response.hovered() && !placement.fitted {
+            let scroll = ui.input(|input| input.smooth_scroll_delta) * ppp;
+            develop.canvas.pan(&placement, scroll);
+        }
+        let mut picked = None;
+        if response.clicked() {
+            if develop.picker {
+                picked = pointer_px
+                    .filter(|at| placement.photo().contains(*at))
+                    .map(|at| placement.to_output(at));
+            } else {
+                develop.canvas.toggle_at(&placement, pointer_px);
+            }
+        }
+        if let Some(at) = picked {
+            develop.picker = false;
+            cx.act(Action::Develop(DevelopAction::PickWhiteBalance(
+                Point::new(at.x, at.y),
+            )));
+        }
     }
 
     // What the engine is asked to render: the box of the edit.
@@ -139,15 +187,90 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>) {
     for (rect, side) in &boxes {
         let placement = place(*rect, &state);
         let painter = ui.painter_at(*rect);
-        let here = draw::picture(&painter, cx, &photo, &placement, ppp, *side);
+        let map = through(placement);
+        let here = draw::picture(&painter, cx, &photo, &placement, map.as_ref(), *side);
         if *side != Side::Before {
             shown = here;
         }
         draw::labels(&painter, *rect, &placement, ppp, *side, paired);
     }
     cx.frames.shows = shown.into_shows(photo.id);
-    let band = Rect::from_min_max(area.min, pos2(area.right(), stage.top()));
+    let map = through(main_placement);
+    if let (Some(_), Some(map)) = (tool, &map)
+        && let Some(editing) = tools::editing(cx)
+    {
+        // The marks are those of the settings as this frame left them.
+        let pointer = response.hover_pos();
+        tools::paint(&ui.painter_at(stage), cx, &editing, map, pointer);
+    }
+    cx.ui.develop.map = map;
     info_line(ui, cx, &photo, band);
+}
+
+/// The canvas of the crop tool: the whole frame, straightened, with the
+/// rectangle over it. Returns false when the photo is not ready for it,
+/// and nothing was drawn.
+fn crop_stage(
+    ui: &mut Ui,
+    cx: &mut Cx<'_>,
+    photo: &PhotoSummary,
+    stage: Rect,
+    editing: &Editing,
+) -> bool {
+    let ppp = ui.ctx().pixels_per_point();
+    let Some(frame) = crop::Frame::of(cx, &editing.settings) else {
+        return false;
+    };
+    let Some(session) = cx.engine.develop() else {
+        return false;
+    };
+    let Some(geometry) = session.geometry() else {
+        return false;
+    };
+    let angle = editing.settings.crop.angle;
+    let source = geometry.source_size();
+    let straight = Straight::new(&editing.settings, source, angle, to_pixels(stage, ppp));
+    let view = crop::canvas::view(session, straight.scale);
+    let map = CanvasMap {
+        ppp,
+        geometry,
+        display: Display::Straight(straight.clone()),
+    };
+    let response = ui.interact(
+        stage,
+        ui.make_persistent_id("develop-canvas"),
+        Sense::click_and_drag(),
+    );
+    crop::canvas::interact(ui, cx, editing, &frame, &straight, &response);
+    if let Some(view) = view
+        && cx.ui.develop.told.canvas != Some(view)
+    {
+        cx.ui.develop.told.canvas = Some(view);
+        cx.act(Action::Develop(DevelopAction::SetCanvasView(view)));
+    }
+    let develop = &mut cx.ui.develop;
+    develop.seen = None;
+    develop.last_placement = None;
+    develop.photo_rect = Some(map.photo_rect());
+
+    let painter = ui.painter_at(stage);
+    let shown = draw::edit(&painter, cx, &map);
+    if let Some(corners) = map.source_corners() {
+        crop::canvas::cover_outside(&painter, corners);
+    }
+    // The rectangle as this frame's drag left it, unless the angle moved:
+    // then the photo follows next frame, and the rectangle with it.
+    let crop_now = tools::editing(cx)
+        .map(|now| now.settings.crop)
+        .filter(|crop| crop.angle == angle)
+        .unwrap_or(editing.settings.crop);
+    let upright = crop::rect::upright_of(&crop_now, frame.size);
+    let rect = crop::canvas::on_screen(&straight, upright, ppp);
+    cx.ui.develop.tools.crop_rect = Some(rect);
+    crop::canvas::paint(&painter, &cx.ui.develop.tools.crop, rect);
+    cx.frames.shows = shown.into_shows(photo.id);
+    cx.ui.develop.map = Some(map);
+    true
 }
 
 /// The boxes of the stage and what each shows, the edit's last.

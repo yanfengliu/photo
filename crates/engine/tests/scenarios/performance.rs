@@ -201,3 +201,38 @@ fn settings_update_to_draft_frame_at_two_and_a_half_megapixels() {
     });
     assert!(draft < Duration::from_secs(1), "{draft:?}");
 }
+
+/// Setting the keywords of many photos is one catalog write, and so are its
+/// undo and redo: none of them grows with a commit per photo.
+#[test]
+#[ignore = "timing report"]
+fn keywords_set_on_many_photos_are_one_catalog_write() {
+    const MANY: usize = 500;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = config(dir.path(), 2);
+    {
+        let mut catalog = Catalog::open(&settings.catalog_path).unwrap();
+        let run = catalog.begin_import().unwrap();
+        let photos: Vec<NewPhoto> = (0..MANY).map(photo).collect();
+        catalog.insert_photos(run, &photos).unwrap();
+    }
+    let mut engine = Engine::open(settings).unwrap();
+    let photos: Vec<_> = engine.photos().iter().map(|photo| photo.id).collect();
+    assert_eq!(photos.len(), MANY);
+    println!("\n{MANY} photos, file-backed catalog");
+    let set = median("set two keywords on every photo", 3, |run| {
+        let names = [format!("batch {run}"), "kept".to_string()];
+        engine
+            .set_keywords(Target::Photos(photos.clone()), &names)
+            .unwrap();
+    });
+    let undo = median("undo it", 1, |_| {
+        engine.undo().unwrap();
+    });
+    let redo = median("redo it", 1, |_| {
+        engine.redo().unwrap();
+    });
+    for (what, took) in [("set", set), ("undo", undo), ("redo", redo)] {
+        assert!(took < Duration::from_secs(1), "{what} took {took:?}");
+    }
+}

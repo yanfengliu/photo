@@ -6,12 +6,21 @@
 //! shortcuts out of the frame's input, so no widget acts on them as well.
 //! Nothing here runs while a text field has focus or a dialog is up, and
 //! the arrow keys are left to a widget that has keyboard focus (a slider
-//! nudges with them).
+//! nudges with them). Enter and Escape are a tool's only while one is open.
 
 use egui::{Event, FocusDirection, Key, Modifiers};
 use photo_core::meta::{ColorLabel, Flag};
 
+use super::develop::tools::ToolKey;
+use super::develop::{MaskKind, Tool};
 use super::state::{Module, View};
+
+/// Where a key press lands: the module shown and the Develop tool open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Scope {
+    pub(crate) module: Module,
+    pub(crate) tool: Option<Tool>,
+}
 
 /// Which way an arrow key moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +81,16 @@ pub(crate) enum Shortcut {
     CopySettings,
     PasteSettings,
     ResetSettings,
+    /// R, Q, M, Shift+M, K: a Develop tool.
+    Tool(ToolKey),
+    /// Enter: keep what the open tool changed.
+    Commit,
+    /// Escape: drop what the open tool changed.
+    Cancel,
+    /// O: the red overlay of the selected mask.
+    Overlay,
+    /// Shift+Command+E: the Export dialog.
+    Export,
 }
 
 impl Shortcut {
@@ -138,6 +157,15 @@ pub(crate) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
         (false, false, Key::W) => Shortcut::WhiteBalancePicker,
         (false, false, Key::F) => Shortcut::FullScreen,
         (false, false, Key::L) => Shortcut::LightsOut,
+        (false, false, Key::R) => Shortcut::Tool(ToolKey::Crop),
+        (false, false, Key::Q) => Shortcut::Tool(ToolKey::Heal),
+        (false, false, Key::M) => Shortcut::Tool(ToolKey::Mask(MaskKind::Linear)),
+        (false, true, Key::M) => Shortcut::Tool(ToolKey::Mask(MaskKind::Radial)),
+        (false, false, Key::K) => Shortcut::Tool(ToolKey::Mask(MaskKind::Brush)),
+        (false, false, Key::Enter) => Shortcut::Commit,
+        (false, false, Key::Escape) => Shortcut::Cancel,
+        (false, false, Key::O) => Shortcut::Overlay,
+        (true, true, Key::E) => Shortcut::Export,
         (true, false, Key::Z) => Shortcut::Undo,
         (true, true, Key::Z) => Shortcut::Redo,
         (true, false, Key::A) => Shortcut::SelectAll,
@@ -156,28 +184,30 @@ pub(crate) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Shortcut> {
     Some(found)
 }
 
-/// Whether `shortcut` means anything in `module`. Those that do not are
+/// Whether `shortcut` means anything in `scope`. Those that do not are
 /// left in the input for the widgets.
-fn applies(shortcut: Shortcut, module: Module) -> bool {
-    let develop_only = matches!(
-        shortcut,
+fn applies(shortcut: Shortcut, scope: Scope) -> bool {
+    let develop = scope.module == Module::Develop;
+    match shortcut {
         Shortcut::Before
-            | Shortcut::SideBySide
-            | Shortcut::Split
-            | Shortcut::Clipping
-            | Shortcut::WhiteBalancePicker
-            | Shortcut::LightsOut
-    );
-    module == Module::Develop || !develop_only
+        | Shortcut::SideBySide
+        | Shortcut::Split
+        | Shortcut::Clipping
+        | Shortcut::WhiteBalancePicker
+        | Shortcut::LightsOut => develop,
+        Shortcut::Commit | Shortcut::Cancel => develop && scope.tool.is_some(),
+        Shortcut::Overlay => develop && scope.tool == Some(Tool::Mask),
+        _ => true,
+    }
 }
 
-/// Take this frame's shortcut presses for `module` out of its input, oldest
+/// Take this frame's shortcut presses for `scope` out of its input, oldest
 /// first.
 ///
 /// While a widget has keyboard focus, the arrow keys are its own. A Tab
 /// that is a shortcut also cancels the keyboard-focus move egui started for
 /// it when the frame began.
-pub(crate) fn take_shortcuts(ctx: &egui::Context, module: Module) -> Vec<Shortcut> {
+pub(crate) fn take_shortcuts(ctx: &egui::Context, scope: Scope) -> Vec<Shortcut> {
     let focused = ctx.memory(|memory| memory.focused().is_some());
     let mut found = Vec::new();
     ctx.input_mut(|input| {
@@ -195,7 +225,7 @@ pub(crate) fn take_shortcuts(ctx: &egui::Context, module: Module) -> Vec<Shortcu
             let Some(shortcut) = shortcut(*key, *modifiers) else {
                 return true;
             };
-            if !applies(shortcut, module) || (focused && matches!(shortcut, Shortcut::Arrow { .. }))
+            if !applies(shortcut, scope) || (focused && matches!(shortcut, Shortcut::Arrow { .. }))
             {
                 return true;
             }
@@ -242,7 +272,50 @@ mod tests {
         assert_eq!(plain(Key::N), Some(Shortcut::View(View::Survey)));
         assert_eq!(plain(Key::Space), Some(Shortcut::ToggleZoom));
         assert_eq!(plain(Key::Backspace), Some(Shortcut::Delete));
-        assert_eq!(plain(Key::Q), None, "the healing tool comes with part 2");
+        assert_eq!(plain(Key::H), None);
+    }
+
+    const LIBRARY: Scope = Scope {
+        module: Module::Library,
+        tool: None,
+    };
+
+    fn develop(tool: Option<Tool>) -> Scope {
+        Scope {
+            module: Module::Develop,
+            tool,
+        }
+    }
+
+    #[test]
+    fn the_tool_keys_open_tools_and_enter_and_escape_are_a_tools_only_while_one_is_open() {
+        let plain = |key| shortcut(key, Modifiers::NONE);
+        assert_eq!(plain(Key::R), Some(Shortcut::Tool(ToolKey::Crop)));
+        assert_eq!(plain(Key::Q), Some(Shortcut::Tool(ToolKey::Heal)));
+        assert_eq!(
+            plain(Key::M),
+            Some(Shortcut::Tool(ToolKey::Mask(MaskKind::Linear)))
+        );
+        assert_eq!(
+            shortcut(Key::M, Modifiers::SHIFT),
+            Some(Shortcut::Tool(ToolKey::Mask(MaskKind::Radial)))
+        );
+        assert_eq!(
+            plain(Key::K),
+            Some(Shortcut::Tool(ToolKey::Mask(MaskKind::Brush)))
+        );
+        assert_eq!(shortcut(Key::E, SHIFT_COMMAND), Some(Shortcut::Export));
+        assert_eq!(plain(Key::Enter), Some(Shortcut::Commit));
+        assert_eq!(plain(Key::Escape), Some(Shortcut::Cancel));
+        for key in [Shortcut::Commit, Shortcut::Cancel] {
+            assert!(!applies(key, LIBRARY));
+            assert!(!applies(key, develop(None)), "left for the widgets");
+            assert!(applies(key, develop(Some(Tool::Crop))));
+        }
+        assert!(applies(Shortcut::Overlay, develop(Some(Tool::Mask))));
+        assert!(!applies(Shortcut::Overlay, develop(Some(Tool::Heal))));
+        assert!(applies(Shortcut::Tool(ToolKey::Crop), LIBRARY));
+        assert!(applies(Shortcut::Export, LIBRARY));
     }
 
     #[test]
@@ -300,10 +373,9 @@ mod tests {
             None,
             "the clipboard's own"
         );
-        assert_eq!(plain(Key::R), None, "the crop tool comes with part 2");
-        assert!(applies(Shortcut::Clipping, Module::Develop));
-        assert!(!applies(Shortcut::Clipping, Module::Library));
-        assert!(applies(Shortcut::CopySettings, Module::Library));
+        assert!(applies(Shortcut::Clipping, develop(None)));
+        assert!(!applies(Shortcut::Clipping, LIBRARY));
+        assert!(applies(Shortcut::CopySettings, LIBRARY));
     }
 
     #[test]

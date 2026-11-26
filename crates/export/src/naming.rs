@@ -14,10 +14,13 @@ const MAX_STEM_BYTES: usize = 200;
 /// anything usable.
 const LAST_RESORT: &str = "photo";
 
-/// Names Windows reserves for devices, whatever the extension.
-const RESERVED: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+/// Names Windows reserves for devices, whatever the extension: Microsoft's
+/// list ("Naming Files, Paths, and Namespaces"), which includes the ports
+/// numbered 0 and with the Latin-1 superscript digits ¹, ² and ³.
+const RESERVED: [&str; 30] = [
+    "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+    "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
+    "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
 
 /// Where an item's file goes and what it is called, before the
@@ -199,6 +202,35 @@ mod tests {
         assert_eq!(sanitize("con"), "con_");
         assert_eq!(sanitize("LPT1.backup"), "LPT1_.backup");
         assert_eq!(sanitize("console"), "console");
+    }
+
+    /// Review finding E4: the superscript forms survived. The whole class is
+    /// Microsoft's list of reserved names, bare or followed by extensions.
+    #[test]
+    fn every_windows_device_name_is_marked_with_or_without_extensions() {
+        let mut devices: Vec<String> = ["CON", "PRN", "AUX", "NUL"].map(String::from).to_vec();
+        for port in ["COM", "LPT"] {
+            for digit in "0123456789¹²³".chars() {
+                devices.push(format!("{port}{digit}"));
+            }
+        }
+        let is_device = |stem: &str| devices.iter().any(|d| d.eq_ignore_ascii_case(stem));
+        for device in &devices {
+            for name in [
+                device.clone(),
+                device.to_lowercase(),
+                format!("{device}.txt"),
+                format!("{device} .tar.gz"),
+            ] {
+                let safe = sanitize(&name);
+                let stem = safe.split('.').next().unwrap().trim_end();
+                assert!(!is_device(stem), "{name:?} became {safe:?}");
+                assert_eq!(safe.replacen('_', "", 1), name, "only one mark is added");
+            }
+        }
+        for kept in ["COM10", "COM", "LPT⁴", "CONSOLE", "AUXILIARY", "nul-x"] {
+            assert_eq!(sanitize(kept), kept);
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use egui::Rect;
 use photo_core::meta::PhotoId;
-use photo_engine::{Engine, PhotoRecord, Target};
+use photo_engine::{Engine, ExportSettings, PhotoRecord, Target, TaskId};
 
 use super::develop::DevelopState;
 use super::dialogs::{Dialog, ImportSettings};
@@ -205,6 +205,11 @@ pub(crate) struct UiState {
     pub(crate) dialog: Option<Dialog>,
     /// The Import dialog's choices, kept from one import to the next.
     pub(crate) import_settings: ImportSettings,
+    /// The Export dialog's choices, kept from one export to the next;
+    /// `None` until the first, which starts from the engine's defaults.
+    pub(crate) export_settings: Option<ExportSettings>,
+    /// The finished export whose notice in the top bar was dismissed.
+    pub(crate) dismissed_export: Option<TaskId>,
 }
 
 /// The size of grid cells unless the slider says otherwise.
@@ -239,6 +244,8 @@ impl Default for UiState {
             record: RecordCache::default(),
             dialog: None,
             import_settings: ImportSettings::default(),
+            export_settings: None,
+            dismissed_export: None,
         }
     }
 }

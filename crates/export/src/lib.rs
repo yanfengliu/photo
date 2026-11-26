@@ -35,10 +35,12 @@
 //! An export never opens the original for writing. It writes a temporary
 //! file in the destination folder and gives it its name only when it is
 //! complete; on failure or cancellation the temporary file is removed. A
-//! destination that is the original itself (by identity, not just by name:
-//! a hard link or a name differing in case counts) is never written: the
-//! overwrite policy refuses it, the unique-name policy moves on to the next
-//! name and the skip policy skips it.
+//! destination that is the original itself is never written: the original
+//! is recognised by file identity taken when the export starts, so a hard
+//! link, a name differing in case, or the original moved onto the
+//! destination meanwhile all count. The overwrite policy refuses it, the
+//! unique-name policy moves on to the next name and the skip policy skips
+//! it; those two never replace any file, with or without hard links.
 //!
 //! See `docs/work/12_lightroom-workflow-restart/design.md` (§5.8, §5.9,
 //! §8.4).
@@ -73,7 +75,7 @@ pub use settings::{
 
 use crate::metadata::Metadata;
 use crate::naming::{NamePlan, occupied};
-use crate::place::{Placed, TempFile, is_source};
+use crate::place::{Original, Placed, TempFile};
 use crate::sharpen::Sharpener;
 use crate::strips::Producer;
 use crate::watermark::WatermarkLayer;
@@ -91,6 +93,9 @@ pub fn export(
     settings: &ExportSettings,
     cancel: &CancelToken,
 ) -> Result<ExportOutcome, ExportError> {
+    // Captured first, so the original is recognised even if it is moved or
+    // renamed while the export runs.
+    let original = Original::capture(item.source_path);
     let plan = NamePlan::new(item, settings);
     let policy = settings.location.existing;
     let first = match policy {
@@ -102,7 +107,11 @@ pub fn export(
         ExistingFile::Skip if occupied(&target) => {
             return Ok(ExportOutcome::Skipped { path: target });
         }
-        ExistingFile::Overwrite if is_source(&target, item.source_path) => {
+        ExistingFile::Overwrite
+            if original
+                .is(&target)
+                .map_err(|error| ExportError::io(&target, error))? =>
+        {
             return Err(ExportError::WouldOverwriteSource(target));
         }
         _ => {}
@@ -149,7 +158,7 @@ pub fn export(
         cancel,
     )?;
     proceed(cancel)?;
-    match temporary.place(&plan, first, policy, item.source_path)? {
+    match temporary.place(&plan, first, policy, &original)? {
         Placed::At(path) => Ok(ExportOutcome::Written {
             path,
             width: size.0,

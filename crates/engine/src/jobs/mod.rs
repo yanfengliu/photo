@@ -292,8 +292,11 @@ impl<O: Send + 'static, P: Send + 'static> Pool<O, P> {
     }
 }
 
-impl<O, P> Drop for Pool<O, P> {
-    fn drop(&mut self) {
+impl<O, P> Pool<O, P> {
+    /// Stop the workers: abandon the queued jobs, ask the running ones to
+    /// stop and join every thread. Once this returns, every job that ran
+    /// has posted its outcome. Dropping the pool does the same.
+    pub(crate) fn shut_down(&mut self) {
         self.shared.stopping.store(true, Ordering::SeqCst);
         let abandoned = {
             let mut state = lock(&self.shared.state);
@@ -307,6 +310,12 @@ impl<O, P> Drop for Pool<O, P> {
                 log::error!("an engine worker thread ended with a panic");
             }
         }
+    }
+}
+
+impl<O, P> Drop for Pool<O, P> {
+    fn drop(&mut self) {
+        self.shut_down();
     }
 }
 

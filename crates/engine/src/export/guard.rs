@@ -8,62 +8,101 @@
 //! the path of a photo whose file is missing, which would then be taken
 //! for that photo. So an export is refused when its file would have the
 //! name of an original of the catalog in the same folder, whatever the
-//! policy. Names are compared ignoring letter case, as on the file systems
-//! photos usually live on (Windows and macOS), and folders after following
-//! symbolic links (among the catalog's folders of the destination's name).
+//! policy.
+//!
+//! "The same folder" is decided by the folder's identity on disk, not by
+//! how its path is spelled: a folder the catalog reached through a symbolic
+//! link, a junction or another spelling is the same folder. Folders that
+//! are not there to ask (a drive that is away) are compared by their paths,
+//! resolved as far as they exist and ignoring letter case. File names are
+//! compared ignoring letter case, as on the file systems photos usually
+//! live on.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use photo_catalog::{Catalog, CatalogError, PhotoQuery, Source};
+use same_file::Handle;
 
-/// The folders no export may go into, and the names of the originals in
-/// every folder the export writes to.
+/// A folder the export writes into, and the names of the catalog's
+/// originals in it, in lower case.
+#[derive(Debug)]
+struct Destination {
+    folder: PathBuf,
+    key: PathBuf,
+    originals: HashSet<String>,
+}
+
+/// The folders no export may go into, and the originals in every folder
+/// the export writes to.
 #[derive(Debug, Default)]
 pub(crate) struct Guard {
     own: Vec<PathBuf>,
-    originals: HashMap<PathBuf, HashSet<String>>,
+    destinations: Vec<Destination>,
 }
 
 impl Guard {
     /// The guard for an export into `destinations`. `own` are the folders
-    /// the catalog keeps its files in.
+    /// the catalog keeps its files in. Every catalog folder that holds
+    /// photos is asked for its identity once, which is one file-system
+    /// call each.
     pub(crate) fn new(
         catalog: &Catalog,
         own: &[&Path],
         destinations: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Self, CatalogError> {
-        let wanted: HashSet<PathBuf> = destinations
+        let mut wanted: Vec<(Destination, Option<Handle>)> = destinations
             .into_iter()
-            .map(|folder| folder_key(&folder))
+            .map(|folder| {
+                let handle = Handle::from_path(&folder).ok();
+                let destination = Destination {
+                    key: folder_key(&folder),
+                    folder,
+                    originals: HashSet::new(),
+                };
+                (destination, handle)
+            })
             .collect();
-        // Only catalog folders named like a destination can be one; the
-        // others are not looked up on disk, which keeps a catalog of many
-        // folders quick to check.
-        let leaves: HashSet<String> = wanted.iter().filter_map(|key| leaf(key)).collect();
-        let mut originals: HashMap<PathBuf, HashSet<String>> = HashMap::new();
-        for folder in catalog.folders()? {
-            // A root (a drive) has no name, and is always looked at.
-            let named = leaf(&folder.path).is_none_or(|name| leaves.contains(&name));
-            if folder.photo_count == 0 || !named {
-                continue;
+        let folders = if wanted.is_empty() {
+            Vec::new()
+        } else {
+            catalog.folders()?
+        };
+        for folder in folders.iter().filter(|folder| folder.photo_count > 0) {
+            let handle = Handle::from_path(&folder.path).ok();
+            let mut key = None;
+            let mut names: Option<Vec<String>> = None;
+            for (destination, there) in &mut wanted {
+                let same = match (&handle, &*there) {
+                    (Some(here), Some(there)) => here == there,
+                    _ => *key.get_or_insert_with(|| folder_key(&folder.path)) == destination.key,
+                };
+                if !same {
+                    continue;
+                }
+                if names.is_none() {
+                    let photos = catalog.query(&PhotoQuery::from(Source::Folder {
+                        id: folder.id,
+                        include_subfolders: false,
+                    }))?;
+                    names = Some(
+                        photos
+                            .iter()
+                            .map(|photo| photo.file_name.to_lowercase())
+                            .collect(),
+                    );
+                }
+                destination
+                    .originals
+                    .extend(names.iter().flatten().cloned());
             }
-            let key = folder_key(&folder.path);
-            if !wanted.contains(&key) {
-                continue;
-            }
-            let photos = catalog.query(&PhotoQuery::from(Source::Folder {
-                id: folder.id,
-                include_subfolders: false,
-            }))?;
-            originals
-                .entry(key)
-                .or_default()
-                .extend(photos.iter().map(|photo| photo.file_name.to_lowercase()));
         }
         Ok(Self {
             own: own.iter().map(|folder| folder_key(folder)).collect(),
-            originals,
+            destinations: wanted
+                .into_iter()
+                .map(|(destination, _)| destination)
+                .collect(),
         })
     }
 
@@ -78,10 +117,11 @@ impl Guard {
             ));
         }
         let name = target.file_name()?.to_string_lossy().to_lowercase();
-        let taken = self
-            .originals
-            .get(&key)
-            .is_some_and(|names| names.contains(&name));
+        let taken = self.destinations.iter().any(|destination| {
+            destination.originals.contains(&name)
+                && (destination.key == key
+                    || same_file::is_same_file(folder, &destination.folder).unwrap_or(false))
+        });
         taken.then(|| {
             format!(
                 "{} is the original of a photo in the catalog, which an export never writes over",
@@ -91,15 +131,9 @@ impl Guard {
     }
 }
 
-/// The last part of a folder's path, in lower case.
-fn leaf(path: &Path) -> Option<String> {
-    path.file_name()
-        .map(|name| name.to_string_lossy().to_lowercase())
-}
-
 /// `path` with symbolic links resolved as far as it exists (the nearest
 /// existing folder made canonical, the rest added back), in lower case,
-/// for comparing folders.
+/// for comparing folders that are not both there to be asked who they are.
 fn folder_key(path: &Path) -> PathBuf {
     let mut existing = path;
     let mut rest = Vec::new();
@@ -123,10 +157,23 @@ fn folder_key(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use photo_catalog::NewPhoto;
+    use photo_core::meta::FileKind;
+
     use super::*;
 
+    /// A catalog in memory holding one photo, recorded at `path`.
+    fn catalog_with(path: &Path) -> Catalog {
+        let mut catalog = Catalog::open_in_memory().unwrap();
+        let run = catalog.begin_import().unwrap();
+        catalog
+            .insert_photos(run, &[NewPhoto::new(path, FileKind::Raster)])
+            .unwrap();
+        catalog
+    }
+
     #[test]
-    fn folders_compare_through_links_and_letter_case_and_folders_not_made_yet() {
+    fn folders_compare_through_letter_case_and_folders_not_made_yet() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("Shots");
         std::fs::create_dir(&real).unwrap();
@@ -140,6 +187,45 @@ mod tests {
         assert!(folder_key(&unborn).starts_with(folder_key(&real)));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_original_recorded_through_a_linked_folder_is_found_in_the_real_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&actual, &link).unwrap();
+        std::fs::write(actual.join("IMG_1.JPG"), b"the camera's own").unwrap();
+        let catalog = catalog_with(&link.join("IMG_1.JPG"));
+
+        let guard = Guard::new(&catalog, &[], [actual.clone()]).unwrap();
+        assert!(guard.refusal(&actual.join("IMG_1.JPG")).is_some());
+        assert!(
+            guard.refusal(&actual.join("img_1.jpg")).is_some(),
+            "whatever the case"
+        );
+        assert!(guard.refusal(&link.join("IMG_1.jpg")).is_some());
+        assert!(guard.refusal(&actual.join("IMG_2.jpg")).is_none());
+        assert!(guard.refusal(&dir.path().join("IMG_1.JPG")).is_none());
+
+        // The other way round: recorded in the real folder, exported
+        // through the link.
+        let catalog = catalog_with(&actual.join("IMG_1.JPG"));
+        let guard = Guard::new(&catalog, &[], [link.clone()]).unwrap();
+        assert!(guard.refusal(&link.join("IMG_1.jpg")).is_some());
+        assert!(guard.refusal(&actual.join("IMG_1.jpg")).is_some());
+    }
+
+    #[test]
+    fn a_folder_that_is_away_is_compared_by_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let away = dir.path().join("Card").join("DCIM");
+        let catalog = catalog_with(&away.join("IMG_1.JPG"));
+        let guard = Guard::new(&catalog, &[], [away.clone()]).unwrap();
+        assert!(guard.refusal(&away.join("img_1.jpg")).is_some());
+        assert!(guard.refusal(&away.join("IMG_9.jpg")).is_none());
+    }
+
     #[test]
     fn the_catalogs_own_folders_are_refused_with_what_is_inside_them() {
         let dir = tempfile::tempdir().unwrap();
@@ -147,7 +233,7 @@ mod tests {
         std::fs::create_dir(&own).unwrap();
         let guard = Guard {
             own: vec![folder_key(&own)],
-            originals: HashMap::new(),
+            destinations: Vec::new(),
         };
         assert!(guard.refusal(&own.join("a.jpg")).is_some());
         assert!(guard.refusal(&own.join("new").join("a.jpg")).is_some());
