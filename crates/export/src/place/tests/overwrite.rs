@@ -6,12 +6,13 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 
-use super::{Folder, Kind, at_every_step, kinds, same_file, volume};
+use super::{Folder, Kind, Staged, at_every_step, kinds, same_file, volume};
 use crate::item::ExportError;
 use crate::place::Placed;
 use crate::place::disk::Step;
 use crate::place::guard::{Guard, Guarded};
 use crate::place::held::Held;
+use crate::place::moves::EXCLUSIVE_ASIDE;
 use crate::place::overwrite::ROUNDS;
 use crate::settings::ExistingFile::Overwrite;
 
@@ -42,6 +43,35 @@ fn undisturbed_the_export_replaces_what_had_the_name() {
         assert_eq!(folder.read("x.jpg").unwrap(), b"export", "{kind:?}");
         assert_eq!(folder.names(), ["a.tif", "p.tif", "x.jpg"], "{kind:?}");
         assert!(steps.contains(&Step::SetAside) && steps.contains(&Step::Discard));
+    }
+}
+
+/// Review finding 6: two exporters on two machines can come to use one
+/// hidden name in a shared folder. Where a rename that cannot replace is
+/// used for moving aside, a hidden name that is taken is refused and
+/// another one used: the other exporter's file under it is not replaced.
+#[test]
+fn a_hidden_name_another_exporter_has_is_not_replaced() {
+    for kind in kinds() {
+        if !(EXCLUSIVE_ASIDE && matches!(kind, Kind::Both | Kind::ExclusiveOnly)) {
+            continue;
+        }
+        let (folder, guarded) = scene();
+        // Another exporter's file, moved aside under the very name this
+        // export is about to use.
+        let theirs = folder.put(".photo-export-7-00000000000000aa.previous", b"theirs");
+        let mut quiet = |_: usize, _: Step| {};
+        let mut disk = Staged::new(kind, &mut quiet);
+        disk.hidden = vec![theirs.clone()];
+        let result = folder.place_on(&mut disk, b"export", Overwrite, &guarded);
+        assert_eq!(result.unwrap(), Placed::At(folder.at("x.jpg")), "{kind:?}");
+        assert_eq!(folder.read("x.jpg").unwrap(), b"export", "{kind:?}");
+        assert_eq!(
+            fs::read(&theirs).ok().as_deref(),
+            Some(&b"theirs"[..]),
+            "{kind:?}: the other exporter's file was replaced"
+        );
+        assert_eq!(folder.hidden().len(), 1, "{kind:?}: {:?}", folder.names());
     }
 }
 

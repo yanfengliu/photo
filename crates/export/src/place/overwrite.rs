@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use super::disk::{Disk, Step};
 use super::guard::Guarded;
-use super::moves::{folder_of, hidden_name, move_new, put_back};
+use super::moves::{move_new, put_back, set_aside};
 use crate::item::ExportError;
 
 /// How many times something that has the export's name is moved aside and
@@ -108,14 +108,10 @@ fn take_over(
             return Err(guard.refusal(name.to_path_buf()));
         }
         let seen = guarded.look();
-        let hidden = hidden_name(folder_of(name), "previous");
-        disk.reached(Step::SetAside);
-        match fs::rename(name, &hidden) {
-            Ok(()) => {}
+        let Some(hidden) = set_aside(disk, name, "previous").map_err(failed)? else {
             // It left by itself; the name may be free now.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(failed(error)),
-        }
+            continue;
+        };
         disk.reached(Step::Identify);
         match guarded.identify(&hidden, &seen, name) {
             Ok(None) => aside.push(hidden),

@@ -18,17 +18,21 @@
 //! program does between two steps, a file this export did not create is
 //! neither replaced nor removed.
 
+use std::collections::hash_map::RandomState;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::disk::{Disk, Step};
 use super::held::Held;
 use crate::naming::occupied;
 
-/// Distinguishes the hidden names made by one process.
-static NEXT_HIDDEN: AtomicU64 = AtomicU64::new(0);
+/// How many hidden names are tried for moving a file aside when each turns
+/// out to be taken.
+const HIDDEN_TRIES: u32 = 16;
 
 /// How much of a file is copied at a time. Far more than the usual 8 KiB on
 /// purpose: on FAT and exFAT under macOS, where files are copied to their
@@ -41,21 +45,83 @@ const COPY_PIECE: usize = 1 << 20;
 /// its own.
 const KEPT_NAMES: u32 = 99;
 
+/// Whether the rename that cannot replace is what moves aside a file that
+/// is not this export's own. It is on Apple's systems, where that rename is
+/// one step and nothing else. It is not on Linux: on a file system without
+/// such a rename `tempfile` makes a hard link and removes the old name,
+/// two steps on a visible name, between which the name could come to lead
+/// to another file that would then be unlinked unseen. And it is not on
+/// Windows, where `tempfile` first resets the attributes of the file.
+/// There a plain rename moves the file aside, and the random bits of the
+/// hidden name are what keeps that name free.
+pub(crate) const EXCLUSIVE_ASIDE: bool = cfg!(target_vendor = "apple");
+
 /// A hidden name in `folder` that nothing has:
-/// `.photo-export-<process>-<number>.<role>`. The roles are `part` (an
-/// export being written), `previous` (a file moved aside by the overwrite
-/// policy) and `discard` (a failed copy on its way out).
+/// `.photo-export-<process>-<random>.<role>`. The process id is for a
+/// person reading the folder; the sixty-four random bits are what keeps two
+/// exporters, on two machines writing into one shared folder, from ever
+/// using the same name. The roles are `part` (an export being written),
+/// `previous` (a file moved aside by the overwrite policy) and `discard`
+/// (a failed copy on its way out).
 pub(crate) fn hidden_name(folder: &Path, role: &str) -> PathBuf {
     loop {
-        let number = NEXT_HIDDEN.fetch_add(1, Ordering::Relaxed);
-        let name = format!(".photo-export-{}-{number}.{role}", std::process::id());
+        let name = format!(
+            ".photo-export-{}-{:016x}.{role}",
+            std::process::id(),
+            random()
+        );
         let path = folder.join(name);
-        // A name left behind by an earlier process with this number is
-        // passed over, never reused.
         if !occupied(&path) {
             return path;
         }
     }
+}
+
+/// Sixty-four bits that cannot be guessed and that no other process shares:
+/// the standard library's randomly keyed hasher, which the operating system
+/// seeds, over a count and the time.
+pub(crate) fn random() -> u64 {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(COUNT.fetch_add(1, Ordering::Relaxed));
+    if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        hasher.write_u128(now.as_nanos());
+    }
+    hasher.finish()
+}
+
+/// Moves what has `name` aside under a fresh hidden name beside it, in one
+/// step, so that what is aside is exactly what had the name. Returns the
+/// hidden name, or `None` when nothing had the name.
+///
+/// Where [`EXCLUSIVE_ASIDE`] says so the step is the rename that cannot
+/// replace: a hidden name that another exporter has come to use as well is
+/// refused, and another one tried. Elsewhere, and on a file system without
+/// such a rename, it is a plain rename.
+pub(crate) fn set_aside(
+    disk: &mut dyn Disk,
+    name: &Path,
+    role: &str,
+) -> io::Result<Option<PathBuf>> {
+    disk.reached(Step::SetAside);
+    for _ in 0..HIDDEN_TRIES {
+        let hidden = disk.hidden_name(folder_of(name), role);
+        if EXCLUSIVE_ASIDE {
+            match disk.rename_exclusive(name, &hidden) {
+                Ok(()) => return Ok(Some(hidden)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                // No such rename on this file system.
+                Err(_) => {}
+            }
+        }
+        return match fs::rename(name, &hidden) {
+            Ok(()) => Ok(Some(hidden)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
+    Err(io::Error::other("every hidden name tried was taken"))
 }
 
 /// The folder a path's last component is in.
@@ -129,7 +195,7 @@ fn copy_new(disk: &mut dyn Disk, from: &Path, to: &Path) -> io::Result<bool> {
     // identity changes with its first bytes.
     let mut created = Held::keep(created)?;
     let filled = fill(disk, from, created.file());
-    let still_here = created.is_at(to);
+    let still_here = disk.is_at(&created, to).unwrap_or(false);
     match filled {
         Ok(()) if still_here => {
             drop(created);
@@ -198,6 +264,7 @@ fn relink_new(_: &mut dyn Disk, _: &Path, _: &Path) -> io::Result<bool> {
 /// permissions, and syncs it.
 fn fill(disk: &mut dyn Disk, from: &Path, into: &mut File) -> io::Result<()> {
     disk.reached(Step::Fill);
+    disk.room()?;
     let mut source = File::open(from)?;
     let mut piece = vec![0; COPY_PIECE];
     loop {
@@ -228,15 +295,18 @@ fn fill(disk: &mut dyn Disk, from: &Path, into: &mut File) -> io::Result<()> {
 fn give_back(disk: &mut dyn Disk, to: &Path, created: Held) {
     disk.reached(Step::GiveBack);
     // Looked at first, so that another program's file is not even moved.
-    if !created.is_at(to) {
+    if !disk.is_at(&created, to).unwrap_or(false) {
         return;
     }
-    let aside = hidden_name(folder_of(to), "discard");
-    if let Err(error) = fs::rename(to, &aside) {
-        log::warn!("cannot remove the unfinished {}: {error}", to.display());
-        return;
-    }
-    let ours = created.is_at(&aside);
+    let aside = match set_aside(disk, to, "discard") {
+        Ok(Some(aside)) => aside,
+        Ok(None) => return,
+        Err(error) => {
+            log::warn!("cannot remove the unfinished {}: {error}", to.display());
+            return;
+        }
+    };
+    let ours = disk.is_at(&created, &aside).unwrap_or(false);
     drop(created);
     if ours {
         if let Err(error) = fs::remove_file(&aside) {
@@ -318,13 +388,26 @@ mod tests {
         assert_eq!(folder_of(&name), Path::new("out"));
     }
 
+    /// Review finding 6: a process id and a count are the same on two
+    /// machines. The names carry the process id, for a person reading the
+    /// folder, and sixty-four bits that are not a count.
     #[test]
-    fn hidden_names_are_fresh_and_pass_over_leftovers() {
+    fn hidden_names_carry_the_process_id_and_sixty_four_random_bits() {
         let dir = tempfile::tempdir().unwrap();
-        let first = hidden_name(dir.path(), "part");
-        let second = hidden_name(dir.path(), "part");
-        assert_ne!(first, second);
-        let name = first.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with(".photo-export-") && name.ends_with(".part"));
+        let prefix = format!(".photo-export-{}-", std::process::id());
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let path = hidden_name(dir.path(), "previous");
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let random = name
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".previous"))
+                .unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(random.len(), 16, "{name}");
+            let number = u64::from_str_radix(random, 16).unwrap_or_else(|_| panic!("{name}"));
+            assert!(seen.insert(number), "{name} came twice");
+        }
+        let (least, most) = (seen.iter().min().unwrap(), seen.iter().max().unwrap());
+        assert!(most - least > 1 << 40, "the names follow one another");
     }
 }

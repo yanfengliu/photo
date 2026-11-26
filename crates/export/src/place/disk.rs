@@ -4,9 +4,12 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempPath;
+
+use super::held::Held;
+use super::moves::hidden_name;
 
 /// The point just before one step of placing a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +60,23 @@ pub(crate) trait Disk {
     /// cannot do that. See [`rename_exclusive`].
     fn rename_exclusive(&mut self, from: &Path, to: &Path) -> io::Result<()> {
         rename_exclusive(from, to)
+    }
+
+    /// A hidden name in `folder` that nothing has, for a file in `role`.
+    fn hidden_name(&mut self, folder: &Path, role: &str) -> PathBuf {
+        hidden_name(folder, role)
+    }
+
+    /// Whether `path` leads to the file `held` at this moment. An error
+    /// means that it could not be told.
+    fn is_at(&mut self, held: &Held, path: &Path) -> io::Result<bool> {
+        Ok(held.is_at(path))
+    }
+
+    /// Whether the volume has room for a copy. Always, on the real file
+    /// system: a copy that does not fit fails by itself there.
+    fn room(&mut self) -> io::Result<()> {
+        Ok(())
     }
 
     /// Called just before each step. Does nothing on the real file system.

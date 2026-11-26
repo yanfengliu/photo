@@ -224,11 +224,7 @@ fn two_exports_racing_for_one_name_both_keep_their_file() {
         let (result, steps) =
             folder.place_with(kind, ExistingFile::UniqueName, &guarded, when, &mut || {
                 let mut quiet = |_: usize, _: Step| {};
-                let mut disk = Staged {
-                    kind,
-                    steps: Vec::new(),
-                    intruder: &mut quiet,
-                };
+                let mut disk = Staged::new(kind, &mut quiet);
                 let rival = rival.take().unwrap();
                 rival_placed =
                     Some(rival.place_on(&mut disk, &plan, 1, ExistingFile::UniqueName, &guarded));

@@ -94,9 +94,53 @@ struct Staged<'a> {
     kind: Kind,
     steps: Vec<Step>,
     intruder: &'a mut dyn FnMut(usize, Step),
+    /// Hidden names to hand out before real ones, first one first: names
+    /// that another exporter came to use too.
+    hidden: Vec<PathBuf>,
+    /// No identity can be read.
+    identity_fails: bool,
+    /// The volume has no room for a copy.
+    full: bool,
+}
+
+impl<'a> Staged<'a> {
+    fn new(kind: Kind, intruder: &'a mut dyn FnMut(usize, Step)) -> Self {
+        Self {
+            kind,
+            steps: Vec::new(),
+            intruder,
+            hidden: Vec::new(),
+            identity_fails: false,
+            full: false,
+        }
+    }
 }
 
 impl Disk for Staged<'_> {
+    fn hidden_name(&mut self, folder: &Path, role: &str) -> PathBuf {
+        if self.hidden.is_empty() {
+            super::moves::hidden_name(folder, role)
+        } else {
+            self.hidden.remove(0)
+        }
+    }
+
+    fn is_at(&mut self, held: &Held, path: &Path) -> io::Result<bool> {
+        if self.identity_fails {
+            Err(io::Error::other("the identity cannot be read"))
+        } else {
+            Ok(held.is_at(path))
+        }
+    }
+
+    fn room(&mut self) -> io::Result<()> {
+        if self.full {
+            Err(io::ErrorKind::StorageFull.into())
+        } else {
+            Ok(())
+        }
+    }
+
     fn link(&mut self, from: &Path, to: &Path) -> io::Result<()> {
         if matches!(self.kind, Kind::Both | Kind::LinksOnly) {
             fs::hard_link(from, to)
@@ -194,6 +238,20 @@ impl Folder {
         guarded: &Guarded,
         intruder: &mut dyn FnMut(usize, Step),
     ) -> (Result<Placed, ExportError>, Vec<Step>) {
+        let mut disk = Staged::new(kind, intruder);
+        let result = self.place_on(&mut disk, bytes, policy, guarded);
+        (result, disk.steps)
+    }
+
+    /// Places a finished export that holds `bytes` as `x.jpg` under
+    /// `policy` on `disk`.
+    fn place_on(
+        &self,
+        disk: &mut Staged,
+        bytes: &[u8],
+        policy: ExistingFile,
+        guarded: &Guarded,
+    ) -> Result<Placed, ExportError> {
         let mut finished = TempFile::create(self.0.path()).unwrap();
         finished.file().write_all(bytes).unwrap();
         let plan = NamePlan {
@@ -201,13 +259,7 @@ impl Folder {
             stem: "x".into(),
             extension: "jpg".into(),
         };
-        let mut disk = Staged {
-            kind,
-            steps: Vec::new(),
-            intruder,
-        };
-        let result = finished.place_on(&mut disk, &plan, 1, policy, guarded);
-        (result, disk.steps)
+        finished.place_on(disk, &plan, 1, policy, guarded)
     }
 
     /// [`Self::place`] with `act` run once, before step number `when`.
