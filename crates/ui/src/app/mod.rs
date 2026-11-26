@@ -249,8 +249,10 @@ impl PhotoApp {
 
     /// Where the whole photo is on the Develop canvas (in points, part of
     /// it maybe out of view), as of the last frame drawn: a point of the
-    /// photo at fractions `(u, v)` of its size is at
-    /// `rect.min + (u * width, v * height)`.
+    /// picture shown at fractions `(u, v)` of its size is at
+    /// `rect.min + (u * width, v * height)`. While the crop tool is open
+    /// it is the box around the whole frame, turned by the crop's angle;
+    /// [`Self::canvas_position`] finds a point of the photo in either.
     pub fn canvas_photo_rect(&self) -> Option<egui::Rect> {
         self.ui.develop.photo_rect
     }

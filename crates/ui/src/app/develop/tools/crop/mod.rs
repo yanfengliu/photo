@@ -372,17 +372,11 @@ pub(crate) fn panel(ui: &mut Ui, cx: &mut Cx<'_>, editing: &Editing) {
             (Icon::RotateCcw, "Rotate left", Turn::Left),
             (Icon::RotateCw, "Rotate right", Turn::Right),
             (Icon::Flip, "Flip horizontal", Turn::FlipHorizontal),
+            (Icon::FlipVertical, "Flip vertical", Turn::FlipVertical),
         ] {
             if ui.add(IconButton::new(icon, name)).clicked() {
                 turn(cx, way);
             }
-        }
-        if ui
-            .add(Button::new("Flip V").min_size(vec2(0.0, size::ROW)))
-            .on_hover_text("Mirror the photo top to bottom")
-            .clicked()
-        {
-            turn(cx, Turn::FlipVertical);
         }
     });
 

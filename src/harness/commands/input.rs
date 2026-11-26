@@ -111,17 +111,21 @@ pub fn type_text(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value
     ))
 }
 
-/// `drag {from, to}`: press at one point, move in steps, release at the
-/// other.
+/// `drag {from, to, mods}`: press at one point, move in steps, release at
+/// the other, with the modifiers held from the press to the release (Alt
+/// rubs out with the brush). With `from` and `to` the same it is a click at
+/// that point.
 pub fn drag(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, CmdError> {
-    params.only(&["from", "to"])?;
+    params.only(&["from", "to", "mods"])?;
     let from = point_in_window(session.driver, params, "from")?;
     let to = point_in_window(session.driver, params, "to")?;
+    let mods = params.opt_names("mods")?;
+    let modifiers = parse_modifiers(&mods)?;
     session.driver.separate_clicks();
-    let result = session.driver.harness().drag(from, to);
+    let result = session.driver.harness().drag_with(from, to, modifiers);
     let warnings = finish(result)?;
     Ok(performed(
-        json!({ "from": [from.x, from.y], "to": [to.x, to.y] }),
+        json!({ "from": [from.x, from.y], "to": [to.x, to.y], "mods": mods }),
         warnings,
     ))
 }

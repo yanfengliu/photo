@@ -133,6 +133,73 @@ fn a_crop_with_a_fixed_aspect_and_an_angle_is_one_step_and_survives_undo_redo_an
 }
 
 #[test]
+fn the_panels_turn_and_flip_buttons_carry_the_crop_with_the_photo() -> TestResult {
+    use photo_core::develop::Orientation;
+
+    let (_dir, _studio, mut harness) = cropping()?;
+    let steps = history(&harness).len();
+    // A crop off the centre: the bottom right corner pulled in.
+    let rect = harness.app().crop_rect().ok_or("the rectangle is drawn")?;
+    let corner = rect.right_bottom();
+    harness.drag(corner, corner - vec2(240.0, 120.0))?;
+    settle(&mut harness)?;
+    let size = output(&harness);
+    let centre = shown_centre(&harness);
+    assert!(size.0 < 1000 && size.1 < 700, "{size:?}");
+    assert!(
+        centre.distance(Point::new(600.0, 400.0)) > 60.0,
+        "{centre:?}"
+    );
+    let upright = settings(&harness).orientation;
+
+    // Each button is an icon with a name, and each leaves the same part of
+    // the photo in the rectangle.
+    let sideways = (size.1, size.0);
+    for (button, expected) in [
+        ("Rotate right", sideways),
+        ("Rotate left", size),
+        ("Flip horizontal", size),
+        ("Flip vertical", size),
+    ] {
+        harness.click(Role::Button, button)?;
+        settle(&mut harness)?;
+        assert_eq!(output(&harness), expected, "after {button}");
+        let now = shown_centre(&harness);
+        assert!(
+            now.distance(centre) < 1.5,
+            "{button}: {centre:?} -> {now:?}"
+        );
+        assert_eq!(harness.app().tool(), Some(Tool::Crop), "the tool stays up");
+    }
+    // Mirrored both ways is the photo turned half round.
+    assert_eq!(upright, Orientation::IDENTITY);
+    assert_eq!(settings(&harness).orientation, Orientation::new(2, false));
+    let row = [
+        "Rotate left",
+        "Rotate right",
+        "Flip horizontal",
+        "Flip vertical",
+    ]
+    .map(|name| {
+        harness
+            .control(Role::Button, name)
+            .map(|button| button.rect)
+    });
+    let [left, right, across, down] = row;
+    let (left, right, across, down) = (left?, right?, across?, down?);
+    assert_eq!(left.size(), down.size(), "four buttons of one kind");
+    assert!(left.right() <= right.left() && right.right() <= across.left());
+    assert!(across.right() <= down.left() && down.center().y == left.center().y);
+
+    assert_eq!(history(&harness).len(), steps, "nothing is recorded yet");
+    harness.press_key(Key::Enter, Modifiers::NONE)?;
+    settle(&mut harness)?;
+    assert_eq!(history(&harness).len(), steps + 1, "one step for all of it");
+    assert_eq!(output(&harness), size);
+    Ok(())
+}
+
+#[test]
 fn a_line_drawn_along_a_slope_levels_it() -> TestResult {
     let (_dir, _studio, mut harness) = cropping()?;
     harness.click(Role::Button, "Straighten")?;

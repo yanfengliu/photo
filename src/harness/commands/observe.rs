@@ -68,6 +68,7 @@ pub fn observe(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, 
         "module": module_name(app.module()),
         "view": view_name(app.view()),
         "zoom": snake(&format!("{:?}", app.zoom())),
+        "develop": develop_json(app),
         "dialog_open": app.dialog_open(),
         "layout": {
             "top_bar": layout.top_bar,
@@ -138,6 +139,24 @@ pub fn observe(params: &Params<'_>, session: &mut Session<'_>) -> Result<Value, 
         data["controls"] = listed.iter().map(controls::to_json).collect();
     }
     Ok(data)
+}
+
+/// The Develop canvas: its zoom, where the photo is on screen, and the tool
+/// that is open, so that a gesture can be aimed at the photo. `null`
+/// outside Develop.
+fn develop_json(app: &photo_ui::PhotoApp) -> Value {
+    if app.module() != photo_ui::Module::Develop {
+        return Value::Null;
+    }
+    json!({
+        "zoom": snake(&format!("{:?}", app.develop_zoom())),
+        "photo_rect": app.canvas_photo_rect().map(controls::rect_json),
+        "tool": app.tool().map(|tool| snake(&format!("{tool:?}"))),
+        "crop_rect": app.crop_rect().map(controls::rect_json),
+        "selected_spot": app.selected_spot(),
+        "selected_mask": app.selected_mask(),
+        "mask_overlay": app.mask_overlay(),
+    })
 }
 
 /// A module's name as `observe` and `open` report it: `library`, `develop`.

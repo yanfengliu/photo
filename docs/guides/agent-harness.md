@@ -59,7 +59,7 @@ An action's data can carry `warnings`: the UI was still changing when the action
 | Command | Parameters | What it does |
 | --- | --- | --- |
 | `ping` | | Protocol and app version, pid, run id and directory, uptime, whether storage is sandboxed, the GPU adapter (`gpu.available`, `gpu.adapter`), the window size and pixel density. |
-| `observe` | `controls` (default true) | The module, view and zoom, whether a dialog is open, the layout and open panels, the source, filter, sort and photo counts, the selection, the active photo (id, file name, path, kind, rating, flag, label, size, and the load state of its thumbnail, standard preview and develop session), whether the engine is idle, pending work, tasks, toasts (`showing` now and the `recent` twenty), undo labels, the pointer, and every control in the accessibility tree with role, name, value, number and range, enabled state, rectangle, toggled, selected, expanded and focused. |
+| `observe` | `controls` (default true) | The module, view and zoom, whether a dialog is open, the layout and open panels, the source, filter, sort and photo counts, the selection, the active photo (id, file name, path, kind, rating, flag, label, size, and the load state of its thumbnail, standard preview and develop session), whether the engine is idle, pending work, tasks, toasts (`showing` now and the `recent` twenty), undo labels, the pointer, in Develop the canvas (`develop`: its zoom, `photo_rect`, the open `tool`, `crop_rect`, `selected_spot`, `selected_mask`, `mask_overlay`; see "The Develop tools"), and every control in the accessibility tree with role, name, value, number and range, enabled state, rectangle, toggled, selected, expanded and focused. |
 | `observe_library` | `offset` (0), `limit` (100, at most 1000) | A page of the current photo list in grid order: index, id, file name, kind, rating, flag, label, `thumbnail_ready`, selected, active, virtual copy, edited, missing. |
 | `screenshot` | | Renders the frame the user would see at the harness's pixel density and saves it as a PNG artifact; answers its path (relative to the run directory), pixel size, `pixels_per_point` and logical size. `unavailable` without a GPU. |
 | `image_stats` | `path` | Statistics of a PNG or JPEG on disk (see below). A relative path is taken from the run directory, so a screenshot's `path` can be passed straight on. |
@@ -71,20 +71,28 @@ An action's data can carry `warnings`: the UI was still changing when the action
 | `double_click` | `name`, `role` | Double-clicks it. |
 | `key` | `name`, `mods` | Presses and releases a key with modifiers held: `{"name": "z", "mods": ["cmd", "shift"]}` or `"mods": "cmd+shift"`. |
 | `type_text` | `text` | Types into whatever has keyboard focus (warns when nothing has). |
-| `drag` | `from`, `to` | Presses at `from`, moves in steps, releases at `to`. |
+| `drag` | `from`, `to`, `mods` | Presses at `from`, moves in steps, releases at `to`, with the modifiers held from the press to the release. With `from` and `to` the same point it is a click there. |
 | `hover` | `at` | Moves the pointer there. |
 | `set_slider` | `name`, `value` | A real drag of the named slider ending in a release, so commit-on-release behaves as for a user. The value is held to the slider's range; the answer gives the value reached and whether it is exact (within half a step). |
 | `reset_slider` | `name` | Double-clicks the slider, which puts a develop slider back to its default. |
 | `wait_idle` | `timeout_ms` (30000, at most 600000) | Runs frames until the engine reports idle and the UI has come to rest; on timeout, `timeout` with the pending work in the message. |
 | `quit` | | Finalises `manifest.json` and ends the session. |
 
-Commands for the Develop module's tools (crop, healing, masks) come with those tools.
-
 Controls are found by accessible name, exactly as `observe` lists them (`"Import…"` has a real ellipsis). `role` is optional: `Button`, `CheckBox`, `TextInput`, `Slider`, `ListBoxOption` (a grid cell, named by its file name), `RadioButton` and so on, in any case and with or without underscores. When several controls share a name, an interactive one wins over text; a remaining tie is `invalid_params`, and giving `role` settles it. A name that is not on screen is `not_found`, with similar names suggested.
 
-Keys are single characters (`"3"`, `"e"`, `"["`, `"\\"`) or names in any case: `escape`, `enter`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `page_up`, `page_down`, `left`, `right`, `up`, `down`, `f1` to `f35`. Modifiers are `cmd`, `ctrl`, `shift` and `alt`; `cmd` is the Command key on a Mac and Ctrl on Windows, and `ctrl` on a Mac is the Control key, which no Library shortcut uses. The Library's shortcuts are those of design §8.5: G grid, E loupe, C compare, N survey, 0 to 5 rating, P, X and U flags, 6 to 9 labels, arrows to move, ⇧⌘I import.
+Keys are single characters (`"3"`, `"e"`, `"["`, `"\\"`) or names in any case: `escape`, `enter`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `page_up`, `page_down`, `left`, `right`, `up`, `down`, `f1` to `f35`. Modifiers are `cmd`, `ctrl`, `shift` and `alt`; `cmd` is the Command key on a Mac and Ctrl on Windows, and `ctrl` on a Mac is the Control key, which no Library shortcut uses. The Library's shortcuts are those of design §8.5: G grid, E loupe, C compare, N survey, 0 to 5 rating, P, X and U flags, 6 to 9 labels, arrows to move, ⇧⌘I import. D develops the active photo, and ⇧⌘E opens the Export dialog from either module.
 
 Coordinates and rectangles are logical points from the top left of the window. A screenshot has `pixels_per_point` pixels per point; the harness runs a 1600 x 1000 point window at 1 pixel per point.
+
+## The Develop tools
+
+Crop, healing and masking are driven with the same commands, the way a user drives them. A key or a button of the tool strip under the histogram opens a tool: `r` or "Crop", `q` or "Healing", `m` or "Linear gradient mask", `m` with `shift` or "Radial gradient mask", `k` or "Brush mask". `enter` (or the panel's "Done") records what the tool changed as one history step, `escape` (or "Discard") drops it, and opening another tool or moving a panel's slider records the open tool's step first. `o` shows and hides the selected mask's red overlay, `x` swaps the crop's orientation, `delete` removes the selected spot or mask.
+
+The tool's panel is under the strip, and its controls are found by name like any others: "Crop aspect", "Lock aspect", "Swap", "Crop Angle", "Straighten", "Rotate left", "Rotate right", "Flip horizontal", "Flip vertical", "Reset Crop"; "Heal", "Clone", "Spot Size", "Spot Feather", "Spot Opacity", "Delete Spot"; "Mask name", "Invert mask", "Show mask overlay", "Delete Mask", "Add", "Subtract", "Remove Shape", "Mask Amount", "Mask Exposure" and the other "Mask …" sliders, "Radial Feather", "Invert radial", "Brush Size", "Brush Feather", "Brush Flow". `observe` lists what is there.
+
+Gestures on the photo are `drag`s aimed with `observe.develop`. `photo_rect` is the box the photo takes on the canvas, `[left, top, right, bottom]` in points, part of it perhaps out of view when zoomed in: the point at fractions (u, v) of the picture shown is at `left + u * width`, `top + v * height`. While the crop tool is open the canvas shows the whole frame straightened by the crop's angle, `photo_rect` is the box around it, and `crop_rect` is the crop rectangle: drag a corner or an edge of it to resize it and inside it to move it; a drag that starts outside it does nothing. With "Straighten" pressed, a drag along a line that should be level sets the angle. In the healing tool a click (a `drag` from a point to the same point) places a spot with the suggested source, and a real drag sizes one. In a mask tool a drag places a linear or radial gradient or paints with the brush; `"mods": ["alt"]` makes the brush rub out. `tool`, `selected_spot`, `selected_mask` and `mask_overlay` say what is open and chosen.
+
+`dump_render` with `current` includes what an open tool has changed, before it is recorded, so a tool's effect is measured without committing it.
 
 ## The statistics
 

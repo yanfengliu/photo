@@ -39,6 +39,8 @@ pub enum Icon {
     RotateCw,
     /// Mirror horizontally.
     Flip,
+    /// Mirror vertically.
+    FlipVertical,
     /// The crop tool.
     Crop,
     /// The healing tool.
@@ -103,7 +105,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every icon, in declaration order.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::Grid,
         Self::Loupe,
         Self::Compare,
@@ -116,6 +118,7 @@ impl Icon {
         Self::RotateCcw,
         Self::RotateCw,
         Self::Flip,
+        Self::FlipVertical,
         Self::Crop,
         Self::Heal,
         Self::LinearMask,
@@ -163,6 +166,7 @@ impl Icon {
             Self::RotateCcw => "Rotate left",
             Self::RotateCw => "Rotate right",
             Self::Flip => "Flip",
+            Self::FlipVertical => "Flip vertical",
             Self::Crop => "Crop",
             Self::Heal => "Heal",
             Self::LinearMask => "Linear mask",
