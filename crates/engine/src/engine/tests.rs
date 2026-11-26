@@ -1,8 +1,11 @@
-//! Tests that need to see inside the engine: what was decoded, and when a
-//! preview is looked at again.
+//! Tests that need to see inside the engine: what was decoded, when a
+//! preview is looked at again, and what happens while its workers are held.
+
+mod saves;
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
 use photo_core::meta::PhotoId;
@@ -12,6 +15,7 @@ use super::{Engine, EngineConfig};
 use crate::develop::worker::{Delivery, Frame, Outcome, Purpose, Work};
 use crate::develop::{CanvasView, DevelopLoad};
 use crate::import::{ImportMode, ImportRequest};
+use crate::jobs::Lane;
 use crate::looks::{BuiltInPreset, PresetKey};
 use crate::previews::PreviewState;
 use crate::stamp::Stamp;
@@ -43,6 +47,28 @@ fn engine_with(files: &[PathBuf], workers: usize) -> (TempDir, Engine, Vec<Photo
     let ids = engine.import_summary(task).unwrap().imported.clone();
     assert_eq!(ids.len(), files.len());
     (dir, engine, ids)
+}
+
+/// Keep one worker busy from now until the returned sender is used or
+/// dropped. With one worker, everything submitted meanwhile waits in the
+/// queue.
+fn hold_worker(engine: &mut Engine) -> Sender<()> {
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    engine.submit(
+        Lane::Urgent,
+        None,
+        None,
+        move |_| {
+            started.send(()).unwrap();
+            // An error is the sender dropped, which releases as well.
+            let _ = released.recv();
+            Box::new(|_: &mut Engine| false)
+        },
+        |_, _| false,
+    );
+    has_started.recv_timeout(PATIENCE).unwrap();
+    release
 }
 
 fn jpegs(count: usize, width: u32, height: u32) -> (TempDir, Vec<PathBuf>) {
