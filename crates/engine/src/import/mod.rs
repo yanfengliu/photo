@@ -10,6 +10,7 @@ mod files;
 mod record;
 mod run;
 mod scan;
+mod walk;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

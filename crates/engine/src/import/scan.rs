@@ -1,21 +1,16 @@
 //! Listing a folder's importable files in the background, for the import
 //! dialog.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use photo_core::meta::FileKind;
 use photo_core::time::DateTime;
-use rayon::prelude::*;
 
 use super::FileIssue;
-use super::files::unix_seconds;
-use crate::engine::{Context, Engine};
+use super::walk::{Found, walk};
+use crate::engine::Engine;
 use crate::jobs::Lane;
 use crate::tasks::{TaskId, TaskKind, TaskState};
-
-/// Files sent to the engine at a time while a folder is scanned.
-const CHUNK: usize = 32;
 
 /// A file a scan found that could be imported.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,15 +49,6 @@ pub struct ImportScan {
     pub finished: bool,
 }
 
-/// What a worker found about one file.
-struct Found {
-    path: PathBuf,
-    kind: FileKind,
-    bytes: u64,
-    modified: i64,
-    capture_time: Option<DateTime>,
-}
-
 impl Engine {
     /// Start listing the importable files in `root` (and its subfolders if
     /// `recursive`), skipping hidden files and folders and files of
@@ -89,7 +75,13 @@ impl Engine {
             None,
             Some(token),
             move |context| {
-                let errors = walk(&root, recursive, context, task);
+                let stop = || context.should_stop();
+                let mut post = |found: Vec<Found>| {
+                    context.progress(Box::new(move |engine: &mut Engine| {
+                        engine.scan_found(task, found)
+                    }));
+                };
+                let errors = walk(&root, recursive, &stop, &mut post);
                 Box::new(move |engine: &mut Engine| engine.scan_finished(task, errors))
             },
             move |engine, _| engine.scan_finished(task, Vec::new()),
@@ -156,105 +148,4 @@ impl Engine {
         }
         true
     }
-}
-
-/// Walk the folder, posting what is found in chunks; returns the folders
-/// that could not be listed.
-fn walk(root: &Path, recursive: bool, context: &Context<'_>, task: TaskId) -> Vec<FileIssue> {
-    let mut errors = Vec::new();
-    let mut folders = vec![root.to_path_buf()];
-    let mut pending = Vec::new();
-    while let Some(folder) = folders.pop() {
-        if context.should_stop() {
-            break;
-        }
-        let mut entries = match fs::read_dir(&folder) {
-            Ok(entries) => entries.flatten().collect::<Vec<_>>(),
-            Err(error) => {
-                errors.push(FileIssue {
-                    path: folder,
-                    message: error.to_string(),
-                });
-                continue;
-            }
-        };
-        entries.sort_by_key(|entry| entry.file_name());
-        let mut subfolders = Vec::new();
-        for entry in entries {
-            // At every entry: one folder can hold a whole card.
-            if context.should_stop() {
-                return errors;
-            }
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if is_hidden(&path, &entry) {
-                continue;
-            }
-            if file_type.is_dir() {
-                subfolders.push(path);
-            } else if let Some(kind) = photo_decode::file_kind(&path)
-                && let Ok(stat) = fs::metadata(&path)
-                && stat.is_file()
-            {
-                pending.push((path, kind, stat));
-                if pending.len() == CHUNK {
-                    post(context, task, std::mem::take(&mut pending));
-                }
-            }
-        }
-        if recursive {
-            folders.extend(subfolders.into_iter().rev());
-        }
-    }
-    if !pending.is_empty() && !context.should_stop() {
-        post(context, task, pending);
-    }
-    errors
-}
-
-/// Read the capture times of a chunk of files (in parallel) and post them;
-/// nothing is read once the scan has been cancelled.
-fn post(context: &Context<'_>, task: TaskId, files: Vec<(PathBuf, FileKind, fs::Metadata)>) {
-    if context.should_stop() {
-        return;
-    }
-    let found: Vec<Found> = files
-        .into_par_iter()
-        .map(|(path, kind, stat)| Found {
-            capture_time: photo_decode::read_metadata(&path)
-                .ok()
-                .and_then(|metadata| metadata.capture_time),
-            bytes: stat.len(),
-            modified: stat.modified().map(unix_seconds).unwrap_or(0),
-            path,
-            kind,
-        })
-        .collect();
-    context.progress(Box::new(move |engine: &mut Engine| {
-        engine.scan_found(task, found)
-    }));
-}
-
-/// Dot files everywhere, and files marked hidden on Windows.
-fn is_hidden(path: &Path, entry: &fs::DirEntry) -> bool {
-    let dotted = path
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().starts_with('.'));
-    dotted || hidden_attribute(entry)
-}
-
-#[cfg(windows)]
-fn hidden_attribute(entry: &fs::DirEntry) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-    entry
-        .metadata()
-        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
-}
-
-#[cfg(not(windows))]
-fn hidden_attribute(_entry: &fs::DirEntry) -> bool {
-    false
 }
