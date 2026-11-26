@@ -15,6 +15,7 @@ mod geometry;
 mod groups;
 mod local;
 mod local_adjust;
+mod turn;
 
 #[cfg(test)]
 mod format_tests;
@@ -35,6 +36,7 @@ pub use geometry::{Crop, CropConstraint, CropRect, LensCorrections, Orientation,
 pub use groups::{GroupSet, SettingsGroup};
 pub use local::{BrushStroke, LocalAdjustments, Mask, MaskComponent, MaskShape, Spot, SpotMode};
 pub use local_adjust::LocalAdj;
+pub use turn::Turn;
 
 /// Version of the rendering math. Stored with every photo so that a future
 /// change to the pipeline can keep old edits looking the way they did.
