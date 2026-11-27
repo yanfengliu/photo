@@ -120,7 +120,6 @@ fn a_raw_photo_shows_its_camera_preview_until_the_render_takes_its_place_at_the_
     harness.click_at(raw)?;
     let mut seen = Vec::new();
     let mut preview_rect = None;
-    let mut told = false;
     // Bounded by time, not frames: a busy machine reads the file slowly.
     let started = Instant::now();
     while started.elapsed() < PATIENCE {
@@ -132,19 +131,27 @@ fn a_raw_photo_shows_its_camera_preview_until_the_render_takes_its_place_at_the_
         if seen.last() != Some(&now.image) {
             seen.push(now.image);
         }
+        // The load indicator says the camera's preview is shown in exactly
+        // the frames in which the raw file is still being read. Whether
+        // any frame falls in that stage depends on how fast the file is
+        // read: on the Windows runner the preview and the decoded file
+        // have arrived in one frame (CI run 45922096867), which the stage
+        // history below still records.
+        let reading = *session(&harness).load_state() == DevelopLoad::EmbeddedPreview;
+        assert_eq!(
+            shows(&harness, "Camera preview: the raw file is being read"),
+            reading,
+            "the load indicator follows the load: {:?}",
+            session(&harness).load_state()
+        );
         if now.image == CanvasImage::EmbeddedPreview {
             preview_rect = harness.app().canvas_photo_rect();
-            told |= shows(&harness, "Camera preview: the raw file is being read");
             assert_eq!(harness.app().develop_zoom(), CanvasZoom::OneToOne);
         }
         if now.image == CanvasImage::Rendered && now.current {
             break;
         }
     }
-    assert!(
-        told,
-        "the load indicator said the camera's preview was shown"
-    );
     harness.app_mut().hold_results(false);
     settle(&mut harness)?;
     let at = seen

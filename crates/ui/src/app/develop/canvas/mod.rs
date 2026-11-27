@@ -401,3 +401,27 @@ fn message(ui: &Ui, area: Rect, text: &str) {
         palette::TEXT_DIM,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use photo_engine::DevelopLoad;
+
+    use super::load_note;
+
+    /// What the line above the photo says at each stage of loading. The
+    /// camera-preview stage can be shorter than a frame on a fast machine,
+    /// so its words are pinned here rather than only on screen.
+    #[test]
+    fn the_load_indicator_says_what_is_shown_at_each_stage() {
+        let says = |load: Option<&DevelopLoad>, read_only| load_note(load, read_only).0;
+        assert_eq!(says(None, false), "Loading…");
+        assert_eq!(says(Some(&DevelopLoad::Nothing), false), "Loading…");
+        assert_eq!(
+            says(Some(&DevelopLoad::EmbeddedPreview), false),
+            "Camera preview: the raw file is being read"
+        );
+        assert_eq!(says(Some(&DevelopLoad::Decoded), false), "Rendering…");
+        assert_eq!(says(Some(&DevelopLoad::Rendered), false), "");
+        assert_eq!(says(Some(&DevelopLoad::Rendered), true), "Read only");
+    }
+}
