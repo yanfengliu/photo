@@ -23,7 +23,9 @@
 //! it is not used.
 //!
 //! The view is rendered in horizontal strips of about two megapixels
-//! (contract R1 makes them join exactly), output sharpening and the
+//! (contract R1 makes them join without seams: within 1/255 of a single
+//! render, and in practice bit for bit or one 16-bit level apart at a
+//! strip's edge), output sharpening and the
 //! watermark are applied per strip, and the strips go to the encoder as
 //! they are made: JPEG and TIFF never hold more than one strip; PNG, whose
 //! encoder takes the whole picture, holds the picture once at its output

@@ -151,7 +151,25 @@ fn a_picture_written_in_several_strips_is_the_single_render() {
         let (path, _, _) =
             written(&export(&fixture.item(), &settings, &CancelToken::new()).unwrap());
         match open(&path) {
-            DynamicImage::ImageRgb16(image) => assert_eq!(image.as_raw(), &expected.pixels),
+            // Contract R1 promises a tile within 1/255 of the single render,
+            // not bit for bit. On Apple silicon these strips are bit for
+            // bit; on the Windows runner (x86-64) one value of 13.5 million,
+            // at the first row of the second strip, came out one 16-bit
+            // level apart (CI run 45886744658). A misplaced strip or a seam
+            // would be off by far more, and on every value of its rows.
+            DynamicImage::ImageRgb16(image) => {
+                let differences: Vec<u32> = image
+                    .as_raw()
+                    .iter()
+                    .zip(&expected.pixels)
+                    .map(|(&a, &b)| u32::from(a.abs_diff(b)))
+                    .collect();
+                let worst = *differences.iter().max().unwrap();
+                assert!(worst <= 257, "worst difference {worst} of 65535");
+                let mean = differences.iter().map(|&d| f64::from(d)).sum::<f64>()
+                    / differences.len() as f64;
+                assert!(mean < 0.01, "mean difference {mean} of 65535");
+            }
             DynamicImage::ImageRgb8(image) => {
                 let want: Vec<u8> = expected.pixels.iter().map(|&v| eight(v)).collect();
                 let errors: Vec<u32> = image

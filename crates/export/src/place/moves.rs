@@ -112,7 +112,7 @@ fn copy_new(
         .open(to)
     {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) if taken(&error, to) => return Ok(false),
         Err(error) => return Err(error),
     };
     // The open file is how this file is told from any other that comes to
@@ -277,5 +277,19 @@ pub(crate) fn remove_old_name(path: &Path) {
         && error.kind() != io::ErrorKind::NotFound
     {
         log::warn!("cannot remove {}: {error}", path.display());
+    }
+}
+
+/// Whether an exclusive create of `name` that failed with `error` failed
+/// because something has the name. Windows answers an exclusive create on
+/// a folder's name with "access is denied" rather than "already exists"
+/// (CI run 45886744658), so a denial counts too when something is there:
+/// the name is then taken like any other, and the overwrite policy looks at
+/// what has it and refuses a folder where it stands.
+fn taken(error: &io::Error, name: &Path) -> bool {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => true,
+        io::ErrorKind::PermissionDenied => fs::symlink_metadata(name).is_ok(),
+        _ => false,
     }
 }

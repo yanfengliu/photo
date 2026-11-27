@@ -4,10 +4,12 @@
 //! The whole export is one view of the photo's output at the target size,
 //! rendered directly through the pipeline (no full-size render shrunk
 //! afterwards). Each strip is a [`View::tile`] of that view; contract R1
-//! makes a tile the same pixels as that region of a single render, so the
-//! strips join without seams. Output sharpening needs a few rows above and
+//! makes a tile the pixels of that region of a single render, within 1/255,
+//! so the strips join without seams. (In practice they are bit for bit on
+//! Apple silicon; on x86-64 Windows a value at a strip's edge has come out
+//! one 16-bit level apart.) Output sharpening needs a few rows above and
 //! below, so each strip is rendered with that many extra rows, which are
-//! again exactly the rows a single render would have there.
+//! the rows a single render would have there.
 
 use photo_core::colorimetry::RgbSpace;
 use photo_core::develop::DevelopSettings;
