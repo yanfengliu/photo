@@ -2,11 +2,11 @@
 
 ## What this is
 
-A GPU-accelerated image viewer/editor for Windows in Rust: iced + wgpu UI with a library thumbnail grid, a detail view with GPU zoom/pan and editing (open, edit, crop, save/export), and broad format support — JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, TGA, QOI, HDR, EXR, SVG, and camera RAW via rawler.
+A catalog-based, non-destructive photo organiser and raw developer for macOS and Windows in Rust, following the Lightroom Classic workflow: a Library module (import, browse, rate, flag, label, keyword, collect, filter), a Develop module (parametric edits rendered by one CPU pipeline in linear Rec. 2020; crop, healing, masks, history, snapshots, presets), export to JPEG, PNG and TIFF, and XMP sidecars. An egui interface over a UI-less engine crate, a SQLite catalog, camera RAW via rawler.
 
 ## Local rules
 
-`docs/policies/local-rules.md` — this repo's own rules: colour-science conventions, CPU/GPU parity layers, persistence and caching contracts, and test-infrastructure rules. Read it when working in those areas. What could be gated instead is a gate, with its claim in the gate's own header and its mutation proof in `docs/learning/gate-proofs.md`.
+`docs/policies/local-rules.md` — this repo's own rules: colour science, persistence, loading, and test infrastructure. Read it when working in those areas. What could be gated instead is a gate, with its claim in the gate's own header and its mutation proof in `docs/learning/gate-proofs.md`.
 
 <!-- FLEET-CANON:BEGIN sha=114721fc6d4b generated from ../fleet/FLEET.md by `npm run sync-canon` — do not edit inside this block; this repo's own rules go in docs/policies/local-rules.md -->
 ## Fleet constitution
@@ -62,15 +62,14 @@ Read `docs/devlog/summary.md` and `docs/architecture/ARCHITECTURE.md` before sta
 
 ## Agent harness (drive the app like a user)
 
-Launch `./target/release/photo.exe --harness` and drive it with `./target/release/harnessctl.exe <cmd>` from the repo root: screenshots (real GPU frames), CPU render dumps with image statistics (clipping, percentiles, histograms), and image diffs land in a per-run artifact directory under `tmp/harness-runs/`. Storage is sandboxed by default, so sessions never touch the real library. Use it whenever a change affects rendering, edit math, or UI behavior — observe the result yourself instead of asking the human how it looks, and record findings per the documented contract. Canonical guide (protocol, command table, statistics semantics, the observe→act→measure→verify improvement loop, findings schema): `docs/guides/agent-harness.md`.
+Launch `./target/release/photo --harness` and drive it with `./target/release/harnessctl <cmd>` from the repo root (`photo.exe` and `harnessctl.exe` on Windows): screenshots (real GPU frames), CPU render dumps with image statistics (clipping, percentiles, histograms), and image diffs land in a per-run artifact directory under `tmp/harness-runs/`. Storage is sandboxed by default, so sessions never touch the real library. Use it whenever a change affects rendering, edit math, or UI behavior — observe the result yourself instead of asking the human how it looks, and record findings per the documented contract. Canonical guide (protocol, command table, statistics semantics, the observe→act→measure→verify improvement loop, findings schema): `docs/guides/agent-harness.md`.
 
 ## Invariants & boundaries
 
 - TDD for behavior changes: tests first, testing the contract (app experience and mechanisms), not the code.
 - File size: keep files under 500 LOC (hard ceiling 1000); split god-objects by lifecycle/role.
 - Recursive loop status: photo does not run `playtest:recursive` yet — the agent harness is loop step 1.
-- `src/repo.rs` is the single owner of repo-root discovery and of the harness sandbox override. Every repo-local store (`decoded-cache/`, `local-edits/`, `edited/`) resolves through it, stays a visible directory directly under the repo root, and is added to the list in `repo::tests::repo_local_dir_names`. A private copy of discovery anywhere else escapes the sandbox by construction.
-- The Rust `viewer::Uniforms` struct and `assets/shaders/image.wgsl`'s `Uniforms` describe the same bytes twice with nothing relating them; a field added, reordered or retyped goes in on both sides in the same change, with the explicit padding that keeps std140 alignment. `uniforms_layout_matches_wgsl_uniform_buffer` asserts them against each other.
+- `src/repo.rs` is the single owner of repo-root discovery and of the harness sandbox override. Every repo-local store (`catalog/`, `edited/`) resolves through it, stays a visible directory directly under the repo root, and is added to the list in `repo::tests::repo_local_dir_names`. A private copy of discovery anywhere else escapes the sandbox by construction.
 - Rotation and crop are decided once and read by four legs — preview fit, actual-size zoom, status text, and the exported file. A new consumer reads the same rotated, pixel-snapped rectangle, not the pre-rotation size.
 
 ## Conventions
