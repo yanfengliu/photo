@@ -1,5 +1,6 @@
 # Devlog Summary
 
+- 2026-11-26: **A real Sony A7R V RAW at default settings renders within about a quarter stop of the camera's own JPEG** (luma median 168 against 181; shadows and highlights within a few levels), so the +0.85 EV starting point for camera files holds on this file; the owner's XMP edit is read and applied. One camera, one low-contrast scene; highlight recovery near clipping is still untested.
 - 2026-11-26: **The Develop module and export work (v0.3.2)** — nine panels, crop, healing and masks, history, snapshots, presets, copy and paste; export to JPEG, PNG and TIFF; the agent harness. Driven end to end through the harness on synthetic photos: a PNG export matched the preview within 1 of 255 and the originals were untouched. No real camera's RAW has been through it yet. See [work unit 12](../work/12_lightroom-workflow-restart/plan.md).
 - 2026-11-26: **Export never replaces a file it has not identified** — three Codex review rounds (the Claude lane abstained for quota) closed that class wherever a move that cannot replace exists; testing on real FAT32 and exFAT images caught a first repair that never recognised its own file there. The Library's rotate now takes the crop with it, and an edit still open survives every command that reaches its photo.
 

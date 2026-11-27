@@ -4,7 +4,7 @@ A catalog-based, non-destructive photo organiser and raw developer for macOS and
 
 Photo is an independent project. It is not affiliated with Adobe, uses none of Adobe's code, artwork or names, and does not aim for pixel-identical output: slider names, ranges and `crs:` XMP values follow shared conventions, while the rendering math is its own and is documented with its real sources.
 
-> Status: under construction. Version 0.3.2 has both modules working end to end: import, organise and cull in the Library, edit in Develop, and export. It has been run on synthetic test photos only, a RAW DNG among them; no real camera's RAW files have been through this version yet. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the plan](docs/work/12_lightroom-workflow-restart/plan.md) and [the design](docs/work/12_lightroom-workflow-restart/design.md) for what is being built and in what order.
+> Status: under construction. Version 0.3.2 has both modules working end to end: import, organise and cull in the Library, edit in Develop, and export. It has been run on synthetic test photos and on one real camera RAW (a Sony A7R V file), which at default settings renders within about a quarter stop of the camera's own JPEG. The previous app (an iced GPU viewer, v0.2.10) is preserved in history at commit `94bd2cf`. See [the plan](docs/work/12_lightroom-workflow-restart/plan.md) and [the design](docs/work/12_lightroom-workflow-restart/design.md) for what is being built and in what order.
 
 ## Feature overview
 
