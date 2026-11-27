@@ -8,7 +8,7 @@ A catalog-based, non-destructive photo organiser and raw developer for macOS and
 
 `docs/policies/local-rules.md` — this repo's own rules: colour science, persistence, loading, and test infrastructure. Read it when working in those areas. What could be gated instead is a gate, with its claim in the gate's own header and its mutation proof in `docs/learning/gate-proofs.md`.
 
-<!-- FLEET-CANON:BEGIN sha=ed2864572153 generated from ../fleet/FLEET.md by `npm run sync-canon` — do not edit inside this block; this repo's own rules go in docs/policies/local-rules.md -->
+<!-- FLEET-CANON:BEGIN sha=ff12938a6284 generated from ../fleet/FLEET.md by `npm run sync-canon` — do not edit inside this block; this repo's own rules go in docs/policies/local-rules.md -->
 ## Fleet constitution
 
 Shared rules for every repo under `github/`, kept in `../fleet/FLEET.md`; `../fleet/` is fleet's checkout beside this repo's primary checkout. Where a rule gives its reason, use the reason to judge cases the rule does not name; each `[Rn]`'s history is in `../fleet/docs/canon-rationale.md`. This repo's `docs/policies/local-rules.md` may add rules but cannot change these permissions or limits. [R13]
@@ -25,7 +25,7 @@ The designated coordinator reads `../fleet/docs/skills/coordinator.md` before pl
 
 ### Sharing the machine
 
-- Other Claude and Codex sessions may be working in this checkout, and you cannot see them. Do anything beyond a quick read in your own worktree, because two sessions in one tree spoil each other's gates and commits. Never revert, overwrite or delete changes you did not make. When resuming, check which worktrees, branches and files already exist. [R7]
+- Other Claude, Codex and Antigravity sessions may be working in this checkout, and you cannot see them. Do anything beyond a quick read in your own worktree outside the fleet root (`../../worktrees/<name>`), because two sessions in one tree spoil each other's gates and commits and a worktree inside the root breaks the census gate. Never revert, overwrite or delete changes you did not make. When resuming, check which worktrees, branches and files already exist. [R7]
 - Done means merged to main and pushed: the owner archives sessions, and work left on a branch is lost. Merge on your branch, get the gates passing there, then move main, because other worktrees build on local main. Judge the merged result itself, not a worker's summary. Then remove your worktree and branch, and report where any unmerged work is. [R14]
 
 ### Doing the work
